@@ -338,13 +338,16 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
         return run.dataset.decode(output[0].tolist())
 
     elif run.template_key == "rnn":
-        return run.model.generate(
-            run.dataset.id_to_token,
-            run.dataset.token_to_id,
-            prefix=prompt_text,
-            max_new_tokens=max_new_tokens,
-            device=run.device,
-        )
+        try:
+            return run.model.generate(
+                run.dataset.id_to_token,
+                run.dataset.token_to_id,
+                prefix=prompt_text.lower(),
+                max_new_tokens=max_new_tokens,
+                device=run.device,
+            )
+        except KeyError:
+            return f"[Error: prompt contains characters not in vocabulary. Use lowercase letters only.]"
 
     return None
 

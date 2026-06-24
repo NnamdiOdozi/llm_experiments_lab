@@ -41,12 +41,12 @@ async def create_from_preset(preset_key: str):
         raise HTTPException(404, f"Preset '{preset_key}' not found")
     preset = PRESETS[preset_key]
     exp_id = await db.create_experiment(preset["name"], preset, preset_key)
-    return {"id": exp_id, "name": preset["name"], "config": preset}
+    return {"experiment_id": exp_id, "name": preset["name"], "config": preset}
 
 
 @router.get("/presets")
 async def list_presets():
-    return PRESETS
+    return [{"key": k, **v} for k, v in PRESETS.items()]
 
 
 @router.get("/{experiment_id}")

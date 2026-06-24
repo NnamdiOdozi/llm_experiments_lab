@@ -1,3 +1,8 @@
 {"step": 0, "train_loss": 4.1757, "val_loss": 4.1833}
 {"step": 50, "train_loss": 3.2549, "val_loss": 3.2571}
 {"step": 100, "train_loss": 2.9374, "val_loss": 2.9519}
+{"step": 10, "epoch": 2, "train_loss": 2.991, "val_loss": 2.9202}
+{"step": 10, "epoch": 2, "train_loss": 2.9586, "val_loss": 2.9217}
+{"step": 10, "epoch": 2, "train_loss": 2.9052, "val_loss": 2.9073}
+{"step": 10, "epoch": 2, "train_loss": 2.9366, "val_loss": 2.9166}
+{"step": 20, "epoch": 4, "train_loss": 2.8632, "val_loss": 2.8714}
