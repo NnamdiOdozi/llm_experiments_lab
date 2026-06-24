@@ -1,6 +1,7 @@
 """SQLite database for experiments and training runs."""
 
 import json
+import sqlite3
 import aiosqlite
 from pathlib import Path
 
@@ -120,3 +121,15 @@ async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
     rows = await cursor.fetchall()
     await db.close()
     return [dict(r) for r in rows]
+
+
+# ── Sync versions for use in training threads ──
+
+def sync_update_training_run(run_id: int, **kwargs):
+    """Synchronous DB update for use in background training threads."""
+    conn = sqlite3.connect(DB_PATH)
+    set_clause = ", ".join(f"{k} = ?" for k in kwargs)
+    values = list(kwargs.values()) + [run_id]
+    conn.execute(f"UPDATE training_runs SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()

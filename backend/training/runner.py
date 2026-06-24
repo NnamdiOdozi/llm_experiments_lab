@@ -19,6 +19,7 @@ from backend.training.templates import TEMPLATE_REGISTRY
 from backend.training.templates.transformer.data import CharDataset, load_tiny_shakespeare
 from backend.training.templates.rnn.data import DinosDataset, load_dinos_dataset
 from backend.training.templates.rnn.model import one_hot_encode
+from backend.db import sync_update_training_run
 from config.settings import settings
 
 
@@ -66,10 +67,22 @@ def _checkpoint_path(run_id: int) -> Path:
 
 
 def _write_metric(run: ActiveRun, metric_row: dict):
-    """Append metric to in-memory list and disk file."""
+    """Append metric to in-memory list, disk file, and database."""
     run.metrics.append(metric_row)
     with open(_metrics_path(run.run_id), "a") as f:
         f.write(json.dumps(metric_row) + "\n")
+
+    # Persist to DB
+    train_history = json.dumps([m for m in run.metrics if "train_loss" in m])
+    val_history = json.dumps([m for m in run.metrics if "val_loss" in m])
+    sync_update_training_run(
+        run.run_id,
+        current_step=run.current_step,
+        train_loss_history=train_history,
+        val_loss_history=val_history,
+        final_train_loss=metric_row.get("train_loss"),
+        final_val_loss=metric_row.get("val_loss"),
+    )
 
 
 def _save_checkpoint(run: ActiveRun, step: int):
@@ -81,16 +94,27 @@ def _save_checkpoint(run: ActiveRun, step: int):
     }, _checkpoint_path(run.run_id))
 
 
+def _set_status(run: ActiveRun, status: RunStatus):
+    """Update run status in memory and DB."""
+    run.status = status
+    updates = {"status": status.value, "current_step": run.current_step}
+    if status == RunStatus.RUNNING:
+        updates["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    elif status in (RunStatus.COMPLETED, RunStatus.FAILED):
+        updates["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    sync_update_training_run(run.run_id, **updates)
+
+
 def _check_pause(run: ActiveRun, step: int) -> bool:
     """Handle pause/stop. Returns True if run should terminate."""
     if run.pause_requested.is_set():
-        run.status = RunStatus.PAUSED
+        _set_status(run, RunStatus.PAUSED)
         _save_checkpoint(run, step)
         while run.pause_requested.is_set() and not run.stop_flag:
             time.sleep(0.1)
         if run.stop_flag:
             return True
-        run.status = RunStatus.RUNNING
+        _set_status(run, RunStatus.RUNNING)
     return run.stop_flag
 
 
@@ -122,7 +146,7 @@ def _train_transformer(run: ActiveRun):
     run.model = template["build_model"](config).to(device)
     run.optimizer = torch.optim.AdamW(run.model.parameters(), lr=train_cfg["learning_rate"])
 
-    run.status = RunStatus.RUNNING
+    _set_status(run, RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = train_cfg.get("eval_iters", 200)
@@ -148,7 +172,7 @@ def _train_transformer(run: ActiveRun):
         run.optimizer.step()
         run.current_step = step
 
-    run.status = RunStatus.COMPLETED
+    _set_status(run, RunStatus.COMPLETED)
     _save_checkpoint(run, max_iters)
 
 
@@ -181,7 +205,7 @@ def _train_rnn(run: ActiveRun):
     run.optimizer = torch.optim.Adam(run.model.parameters(), lr=train_cfg["learning_rate"])
     criterion = nn.CrossEntropyLoss().to(device)
 
-    run.status = RunStatus.RUNNING
+    _set_status(run, RunStatus.RUNNING)
     epochs = train_cfg.get("epochs", 50)
     clip = train_cfg.get("clip", 5)
     print_every = train_cfg.get("print_every", 10)
@@ -234,7 +258,7 @@ def _train_rnn(run: ActiveRun):
                     "val_loss": round(float(np.mean(val_losses)), 4),
                 })
 
-    run.status = RunStatus.COMPLETED
+    _set_status(run, RunStatus.COMPLETED)
     _save_checkpoint(run, counter)
 
 
@@ -254,7 +278,7 @@ def _train_loop(run: ActiveRun):
             raise ValueError(f"Unknown template: {run.template_key}")
         dispatcher(run)
     except Exception as e:
-        run.status = RunStatus.FAILED
+        _set_status(run, RunStatus.FAILED)
         run.metrics.append({"error": str(e)})
 
 
