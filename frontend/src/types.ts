@@ -17,7 +17,7 @@ export interface ExperimentConfig {
 export interface Experiment {
   id: number;
   name: string;
-  config_json: string;
+  config: ExperimentConfig;
   notes_md: string;
   preset_key: string | null;
   created_at: string;

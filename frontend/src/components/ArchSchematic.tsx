@@ -39,10 +39,10 @@ function RnnDiagram({ config }: { config: ExperimentConfig }) {
       <div style={{ color: "var(--text-dim)" }}>Input Characters (one-hot)</div>
       <div>  |</div>
       <div style={{ color: "var(--accent)" }}>
-        LSTM ({String(m.n_layers || 2)} layers, hidden={String(m.hidden_size || 128)})
+        LSTM ({String(m.n_layers || 2)} layers, hidden={String(m.n_hidden || 128)})
       </div>
       <div>  |</div>
-      <div style={{ color: "var(--yellow)" }}>Dropout ({String(m.drop_prob || 0.3)})</div>
+      <div style={{ color: "var(--yellow)" }}>Dropout ({String(m.dropout || 0.3)})</div>
       <div>  |</div>
       <div style={{ color: "var(--green)" }}>Linear → Logits (vocab_size)</div>
     </div>

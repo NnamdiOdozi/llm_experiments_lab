@@ -24,7 +24,7 @@ export function fetchExperiment(id: number) {
 }
 
 export function listExperiments() {
-  return api<import("../types").Experiment[]>("/experiments/");
+  return api<import("../types").Experiment[]>("/experiments");
 }
 
 export function startTraining(experimentId: number, device: string = "cpu") {
@@ -59,6 +59,20 @@ export function fetchRunStatus(runId: number) {
 
 export function fetchMetrics(runId: number) {
   return api<import("../types").MetricRow[]>(`/training/${runId}/metrics`);
+}
+
+export function updateConfig(experimentId: number, config: import("../types").ExperimentConfig) {
+  return api<{ ok: boolean }>(`/experiments/${experimentId}/config`, {
+    method: "PATCH",
+    body: JSON.stringify({ config }),
+  });
+}
+
+export function updateNotes(experimentId: number, notes_md: string) {
+  return api<{ ok: boolean }>(`/experiments/${experimentId}/notes`, {
+    method: "PATCH",
+    body: JSON.stringify({ notes_md }),
+  });
 }
 
 export function fetchCode(experimentId: number) {

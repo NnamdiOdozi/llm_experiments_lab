@@ -8,6 +8,7 @@ import LossChart from "./components/LossChart";
 import TrainingControls from "./components/TrainingControls";
 import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
+import ExperimentNotes from "./components/ExperimentNotes";
 import {
   startTraining,
   pauseTraining,
@@ -15,6 +16,7 @@ import {
   stopTraining,
   fetchRunStatus,
   fetchMetrics,
+  updateConfig,
 } from "./hooks/useApi";
 
 export default function App() {
@@ -26,6 +28,17 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function handleConfigChange(cfg: ExperimentConfig) {
+    setConfig(cfg);
+    if (configTimerRef.current) clearTimeout(configTimerRef.current);
+    if (experimentId != null) {
+      configTimerRef.current = setTimeout(() => {
+        updateConfig(experimentId, cfg);
+      }, 500);
+    }
+  }
 
   function handlePresetSelect(expId: number, cfg: ExperimentConfig) {
     setExperimentId(expId);
@@ -124,7 +137,7 @@ export default function App() {
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <ConfigPanel
             config={config}
-            onChange={setConfig}
+            onChange={handleConfigChange}
             disabled={runStatus?.status === "running"}
           />
           <TrainingControls
@@ -138,6 +151,7 @@ export default function App() {
             onDeviceChange={setDevice}
           />
           <ExportBar experimentId={experimentId} />
+          <ExperimentNotes experimentId={experimentId} />
         </div>
 
         {/* Main area */}

@@ -1,0 +1,6 @@
+{"step": 10, "train_loss": 3.2533, "val_loss": 3.2794}
+{"step": 20, "train_loss": 2.9334, "val_loss": 2.9532}
+{"step": 30, "train_loss": 2.7591, "val_loss": 2.7914}
+{"step": 40, "train_loss": 2.6717, "val_loss": 2.696}
+{"step": 50, "train_loss": 2.6303, "val_loss": 2.6407}
+{"step": 60, "train_loss": 2.568, "val_loss": 2.594}

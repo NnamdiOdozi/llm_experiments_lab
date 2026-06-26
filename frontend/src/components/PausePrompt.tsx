@@ -11,7 +11,16 @@ export default function PausePrompt({ runId, paused }: Props) {
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
 
-  if (!paused) return null;
+  if (!paused) {
+    return (
+      <div className="panel" style={{ opacity: 0.5 }}>
+        <h3>Prompt Model</h3>
+        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          Pause training to prompt the model and see its current output quality.
+        </p>
+      </div>
+    );
+  }
 
   async function handleSubmit() {
     if (!prompt.trim()) return;

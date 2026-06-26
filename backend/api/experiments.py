@@ -21,6 +21,10 @@ class UpdateNotesRequest(BaseModel):
     notes_md: str
 
 
+class UpdateConfigRequest(BaseModel):
+    config: dict
+
+
 @router.get("")
 async def list_experiments():
     experiments = await db.list_experiments()
@@ -60,6 +64,22 @@ async def get_experiment(experiment_id: int):
     exp["config"] = json.loads(exp["config_json"])
     del exp["config_json"]
     return exp
+
+
+@router.patch("/{experiment_id}/config")
+async def update_config(experiment_id: int, req: UpdateConfigRequest):
+    exp = await db.get_experiment(experiment_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+    db_conn = await db.get_db()
+    await db_conn.execute(
+        "UPDATE experiments SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (json.dumps(req.config), experiment_id),
+    )
+    await db_conn.commit()
+    await db_conn.close()
+    audit_log.info("Config updated: experiment_id=%d", experiment_id)
+    return {"ok": True}
 
 
 @router.patch("/{experiment_id}/notes")

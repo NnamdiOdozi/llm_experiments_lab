@@ -58,6 +58,9 @@ export default function TrainingControls({
       {runStatus && (
         <div style={{ marginBottom: 12 }}>
           {statusTag(runStatus.status)}
+          <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>
+            {device.toUpperCase()}
+          </span>
           <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 10 }}>
             Step {runStatus.current_step} / {runStatus.total_steps}
             {runStatus.elapsed_seconds > 0 && ` — ${formatElapsed(runStatus.elapsed_seconds)}`}
