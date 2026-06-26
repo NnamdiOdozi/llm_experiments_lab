@@ -159,7 +159,7 @@ def _train_transformer(run: ActiveRun):
     _set_status(run, RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
-    num_eval_iters = train_cfg.get("eval_iters", 50)
+    num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
 
     torch.manual_seed(1337)
 

@@ -19,8 +19,8 @@ BASELINE_CONFIG = {
         "batch_size": 64,
         "learning_rate": 3e-4,
         "max_iters": 5000,
-        "eval_interval": 500,
-        "eval_iters": 200,
+        "eval_interval": 100,
+        "eval_iters": 10,
     },
     "dataset": "tiny_shakespeare",
 }
@@ -42,8 +42,8 @@ ROPE_CONFIG = {
         "batch_size": 64,
         "learning_rate": 3e-4,
         "max_iters": 5000,
-        "eval_interval": 500,
-        "eval_iters": 200,
+        "eval_interval": 100,
+        "eval_iters": 10,
     },
     "dataset": "tiny_shakespeare",
 }
@@ -65,8 +65,8 @@ LR_SENSITIVITY_CONFIG = {
         "batch_size": 64,
         "learning_rate": 3e-3,
         "max_iters": 5000,
-        "eval_interval": 500,
-        "eval_iters": 200,
+        "eval_interval": 100,
+        "eval_iters": 10,
     },
     "dataset": "tiny_shakespeare",
 }
