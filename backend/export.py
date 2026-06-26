@@ -14,6 +14,7 @@ from backend.training.templates.transformer.model import (
     TinyTransformerLM,
 )
 from backend.training.templates.rnn.model import CharRNN
+from config.settings import settings
 
 
 def _transformer_script(config: dict) -> str:
@@ -22,12 +23,6 @@ def _transformer_script(config: dict) -> str:
     t = config["training"]
     pos = m.get("pos_encoding", "learned")
     use_rope = pos == "rope"
-
-    # Read actual template source files
-    from pathlib import Path
-    template_dir = Path(__file__).parent / "training" / "templates" / "transformer"
-    model_source = (template_dir / "model.py").read_text()
-    data_source = (template_dir / "data.py").read_text()
 
     script = f'''"""Tiny Transformer LM — exported from LLM Experiments Lab.
 
@@ -42,7 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-torch.manual_seed(1337)
+torch.manual_seed({settings.random_seed})
 
 # ── Hyperparameters (from your experiment config) ──
 BLOCK_SIZE = {m["block_size"]}
@@ -56,11 +51,13 @@ LEARNING_RATE = {t["learning_rate"]}
 MAX_ITERS = {t["max_iters"]}
 EVAL_INTERVAL = {t["eval_interval"]}
 EVAL_ITERS = {t.get("eval_iters", 200)}
+GENERATE_TOKENS = 500
+TRAIN_VAL_SPLIT = 0.9
 
 
 # ── Data ──
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-text = requests.get(url, timeout=30).text
+url = "{settings.shakespeare_url}"
+text = requests.get(url, timeout={settings.http_timeout}).text
 chars = sorted(set(text))
 vocab_size = len(chars)
 stoi = {{ch: i for i, ch in enumerate(chars)}}
@@ -70,7 +67,7 @@ encode = lambda s: [stoi[c] for c in s]
 decode = lambda ids: "".join(itos[int(i)] for i in ids)
 
 data = torch.tensor(encode(text), dtype=torch.long)
-n_train = int(0.9 * len(data))
+n_train = int(TRAIN_VAL_SPLIT * len(data))
 train_data, val_data = data[:n_train], data[n_train:]
 
 
@@ -232,7 +229,7 @@ for it in range(MAX_ITERS + 1):
 # ── Generate ──
 ctx = torch.zeros((1, 1), dtype=torch.long, device=device)
 print("\\n--- Generated text ---")
-print(decode(model.generate(ctx, 500)[0].tolist()))
+print(decode(model.generate(ctx, GENERATE_TOKENS)[0].tolist()))
 '''
 
     return script
@@ -255,7 +252,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-torch.manual_seed(1337)
+torch.manual_seed({settings.random_seed})
 
 # ── Hyperparameters (from your experiment config) ──
 N_HIDDEN = {m.get("n_hidden", 256)}
@@ -266,6 +263,9 @@ LEARNING_RATE = {t["learning_rate"]}
 EPOCHS = {t.get("epochs", 50)}
 SEQ_LEN = {t.get("seq_len", 50)}
 CLIP = {t.get("clip", 5)}
+TRAIN_VAL_SPLIT = 0.8
+MAX_NEW_TOKENS = 200
+NUM_SAMPLES = 10
 
 
 # ── Data ──
@@ -307,7 +307,7 @@ class DinosDataset(torch.utils.data.Dataset):
 dataset = DinosDataset(DATA_PATH, SEQ_LEN)
 vocab_size = dataset.vocab_size
 n_total = len(dataset)
-n_train = int(0.8 * n_total)
+n_train = int(TRAIN_VAL_SPLIT * n_total)
 train_loader = torch.utils.data.DataLoader(
     torch.utils.data.Subset(dataset, range(n_train)),
     batch_size=BATCH_SIZE, shuffle=True, drop_last=True,
@@ -389,7 +389,7 @@ for epoch in range(EPOCHS):
 
 
 # ── Generate ──
-def sample(prefix="<", size=200):
+def sample(prefix="<", size=MAX_NEW_TOKENS):
     model.train(False)
     chars = list(prefix)
     h = model.init_hidden(1, device)
@@ -414,7 +414,7 @@ def sample(prefix="<", size=200):
     return "".join(chars)
 
 print("\\n--- Generated names ---")
-for _ in range(10):
+for _ in range(NUM_SAMPLES):
     print(sample())
 '''
 
@@ -446,7 +446,7 @@ def build_notebook(config: dict) -> str:
         f"# {config.get('name', 'LLM Experiments Lab Export')}\n\n"
         f"**Template:** {config.get('template', 'transformer')}\n\n"
         f"**Config:**\n```json\n{json.dumps(config, indent=2)}\n```\n\n"
-        f"Exported from [LLM Experiments Lab](https://github.com/NnamdiOdozi/llm-experiments-lab)."
+        f"Exported from [LLM Experiments Lab]({settings.github_url})."
     ))
 
     # Split script into logical sections for separate cells

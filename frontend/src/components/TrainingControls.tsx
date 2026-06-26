@@ -85,8 +85,8 @@ export default function TrainingControls({
 
       <div style={{ display: "flex", gap: 8 }}>
         {(!status || status === "completed" || status === "failed") && (
-          <button className="btn-primary" onClick={onStart} disabled={loading}>
-            Start Training
+          <button className="btn-primary" onClick={() => { if (!loading) onStart(); }} disabled={loading}>
+            {loading ? "Starting…" : "Start Training"}
           </button>
         )}
         {status === "running" && (

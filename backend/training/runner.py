@@ -98,6 +98,7 @@ def _save_checkpoint(run: ActiveRun, step: int):
 
 def _set_status(run: ActiveRun, status: RunStatus):
     """Update run status in memory and DB."""
+    old_status = run.status.value
     run.status = status
     updates = {"status": status.value, "current_step": run.current_step}
     if status == RunStatus.RUNNING:
@@ -107,7 +108,7 @@ def _set_status(run: ActiveRun, status: RunStatus):
     sync_update_training_run(run.run_id, **updates)
     training_log.info(
         "STATUS run_id=%d %s → %s step=%d",
-        run.run_id, "?", status.value, run.current_step,
+        run.run_id, old_status, status.value, run.current_step,
     )
 
 
@@ -163,7 +164,7 @@ def _train_transformer(run: ActiveRun):
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
 
-    torch.manual_seed(1337)
+    torch.manual_seed(settings.random_seed)
 
     for step in range(run.current_step, max_iters + 1):
         run.current_step = step
@@ -226,7 +227,7 @@ def _train_rnn(run: ActiveRun):
     print_every = train_cfg.get("print_every", 10)
     n_chars = dataset.vocab_size
 
-    torch.manual_seed(1337)
+    torch.manual_seed(settings.random_seed)
     counter = 0
 
     for epoch in range(epochs):

@@ -3,9 +3,10 @@
 import json
 import sqlite3
 import aiosqlite
-from pathlib import Path
 
-DB_PATH = Path("lab.db")
+from config.settings import settings
+
+DB_PATH = settings.database_path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiments (

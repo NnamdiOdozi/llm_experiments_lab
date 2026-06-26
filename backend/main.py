@@ -11,6 +11,7 @@ from backend.api.experiments import router as experiments_router
 from backend.api.training import router as training_router
 from backend.api.codegen import router as code_router
 from backend.logging_config import setup_logging, request_log, error_log, session_log
+from config.settings import settings
 
 
 @asynccontextmanager
@@ -31,7 +32,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

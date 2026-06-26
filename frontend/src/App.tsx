@@ -69,8 +69,14 @@ export default function App() {
   }, [runId, pollStatus]);
 
   async function handleStart() {
-    if (experimentId == null) return;
+    if (experimentId == null || !config) return;
     setLoading(true);
+    // Flush any pending config debounce before starting
+    if (configTimerRef.current) {
+      clearTimeout(configTimerRef.current);
+      configTimerRef.current = null;
+      await updateConfig(experimentId, config);
+    }
     const { run_id } = await startTraining(experimentId, device);
     setRunId(run_id);
     setLoading(false);

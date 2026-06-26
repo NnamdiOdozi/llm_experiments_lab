@@ -215,7 +215,8 @@ doubleword_evals/
 
 # Scrap files
 tmp*
-temp*
+temp_*
+temp.*
 chatgpt*
 
 # Archives
