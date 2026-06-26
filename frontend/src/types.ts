@@ -46,6 +46,7 @@ export interface RunStatus {
   total_steps: number;
   metrics_count: number;
   template: string;
+  elapsed_seconds: number;
 }
 
 export interface MetricRow {

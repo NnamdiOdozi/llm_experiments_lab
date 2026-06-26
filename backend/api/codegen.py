@@ -16,7 +16,19 @@ TEMPLATE_DIRS = {
     "rnn": Path(__file__).parent.parent / "training" / "templates" / "rnn",
 }
 
-CODE_FILES = ["model.py", "data.py"]
+TEMPLATE_FILES = ["model.py", "data.py"]
+
+BACKEND_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = BACKEND_ROOT.parent
+
+SHARED_FILES = {
+    "runner.py": BACKEND_ROOT / "training" / "runner.py",
+    "presets.py": PROJECT_ROOT / "config" / "presets.py",
+    "settings.py": PROJECT_ROOT / "config" / "settings.py",
+    "export.py": BACKEND_ROOT / "export.py",
+    "main.py": BACKEND_ROOT / "main.py",
+    "db.py": BACKEND_ROOT / "db.py",
+}
 
 
 async def _get_config(experiment_id: int) -> dict:
@@ -36,10 +48,14 @@ async def get_template_code(experiment_id: int):
         raise HTTPException(404, f"Template '{template_key}' not found")
 
     files = {}
-    for filename in CODE_FILES:
+    for filename in TEMPLATE_FILES:
         filepath = template_dir / filename
         if filepath.exists():
             files[filename] = filepath.read_text()
+
+    for label, filepath in SHARED_FILES.items():
+        if filepath.exists():
+            files[label] = filepath.read_text()
 
     return {"experiment_id": experiment_id, "template": template_key, "files": files}
 

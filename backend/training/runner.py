@@ -49,6 +49,7 @@ class ActiveRun:
     stop_flag: bool = False
     thread: threading.Thread | None = None
     device: str = "cpu"
+    started_at: float = 0.0
 
 
 # Global registry of active runs (in-memory, Tier 1 only)
@@ -154,31 +155,33 @@ def _train_transformer(run: ActiveRun):
     run.model = template["build_model"](config).to(device)
     run.optimizer = torch.optim.AdamW(run.model.parameters(), lr=train_cfg["learning_rate"])
 
+    run.started_at = time.time()
     _set_status(run, RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
-    num_eval_iters = train_cfg.get("eval_iters", 200)
+    num_eval_iters = train_cfg.get("eval_iters", 50)
 
     torch.manual_seed(1337)
 
     for step in range(run.current_step, max_iters + 1):
+        run.current_step = step
+
         if _check_pause(run, step):
             return
-
-        if step % log_interval == 0:
-            losses = _transformer_eval(run.model, run.dataset, device, num_eval_iters)
-            _write_metric(run, {
-                "step": step,
-                "train_loss": round(losses["train"], 4),
-                "val_loss": round(losses["val"], 4),
-            })
 
         xb, yb = run.dataset.get_batch("train", device)
         _, loss = run.model(xb, yb)
         run.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         run.optimizer.step()
-        run.current_step = step
+
+        if step > 0 and step % log_interval == 0:
+            losses = _transformer_eval(run.model, run.dataset, device, num_eval_iters)
+            _write_metric(run, {
+                "step": step,
+                "train_loss": round(losses["train"], 4),
+                "val_loss": round(losses["val"], 4),
+            })
 
     _set_status(run, RunStatus.COMPLETED)
     _save_checkpoint(run, max_iters)
@@ -213,6 +216,7 @@ def _train_rnn(run: ActiveRun):
     run.optimizer = torch.optim.Adam(run.model.parameters(), lr=train_cfg["learning_rate"])
     criterion = nn.CrossEntropyLoss().to(device)
 
+    run.started_at = time.time()
     _set_status(run, RunStatus.RUNNING)
     epochs = train_cfg.get("epochs", 50)
     clip = train_cfg.get("clip", 5)
@@ -227,6 +231,7 @@ def _train_rnn(run: ActiveRun):
 
         for x, targets in train_loader:
             counter += 1
+            run.current_step = counter
 
             if _check_pause(run, counter):
                 return
@@ -242,8 +247,6 @@ def _train_rnn(run: ActiveRun):
             loss.backward()
             nn.utils.clip_grad_norm_(run.model.parameters(), clip)
             run.optimizer.step()
-            run.current_step = counter
-
             if counter % print_every == 0:
                 # Validation
                 val_h = run.model.init_hidden(batch_size, device)
@@ -370,6 +373,7 @@ def get_run_status(run_id: int) -> dict | None:
     if run is None:
         return None
     total = run.config["training"].get("max_iters", run.config["training"].get("epochs", 0) * 100)
+    elapsed = time.time() - run.started_at if run.started_at > 0 else 0
     return {
         "run_id": run.run_id,
         "status": run.status.value,
@@ -377,4 +381,5 @@ def get_run_status(run_id: int) -> dict | None:
         "total_steps": total,
         "metrics_count": len(run.metrics),
         "template": run.template_key,
+        "elapsed_seconds": round(elapsed, 1),
     }

@@ -14,6 +14,12 @@ function statusTag(status: string) {
   return <span className={cls}>{status}</span>;
 }
 
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
 function progressBar(current: number, total: number) {
   const pct = total > 0 ? Math.min((current / total) * 100, 100) : 0;
   return (
@@ -50,6 +56,7 @@ export default function TrainingControls({
           {statusTag(runStatus.status)}
           <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 10 }}>
             Step {runStatus.current_step} / {runStatus.total_steps}
+            {runStatus.elapsed_seconds > 0 && ` — ${formatElapsed(runStatus.elapsed_seconds)}`}
           </span>
           {progressBar(runStatus.current_step, runStatus.total_steps)}
         </div>
