@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from backend import db
+from backend.logging_config import training_log, prompt_log
 from backend.training.runner import (
     active_runs,
     start_run,
@@ -39,6 +40,10 @@ async def start_training(req: StartRunRequest):
     config = json.loads(exp["config_json"])
     run_id = await db.create_training_run(req.experiment_id, req.device)
     start_run(run_id, req.experiment_id, config, req.device)
+    training_log.info(
+        "START run_id=%d experiment_id=%d device=%s template=%s",
+        run_id, req.experiment_id, req.device, config.get("template", "transformer"),
+    )
 
     return {"run_id": run_id, "status": "queued"}
 
@@ -47,6 +52,7 @@ async def start_training(req: StartRunRequest):
 async def pause_training(run_id: int):
     if not pause_run(run_id):
         raise HTTPException(400, "Run not found or not running")
+    training_log.info("PAUSE requested run_id=%d", run_id)
     return {"run_id": run_id, "status": "pausing"}
 
 
@@ -54,6 +60,7 @@ async def pause_training(run_id: int):
 async def resume_training(run_id: int):
     if not resume_run(run_id):
         raise HTTPException(400, "Run not found or not paused")
+    training_log.info("RESUME run_id=%d", run_id)
     return {"run_id": run_id, "status": "resuming"}
 
 
@@ -61,6 +68,7 @@ async def resume_training(run_id: int):
 async def stop_training(run_id: int):
     if not stop_run(run_id):
         raise HTTPException(400, "Run not found")
+    training_log.info("STOP run_id=%d", run_id)
     return {"run_id": run_id, "status": "stopping"}
 
 
@@ -69,6 +77,10 @@ async def prompt_model(run_id: int, req: PromptRequest):
     result = prompt_paused_model(run_id, req.prompt, req.max_new_tokens)
     if result is None:
         raise HTTPException(400, "Run not paused or model not available")
+    prompt_log.info(
+        "run_id=%d prompt='%s' max_tokens=%d output_len=%d",
+        run_id, req.prompt[:50], req.max_new_tokens, len(result),
+    )
     return {"run_id": run_id, "prompt": req.prompt, "output": result}
 
 

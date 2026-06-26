@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend import db
+from backend.logging_config import audit_log
 from config.presets import PRESETS
 
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
@@ -32,6 +33,7 @@ async def list_experiments():
 @router.post("")
 async def create_experiment(req: CreateExperimentRequest):
     exp_id = await db.create_experiment(req.name, req.config, req.preset_key)
+    audit_log.info("Experiment created: id=%d name='%s' preset=%s", exp_id, req.name, req.preset_key)
     return {"id": exp_id, "name": req.name}
 
 
@@ -41,6 +43,7 @@ async def create_from_preset(preset_key: str):
         raise HTTPException(404, f"Preset '{preset_key}' not found")
     preset = PRESETS[preset_key]
     exp_id = await db.create_experiment(preset["name"], preset, preset_key)
+    audit_log.info("Experiment from preset: id=%d preset='%s' template=%s", exp_id, preset_key, preset["template"])
     return {"experiment_id": exp_id, "name": preset["name"], "config": preset}
 
 
@@ -71,4 +74,5 @@ async def update_notes(experiment_id: int, req: UpdateNotesRequest):
     )
     await db_conn.commit()
     await db_conn.close()
+    audit_log.info("Notes updated: experiment_id=%d len=%d", experiment_id, len(req.notes_md))
     return {"ok": True}

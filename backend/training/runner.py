@@ -20,6 +20,7 @@ from backend.training.templates.transformer.data import CharDataset, load_tiny_s
 from backend.training.templates.rnn.data import DinosDataset, load_dinos_dataset
 from backend.training.templates.rnn.model import one_hot_encode
 from backend.db import sync_update_training_run
+from backend.logging_config import training_log, error_log
 from config.settings import settings
 
 
@@ -103,17 +104,24 @@ def _set_status(run: ActiveRun, status: RunStatus):
     elif status in (RunStatus.COMPLETED, RunStatus.FAILED):
         updates["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     sync_update_training_run(run.run_id, **updates)
+    training_log.info(
+        "STATUS run_id=%d %s → %s step=%d",
+        run.run_id, "?", status.value, run.current_step,
+    )
 
 
 def _check_pause(run: ActiveRun, step: int) -> bool:
     """Handle pause/stop. Returns True if run should terminate."""
     if run.pause_requested.is_set():
+        training_log.info("PAUSING run_id=%d at step=%d — saving checkpoint", run.run_id, step)
         _set_status(run, RunStatus.PAUSED)
         _save_checkpoint(run, step)
         while run.pause_requested.is_set() and not run.stop_flag:
             time.sleep(0.1)
         if run.stop_flag:
+            training_log.info("STOPPED (from pause) run_id=%d at step=%d", run.run_id, step)
             return True
+        training_log.info("RESUMING run_id=%d from step=%d", run.run_id, step)
         _set_status(run, RunStatus.RUNNING)
     return run.stop_flag
 
@@ -280,6 +288,11 @@ def _train_loop(run: ActiveRun):
     except Exception as e:
         _set_status(run, RunStatus.FAILED)
         run.metrics.append({"error": str(e)})
+        error_log.error(
+            "Training FAILED run_id=%d template=%s step=%d: %s",
+            run.run_id, run.template_key, run.current_step, e,
+            exc_info=True,
+        )
 
 
 def start_run(run_id: int, experiment_id: int, config: dict, device: str = "cpu") -> ActiveRun:

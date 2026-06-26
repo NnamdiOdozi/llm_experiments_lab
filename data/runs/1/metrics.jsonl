@@ -6,3 +6,4 @@
 {"step": 10, "epoch": 2, "train_loss": 2.9052, "val_loss": 2.9073}
 {"step": 10, "epoch": 2, "train_loss": 2.9366, "val_loss": 2.9166}
 {"step": 20, "epoch": 4, "train_loss": 2.8632, "val_loss": 2.8714}
+{"step": 10, "epoch": 2, "train_loss": 2.975, "val_loss": 2.9286}
