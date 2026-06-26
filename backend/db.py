@@ -32,9 +32,35 @@ CREATE TABLE IF NOT EXISTS training_runs (
     current_step INTEGER DEFAULT 0,
     started_at TIMESTAMP,
     completed_at TIMESTAMP,
+    config_snapshot TEXT,
+    seed INTEGER,
+    template_key TEXT,
+    dataset_name TEXT,
+    checkpoint_path TEXT,
+    metrics_path TEXT,
+    error_message TEXT,
+    device_name TEXT,
+    param_count INTEGER,
+    package_versions TEXT,
+    git_commit TEXT,
     FOREIGN KEY (experiment_id) REFERENCES experiments(id)
 );
 """
+
+# Columns added after initial schema — ALTER TABLE for existing DBs
+_MIGRATIONS = [
+    ("config_snapshot", "TEXT"),
+    ("seed", "INTEGER"),
+    ("template_key", "TEXT"),
+    ("dataset_name", "TEXT"),
+    ("checkpoint_path", "TEXT"),
+    ("metrics_path", "TEXT"),
+    ("error_message", "TEXT"),
+    ("device_name", "TEXT"),
+    ("param_count", "INTEGER"),
+    ("package_versions", "TEXT"),
+    ("git_commit", "TEXT"),
+]
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -48,6 +74,12 @@ async def get_db() -> aiosqlite.Connection:
 async def init_db():
     db = await get_db()
     await db.executescript(SCHEMA)
+    # Apply migrations for existing DBs (ALTER TABLE is idempotent with IF NOT EXISTS check)
+    for col_name, col_type in _MIGRATIONS:
+        try:
+            await db.execute(f"ALTER TABLE training_runs ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass  # Column already exists
     await db.commit()
     await db.close()
 
@@ -82,11 +114,15 @@ async def list_experiments() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def create_training_run(experiment_id: int, device: str = "cpu") -> int:
+async def create_training_run(experiment_id: int, device: str = "cpu", **extra) -> int:
+    cols = ["experiment_id", "device", "status"] + list(extra.keys())
+    placeholders = ", ".join("?" for _ in cols)
+    col_names = ", ".join(cols)
+    values = [experiment_id, device, "queued"] + list(extra.values())
     db = await get_db()
     cursor = await db.execute(
-        "INSERT INTO training_runs (experiment_id, device, status) VALUES (?, ?, 'queued')",
-        (experiment_id, device),
+        f"INSERT INTO training_runs ({col_names}) VALUES ({placeholders})",
+        values,
     )
     await db.commit()
     row_id = cursor.lastrowid

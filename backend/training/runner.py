@@ -3,7 +3,10 @@
 Dispatches to the correct template (transformer or rnn) based on config["template"].
 """
 
+import datetime
+import importlib.metadata
 import json
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,12 +27,48 @@ from backend.logging_config import training_log, error_log
 from config.settings import settings
 
 
+def _get_device_name(device: str) -> str:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return torch.cuda.get_device_name(0)
+    return "cpu"
+
+
+def _get_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _get_package_versions() -> dict:
+    pkgs = ["torch", "numpy", "fastapi", "uvicorn", "pydantic"]
+    versions = {}
+    for pkg in pkgs:
+        try:
+            versions[pkg] = importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            pass
+    return versions
+
+
+def _param_count(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
+
+
 class RunStatus(str, Enum):
     QUEUED = "queued"
+    STARTING = "starting"
     RUNNING = "running"
+    PAUSE_REQUESTED = "pause_requested"
+    CHECKPOINTING = "checkpointing"
     PAUSED = "paused"
+    RESUMING = "resuming"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -70,6 +109,7 @@ def _checkpoint_path(run_id: int) -> Path:
 
 def _write_metric(run: ActiveRun, metric_row: dict):
     """Append metric to in-memory list, disk file, and database."""
+    metric_row["timestamp"] = datetime.datetime.now().isoformat()
     run.metrics.append(metric_row)
     with open(_metrics_path(run.run_id), "a") as f:
         f.write(json.dumps(metric_row) + "\n")
@@ -85,6 +125,27 @@ def _write_metric(run: ActiveRun, metric_row: dict):
         final_train_loss=metric_row.get("train_loss"),
         final_val_loss=metric_row.get("val_loss"),
     )
+
+
+def _write_run_meta(run: ActiveRun, template_key: str, dataset_name: str):
+    """Write run_meta.json to run folder — self-contained run identity."""
+    meta = {
+        "run_id": run.run_id,
+        "experiment_id": run.experiment_id,
+        "template": template_key,
+        "dataset": dataset_name,
+        "device": run.device,
+        "started_at": datetime.datetime.now().isoformat(),
+        "seed": settings.random_seed,
+        "param_count": _param_count(run.model),
+        "config": run.config,
+        "package_versions": _get_package_versions(),
+        "git_commit": _get_git_commit(),
+    }
+    meta_path = settings.data_dir / "runs" / str(run.run_id) / "run_meta.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
 
 
 def _save_checkpoint(run: ActiveRun, step: int):
@@ -115,16 +176,23 @@ def _set_status(run: ActiveRun, status: RunStatus):
 def _check_pause(run: ActiveRun, step: int) -> bool:
     """Handle pause/stop. Returns True if run should terminate."""
     if run.pause_requested.is_set():
+        _set_status(run, RunStatus.PAUSE_REQUESTED)
         training_log.info("PAUSING run_id=%d at step=%d — saving checkpoint", run.run_id, step)
-        _set_status(run, RunStatus.PAUSED)
+        _set_status(run, RunStatus.CHECKPOINTING)
         _save_checkpoint(run, step)
+        sync_update_training_run(run.run_id, checkpoint_path=str(_checkpoint_path(run.run_id)))
+        _set_status(run, RunStatus.PAUSED)
         while run.pause_requested.is_set() and not run.stop_flag:
             time.sleep(0.1)
         if run.stop_flag:
-            training_log.info("STOPPED (from pause) run_id=%d at step=%d", run.run_id, step)
+            training_log.info("CANCELLED (from pause) run_id=%d at step=%d", run.run_id, step)
+            _set_status(run, RunStatus.CANCELLED)
             return True
+        _set_status(run, RunStatus.RESUMING)
         training_log.info("RESUMING run_id=%d from step=%d", run.run_id, step)
         _set_status(run, RunStatus.RUNNING)
+    if run.stop_flag:
+        _set_status(run, RunStatus.CANCELLED)
     return run.stop_flag
 
 
@@ -151,6 +219,8 @@ def _train_transformer(run: ActiveRun):
     train_cfg = config["training"]
     device = run.device
 
+    _set_status(run, RunStatus.STARTING)
+
     text = load_tiny_shakespeare()
     run.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
 
@@ -158,11 +228,26 @@ def _train_transformer(run: ActiveRun):
     run.model = template["build_model"](config).to(device)
     run.optimizer = torch.optim.AdamW(run.model.parameters(), lr=train_cfg["learning_rate"])
 
+    # Persist run metadata
+    sync_update_training_run(run.run_id,
+        config_snapshot=json.dumps(config),
+        seed=settings.random_seed,
+        template_key="transformer",
+        dataset_name="tiny_shakespeare",
+        metrics_path=str(_metrics_path(run.run_id)),
+        device_name=_get_device_name(device),
+        param_count=_param_count(run.model),
+        package_versions=json.dumps(_get_package_versions()),
+        git_commit=_get_git_commit(),
+    )
+    _write_run_meta(run, "transformer", "tiny_shakespeare")
+
     run.started_at = time.time()
     _set_status(run, RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
+    lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
 
@@ -185,10 +270,15 @@ def _train_transformer(run: ActiveRun):
                 "step": step,
                 "train_loss": round(losses["train"], 4),
                 "val_loss": round(losses["val"], 4),
+                "learning_rate": lr,
+                "elapsed_seconds": round(time.time() - run.started_at, 1),
+                "param_count": _param_count(run.model),
             })
 
     _set_status(run, RunStatus.COMPLETED)
+    cp = _checkpoint_path(run.run_id)
     _save_checkpoint(run, max_iters)
+    sync_update_training_run(run.run_id, checkpoint_path=str(cp))
 
 
 # ── RNN training loop ──────────────────────────────────────────────
@@ -197,6 +287,8 @@ def _train_rnn(run: ActiveRun):
     config = run.config
     train_cfg = config["training"]
     device = run.device
+
+    _set_status(run, RunStatus.STARTING)
 
     seq_len = train_cfg.get("seq_len", 50)
     dataset = load_dinos_dataset(seq_len)
@@ -220,12 +312,27 @@ def _train_rnn(run: ActiveRun):
     run.optimizer = torch.optim.Adam(run.model.parameters(), lr=train_cfg["learning_rate"])
     criterion = nn.CrossEntropyLoss().to(device)
 
+    # Persist run metadata
+    sync_update_training_run(run.run_id,
+        config_snapshot=json.dumps(config),
+        seed=settings.random_seed,
+        template_key="rnn",
+        dataset_name="dinos",
+        metrics_path=str(_metrics_path(run.run_id)),
+        device_name=_get_device_name(device),
+        param_count=_param_count(run.model),
+        package_versions=json.dumps(_get_package_versions()),
+        git_commit=_get_git_commit(),
+    )
+    _write_run_meta(run, "rnn", "dinos")
+
     run.started_at = time.time()
     _set_status(run, RunStatus.RUNNING)
     epochs = train_cfg.get("epochs", 50)
     clip = train_cfg.get("clip", 5)
     print_every = train_cfg.get("print_every", 10)
     n_chars = dataset.vocab_size
+    lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
     counter = 0
@@ -273,10 +380,15 @@ def _train_rnn(run: ActiveRun):
                     "epoch": epoch + 1,
                     "train_loss": round(loss.item(), 4),
                     "val_loss": round(float(np.mean(val_losses)), 4),
+                    "learning_rate": lr,
+                    "elapsed_seconds": round(time.time() - run.started_at, 1),
+                    "param_count": _param_count(run.model),
                 })
 
     _set_status(run, RunStatus.COMPLETED)
+    cp = _checkpoint_path(run.run_id)
     _save_checkpoint(run, counter)
+    sync_update_training_run(run.run_id, checkpoint_path=str(cp))
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -297,6 +409,7 @@ def _train_loop(run: ActiveRun):
     except Exception as e:
         _set_status(run, RunStatus.FAILED)
         run.metrics.append({"error": str(e)})
+        sync_update_training_run(run.run_id, error_message=str(e))
         error_log.error(
             "Training FAILED run_id=%d template=%s step=%d: %s",
             run.run_id, run.template_key, run.current_step, e,

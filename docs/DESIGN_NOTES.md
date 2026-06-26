@@ -100,23 +100,6 @@ The following are documented design gaps acceptable for Tier 1 (local prototype)
 - Frontend uses `Record<string, number | string>` — should match backend schemas with specific TypeScript types.
 - The eval_iters cap (silently capped to 10 in runner.py) should be surfaced in the UI or enforced via config validation.
 
-### Run Metadata & Reproducibility
-Durable run records (`training_runs` table) currently lack:
-- Config snapshot (exact config used, not just experiment's current config)
-- Seed used
-- Template key and dataset name
-- Checkpoint and metrics file paths
-- Error message on failure
-- Device name / CUDA device info
-- Package versions and git commit
-- Run mode (thread/subprocess/docker/cloud)
-- Cancellation/timeout reason
-
-### Richer Status States
-Current: `queued → running → paused → completed/failed`
-
-Production needs: `queued → starting → running → pause_requested → checkpointing → paused → resuming → completed → failed → cancelled → timeout`
-
 ### Idempotency
 - `POST /training/start` — no duplicate-run protection. Should check for already-running run per (experiment_id, device), or accept an idempotency key.
 - `POST /experiments/from-preset/{key}` — always creates new row. Double-click creates duplicates.
@@ -135,23 +118,6 @@ Production needs: `queued → starting → running → pause_requested → check
 
 ### Export System
 `export.py` duplicates model/training logic as large f-string templates rather than reusing the template modules. This means training logic exists in three places: runner.py, templates/, and export.py. Should refactor toward composing exports from the actual template source files.
-
-### Logging Gaps
-Missing from logs:
-- Request/correlation IDs
-- Config diff on update
-- Device availability/CUDA details
-- Frontend errors
-- Status log previously showed "?" for old status (fixed)
-
-### Metrics Enrichment
-Currently captures train_loss and val_loss per eval point. Should eventually add:
-- Learning rate, tokens/sec, examples/sec
-- GPU memory allocated/reserved
-- Validation perplexity
-- Elapsed wall-clock time per metric point
-- Parameter count
-- Sample generated outputs at checkpoints
 
 ### Runner Decomposition
 `runner.py` (390 lines) handles state, checkpoints, metrics, status, two training loops, pause/resume/stop, and prompt inference. When subprocess/cloud orchestration is added, split into: `run_state.py`, `artifacts.py`, `local_thread_runner.py`, `train_transformer.py`, `train_rnn.py`, `prompting.py`.

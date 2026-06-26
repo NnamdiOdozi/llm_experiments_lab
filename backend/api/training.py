@@ -38,7 +38,11 @@ async def start_training(req: StartRunRequest):
         raise HTTPException(404, "Experiment not found")
 
     config = json.loads(exp["config_json"])
-    run_id = await db.create_training_run(req.experiment_id, req.device)
+    run_id = await db.create_training_run(
+        req.experiment_id, req.device,
+        config_snapshot=json.dumps(config),
+        template_key=config.get("template", "transformer"),
+    )
     start_run(run_id, req.experiment_id, config, req.device)
     training_log.info(
         "START run_id=%d experiment_id=%d device=%s template=%s",

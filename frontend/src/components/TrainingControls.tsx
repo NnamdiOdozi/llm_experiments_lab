@@ -50,6 +50,8 @@ export default function TrainingControls({
   onDeviceChange,
 }: Props) {
   const status = runStatus?.status;
+  const isActive = status === "running" || status === "starting" || status === "pause_requested" || status === "checkpointing" || status === "resuming";
+  const isDone = !status || status === "completed" || status === "failed" || status === "cancelled";
 
   return (
     <div className="panel">
@@ -69,7 +71,7 @@ export default function TrainingControls({
         </div>
       )}
 
-      {(!status || status === "completed" || status === "failed") && (
+      {isDone && (
         <div style={{ marginBottom: 10 }}>
           <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
           <select
@@ -84,14 +86,14 @@ export default function TrainingControls({
       )}
 
       <div style={{ display: "flex", gap: 8 }}>
-        {(!status || status === "completed" || status === "failed") && (
+        {isDone && (
           <button className="btn-primary" onClick={() => { if (!loading) onStart(); }} disabled={loading}>
             {loading ? "Starting…" : "Start Training"}
           </button>
         )}
-        {status === "running" && (
-          <button onClick={onPause} disabled={loading}>
-            Pause
+        {isActive && (
+          <button onClick={onPause} disabled={loading || status !== "running"}>
+            {status === "pause_requested" || status === "checkpointing" ? "Pausing…" : "Pause"}
           </button>
         )}
         {status === "paused" && (
@@ -104,7 +106,7 @@ export default function TrainingControls({
             </button>
           </>
         )}
-        {status === "running" && (
+        {isActive && (
           <button style={{ borderColor: "var(--red)" }} onClick={onStop} disabled={loading}>
             Stop
           </button>

@@ -55,7 +55,7 @@ export default function App() {
       setRunStatus(status);
       const m = await fetchMetrics(runId);
       setMetrics(m);
-      if (status.status === "completed" || status.status === "failed") {
+      if (status.status === "completed" || status.status === "failed" || status.status === "cancelled") {
         if (pollRef.current) clearInterval(pollRef.current);
       }
     } catch { /* ignore poll errors */ }

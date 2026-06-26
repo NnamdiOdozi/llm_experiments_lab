@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -40,20 +41,22 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    req_id = uuid.uuid4().hex[:8]
     start = time.perf_counter()
     try:
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - start) * 1000
         request_log.info(
-            "%s %s → %d (%.0fms)",
-            request.method, request.url.path, response.status_code, elapsed_ms,
+            "[%s] %s %s → %d (%.0fms)",
+            req_id, request.method, request.url.path, response.status_code, elapsed_ms,
         )
+        response.headers["X-Request-ID"] = req_id
         return response
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - start) * 1000
         error_log.error(
-            "%s %s → EXCEPTION (%.0fms): %s",
-            request.method, request.url.path, elapsed_ms, exc,
+            "[%s] %s %s → EXCEPTION (%.0fms): %s",
+            req_id, request.method, request.url.path, elapsed_ms, exc,
         )
         raise
 

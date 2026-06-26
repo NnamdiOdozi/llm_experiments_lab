@@ -71,6 +71,7 @@ async def update_config(experiment_id: int, req: UpdateConfigRequest):
     exp = await db.get_experiment(experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
+    old_config = json.loads(exp["config_json"])
     db_conn = await db.get_db()
     await db_conn.execute(
         "UPDATE experiments SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -78,7 +79,9 @@ async def update_config(experiment_id: int, req: UpdateConfigRequest):
     )
     await db_conn.commit()
     await db_conn.close()
-    audit_log.info("Config updated: experiment_id=%d", experiment_id)
+    # Log config diff
+    changed = {k: (old_config.get(k), v) for k, v in req.config.items() if old_config.get(k) != v}
+    audit_log.info("Config updated: experiment_id=%d changed=%s", experiment_id, json.dumps(changed))
     return {"ok": True}
 
 

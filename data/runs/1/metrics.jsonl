@@ -7,3 +7,5 @@
 {"step": 10, "epoch": 2, "train_loss": 2.9366, "val_loss": 2.9166}
 {"step": 20, "epoch": 4, "train_loss": 2.8632, "val_loss": 2.8714}
 {"step": 10, "epoch": 2, "train_loss": 2.975, "val_loss": 2.9286}
+{"step": 10, "epoch": 2, "train_loss": 2.9944, "val_loss": 2.916, "learning_rate": 0.001, "elapsed_seconds": 41.1, "param_count": 826396}
+{"step": 20, "epoch": 4, "train_loss": 2.8667, "val_loss": 2.8797, "learning_rate": 0.001, "elapsed_seconds": 47.4, "param_count": 826396}
