@@ -24,6 +24,7 @@ export default function App() {
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [device, setDevice] = useState("cpu");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function handlePresetSelect(expId: number, cfg: ExperimentConfig) {
@@ -57,7 +58,7 @@ export default function App() {
   async function handleStart() {
     if (experimentId == null) return;
     setLoading(true);
-    const { run_id } = await startTraining(experimentId);
+    const { run_id } = await startTraining(experimentId, device);
     setRunId(run_id);
     setLoading(false);
   }
@@ -133,6 +134,8 @@ export default function App() {
             onResume={handleResume}
             onStop={handleStop}
             loading={loading}
+            device={device}
+            onDeviceChange={setDevice}
           />
           <ExportBar experimentId={experimentId} />
         </div>

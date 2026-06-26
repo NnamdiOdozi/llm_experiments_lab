@@ -129,8 +129,9 @@ def _check_pause(run: ActiveRun, step: int) -> bool:
 
 # ── Transformer training loop ──────────────────────────────────────
 
+@torch.no_grad()
 def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) -> dict[str, float]:
-    model.train(False)
+    model.eval()
     out = {}
     for split in ("train", "val"):
         losses = torch.zeros(num_iters)
@@ -138,8 +139,9 @@ def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) 
             x, y = dataset.get_batch(split, device)
             _, loss = model(x, y)
             losses[k] = loss.item()
+            time.sleep(0.005)  # yield GIL 5ms so FastAPI can respond
         out[split] = losses.mean().item()
-    model.train(True)
+    model.train()
     return out
 
 
@@ -174,6 +176,7 @@ def _train_transformer(run: ActiveRun):
         run.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         run.optimizer.step()
+        time.sleep(0.005)  # yield GIL 5ms so FastAPI can respond to status polls
 
         if step > 0 and step % log_interval == 0:
             losses = _transformer_eval(run.model, run.dataset, device, num_eval_iters)
@@ -247,6 +250,8 @@ def _train_rnn(run: ActiveRun):
             loss.backward()
             nn.utils.clip_grad_norm_(run.model.parameters(), clip)
             run.optimizer.step()
+            time.sleep(0.005)  # yield GIL 5ms
+
             if counter % print_every == 0:
                 # Validation
                 val_h = run.model.init_hidden(batch_size, device)

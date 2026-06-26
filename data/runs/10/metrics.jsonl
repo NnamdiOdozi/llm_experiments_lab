@@ -1,0 +1,10 @@
+{"step": 100, "train_loss": 2.5089, "val_loss": 2.5175}
+{"step": 200, "train_loss": 2.3939, "val_loss": 2.4035}
+{"step": 300, "train_loss": 2.2805, "val_loss": 2.2952}
+{"step": 400, "train_loss": 2.1476, "val_loss": 2.1889}
+{"step": 500, "train_loss": 1.9883, "val_loss": 2.0656}
+{"step": 600, "train_loss": 1.8809, "val_loss": 1.9668}
+{"step": 700, "train_loss": 1.7944, "val_loss": 1.9205}
+{"step": 800, "train_loss": 1.7122, "val_loss": 1.8449}
+{"step": 900, "train_loss": 1.6684, "val_loss": 1.8001}
+{"step": 1000, "train_loss": 1.6186, "val_loss": 1.7829}

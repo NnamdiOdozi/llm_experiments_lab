@@ -7,6 +7,8 @@ interface Props {
   onResume: () => void;
   onStop: () => void;
   loading: boolean;
+  device: string;
+  onDeviceChange: (d: string) => void;
 }
 
 function statusTag(status: string) {
@@ -44,6 +46,8 @@ export default function TrainingControls({
   onResume,
   onStop,
   loading,
+  device,
+  onDeviceChange,
 }: Props) {
   const status = runStatus?.status;
 
@@ -59,6 +63,20 @@ export default function TrainingControls({
             {runStatus.elapsed_seconds > 0 && ` — ${formatElapsed(runStatus.elapsed_seconds)}`}
           </span>
           {progressBar(runStatus.current_step, runStatus.total_steps)}
+        </div>
+      )}
+
+      {(!status || status === "completed" || status === "failed") && (
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
+          <select
+            value={device}
+            onChange={(e) => onDeviceChange(e.target.value)}
+            style={{ fontSize: 12, padding: "4px 8px" }}
+          >
+            <option value="cpu">CPU</option>
+            <option value="cuda">GPU (CUDA)</option>
+          </select>
         </div>
       )}
 
