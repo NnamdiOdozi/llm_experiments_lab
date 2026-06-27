@@ -82,14 +82,18 @@ class MultiHeadSelfAttention(nn.Module):
         return self.resid_dropout(self.out_proj(y))
 
 
-class FeedForward(nn.Module):
-    """Position-wise FFN: Linear -> GELU -> Linear -> Dropout."""
+ACTIVATIONS = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}
 
-    def __init__(self, n_embd: int, dropout: float):
+
+class FeedForward(nn.Module):
+    """Position-wise FFN: Linear -> activation -> Linear -> Dropout."""
+
+    def __init__(self, n_embd: int, dropout: float, activation: str = "gelu"):
         super().__init__()
+        act_cls = ACTIVATIONS.get(activation, nn.GELU)
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
-            nn.GELU(),
+            act_cls(),
             nn.Linear(4 * n_embd, n_embd),
             nn.Dropout(dropout),
         )
@@ -108,12 +112,13 @@ class Block(nn.Module):
         block_size: int,
         dropout: float,
         pos_encoding: str = "learned",
+        activation: str = "gelu",
     ):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embd)
         self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout, pos_encoding)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.ffn = FeedForward(n_embd, dropout)
+        self.ffn = FeedForward(n_embd, dropout, activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -133,6 +138,7 @@ class TinyTransformerLM(nn.Module):
         block_size: int,
         dropout: float,
         pos_encoding: str = "learned",
+        activation: str = "gelu",
     ):
         super().__init__()
         self.block_size = block_size
@@ -144,7 +150,7 @@ class TinyTransformerLM(nn.Module):
             self.pos_emb = nn.Embedding(block_size, n_embd)
 
         self.blocks = nn.Sequential(
-            *[Block(n_embd, n_head, block_size, dropout, pos_encoding) for _ in range(n_layer)]
+            *[Block(n_embd, n_head, block_size, dropout, pos_encoding, activation) for _ in range(n_layer)]
         )
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -206,4 +212,5 @@ def build_model_from_config(config: dict) -> TinyTransformerLM:
         block_size=model_cfg["block_size"],
         dropout=model_cfg["dropout"],
         pos_encoding=model_cfg.get("pos_encoding", "learned"),
+        activation=model_cfg.get("activation", "gelu"),
     )

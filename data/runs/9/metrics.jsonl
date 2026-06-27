@@ -16,3 +16,5 @@
 {"step": 1600, "train_loss": 1.4493, "val_loss": 1.6247}
 {"step": 1700, "train_loss": 1.437, "val_loss": 1.6366}
 {"step": 1800, "train_loss": 1.3966, "val_loss": 1.6001}
+{"step": 10, "epoch": 2, "train_loss": 2.9484, "val_loss": 2.9064, "learning_rate": 0.001, "elapsed_seconds": 43.3, "param_count": 826396, "timestamp": "2026-06-27T15:54:53.662026"}
+{"step": 20, "epoch": 4, "train_loss": 2.8641, "val_loss": 2.8778, "learning_rate": 0.001, "elapsed_seconds": 50.1, "param_count": 826396, "timestamp": "2026-06-27T15:55:00.458123"}

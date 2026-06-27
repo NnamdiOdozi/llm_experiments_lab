@@ -19,6 +19,13 @@ import torch
 import torch.nn as nn
 
 from backend.training.templates import TEMPLATE_REGISTRY
+
+OPTIMIZERS = {
+    "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
+    "sgd": torch.optim.SGD,
+}
+
 from backend.training.templates.transformer.data import CharDataset, load_tiny_shakespeare
 from backend.training.templates.rnn.data import DinosDataset, load_dinos_dataset
 from backend.training.templates.rnn.model import one_hot_encode
@@ -226,7 +233,8 @@ def _train_transformer(run: ActiveRun):
 
     template = TEMPLATE_REGISTRY["transformer"]
     run.model = template["build_model"](config).to(device)
-    run.optimizer = torch.optim.AdamW(run.model.parameters(), lr=train_cfg["learning_rate"])
+    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
+    run.optimizer = opt_cls(run.model.parameters(), lr=train_cfg["learning_rate"])
 
     # Persist run metadata
     sync_update_training_run(run.run_id,
@@ -309,7 +317,8 @@ def _train_rnn(run: ActiveRun):
 
     template = TEMPLATE_REGISTRY["rnn"]
     run.model = template["build_model"](config).to(device)
-    run.optimizer = torch.optim.Adam(run.model.parameters(), lr=train_cfg["learning_rate"])
+    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adam"), torch.optim.Adam)
+    run.optimizer = opt_cls(run.model.parameters(), lr=train_cfg["learning_rate"])
     criterion = nn.CrossEntropyLoss().to(device)
 
     # Persist run metadata

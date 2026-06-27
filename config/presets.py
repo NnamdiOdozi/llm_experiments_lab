@@ -14,6 +14,7 @@ BASELINE_CONFIG = {
         "n_layer": 4,
         "dropout": 0.1,
         "pos_encoding": "learned",
+        "activation": "gelu",
     },
     "training": {
         "batch_size": 64,
@@ -21,6 +22,7 @@ BASELINE_CONFIG = {
         "max_iters": 5000,
         "eval_interval": 100,
         "eval_iters": 10,
+        "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
 }
@@ -37,6 +39,7 @@ ROPE_CONFIG = {
         "n_layer": 4,
         "dropout": 0.1,
         "pos_encoding": "rope",
+        "activation": "gelu",
     },
     "training": {
         "batch_size": 64,
@@ -44,6 +47,7 @@ ROPE_CONFIG = {
         "max_iters": 5000,
         "eval_interval": 100,
         "eval_iters": 10,
+        "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
 }
@@ -60,6 +64,7 @@ LR_SENSITIVITY_CONFIG = {
         "n_layer": 4,
         "dropout": 0.1,
         "pos_encoding": "learned",
+        "activation": "gelu",
     },
     "training": {
         "batch_size": 64,
@@ -67,6 +72,7 @@ LR_SENSITIVITY_CONFIG = {
         "max_iters": 5000,
         "eval_interval": 100,
         "eval_iters": 10,
+        "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
 }
@@ -90,6 +96,7 @@ RNN_BASELINE_CONFIG = {
         "seq_len": 50,
         "clip": 5,
         "print_every": 10,
+        "optimizer": "adam",
     },
     "dataset": "dinos",
 }
