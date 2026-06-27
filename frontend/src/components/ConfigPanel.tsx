@@ -6,6 +6,12 @@ interface Props {
   disabled?: boolean;
 }
 
+const DROPDOWN_FIELDS: Record<string, string[]> = {
+  pos_encoding: ["learned", "rope"],
+  optimizer: ["adam", "adamw", "sgd"],
+  activation: ["gelu", "relu", "silu"],
+};
+
 function renderSection(
   title: string,
   section: Record<string, number | string>,
@@ -19,32 +25,50 @@ function renderSection(
       <h4 style={{ fontSize: 12, color: "var(--accent)", marginBottom: 8 }}>
         {title}
       </h4>
-      {Object.entries(section).map(([key, val]) => (
-        <div
-          key={key}
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 6,
-          }}
-        >
-          <label style={{ fontSize: 12, color: "var(--text-dim)" }}>{key}</label>
-          <input
-            style={{ width: 100, textAlign: "right" }}
-            value={val}
-            disabled={disabled}
-            onChange={(e) => {
-              const v = e.target.value;
-              const parsed = isNaN(Number(v)) ? v : Number(v);
-              onChange({
-                ...config,
-                [sectionKey]: { ...config[sectionKey], [key]: parsed },
-              });
+      {Object.entries(section).map(([key, val]) => {
+        const options = DROPDOWN_FIELDS[key];
+        const handleChange = (newVal: string | number) => {
+          onChange({
+            ...config,
+            [sectionKey]: { ...config[sectionKey], [key]: newVal },
+          });
+        };
+        return (
+          <div
+            key={key}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 6,
             }}
-          />
-        </div>
-      ))}
+          >
+            <label style={{ fontSize: 12, color: "var(--text-dim)" }}>{key}</label>
+            {options ? (
+              <select
+                style={{ width: 100, textAlign: "right", fontSize: 12, padding: "4px 8px" }}
+                value={String(val)}
+                disabled={disabled}
+                onChange={(e) => handleChange(e.target.value)}
+              >
+                {options.map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                style={{ width: 100, textAlign: "right" }}
+                value={val}
+                disabled={disabled}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  handleChange(isNaN(Number(v)) ? v : Number(v));
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
