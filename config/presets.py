@@ -20,17 +20,17 @@ BASELINE_CONFIG = {
         "batch_size": 64,
         "learning_rate": 3e-4,
         "max_iters": 5000,
-        "eval_interval": 100,
-        "eval_iters": 10,
+        "eval_interval": 20,
+        "eval_iters": 2,
         "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
 }
 
-ROPE_CONFIG = {
-    "name": "RoPE Positional Encoding",
-    "description": "Same architecture but with Rotary Position Embeddings instead of learned.",
-    "template": "transformer",
+MOE_CONFIG = {
+    "name": "Mixture of Experts (DeepSeek-style)",
+    "description": "4-layer MoE transformer with 8 half-sized experts, top-2 routing, RoPE.",
+    "template": "moe",
     "model": {
         "vocab_size": 65,
         "block_size": 128,
@@ -40,13 +40,16 @@ ROPE_CONFIG = {
         "dropout": 0.1,
         "pos_encoding": "rope",
         "activation": "gelu",
+        "num_experts": 8,
+        "top_k": 2,
+        "capacity_factor": 1.25,
     },
     "training": {
         "batch_size": 64,
         "learning_rate": 3e-4,
         "max_iters": 5000,
-        "eval_interval": 100,
-        "eval_iters": 10,
+        "eval_interval": 20,
+        "eval_iters": 2,
         "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
@@ -70,8 +73,8 @@ LR_SENSITIVITY_CONFIG = {
         "batch_size": 64,
         "learning_rate": 3e-3,
         "max_iters": 5000,
-        "eval_interval": 100,
-        "eval_iters": 10,
+        "eval_interval": 20,
+        "eval_iters": 2,
         "optimizer": "adamw",
     },
     "dataset": "tiny_shakespeare",
@@ -103,7 +106,7 @@ RNN_BASELINE_CONFIG = {
 
 PRESETS = {
     "baseline": BASELINE_CONFIG,
-    "rope": ROPE_CONFIG,
+    "moe": MOE_CONFIG,
     "lr_sensitivity": LR_SENSITIVITY_CONFIG,
     "rnn_baseline": RNN_BASELINE_CONFIG,
 }

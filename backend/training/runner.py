@@ -164,6 +164,14 @@ def _save_checkpoint(run: ActiveRun, step: int):
     }, _checkpoint_path(run.run_id))
 
 
+def _release_heavy_objects(run: ActiveRun):
+    """Free model, optimizer, and dataset to reclaim memory after run ends."""
+    run.model = None
+    run.optimizer = None
+    run.dataset = None
+    run.thread = None
+
+
 def _set_status(run: ActiveRun, status: RunStatus):
     """Update run status in memory and DB."""
     old_status = run.status.value
@@ -173,6 +181,8 @@ def _set_status(run: ActiveRun, status: RunStatus):
         updates["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     elif status in (RunStatus.COMPLETED, RunStatus.FAILED):
         updates["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
+        _release_heavy_objects(run)
     sync_update_training_run(run.run_id, **updates)
     training_log.info(
         "STATUS run_id=%d %s → %s step=%d",
@@ -273,6 +283,8 @@ def _train_transformer(run: ActiveRun):
         time.sleep(0.005)  # yield GIL 5ms so FastAPI can respond to status polls
 
         if step > 0 and step % log_interval == 0:
+            if _check_pause(run, step):
+                return
             losses = _transformer_eval(run.model, run.dataset, device, num_eval_iters)
             _write_metric(run, {
                 "step": step,
@@ -282,6 +294,99 @@ def _train_transformer(run: ActiveRun):
                 "elapsed_seconds": round(time.time() - run.started_at, 1),
                 "param_count": _param_count(run.model),
             })
+            _save_checkpoint(run, step)
+
+    _set_status(run, RunStatus.COMPLETED)
+    cp = _checkpoint_path(run.run_id)
+    _save_checkpoint(run, max_iters)
+    sync_update_training_run(run.run_id, checkpoint_path=str(cp))
+
+
+# ── MoE training loop ──────────────────────────────────────────────
+
+@torch.no_grad()
+def _moe_eval(model, dataset, device: str, num_iters: int) -> dict[str, dict[str, float]]:
+    model.eval()
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(num_iters)
+        drop_rates = torch.zeros(num_iters)
+        for k in range(num_iters):
+            x, y = dataset.get_batch(split, device)
+            _, loss, drop_rate = model(x, y)
+            losses[k] = loss.item()
+            drop_rates[k] = drop_rate if isinstance(drop_rate, float) else drop_rate.item()
+            time.sleep(0.005)
+        out[split] = {"loss": losses.mean().item(), "drop_rate": drop_rates.mean().item()}
+    model.train()
+    return out
+
+
+def _train_moe(run: ActiveRun):
+    config = run.config
+    train_cfg = config["training"]
+    device = run.device
+
+    _set_status(run, RunStatus.STARTING)
+
+    text = load_tiny_shakespeare()
+    run.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
+
+    template = TEMPLATE_REGISTRY["moe"]
+    run.model = template["build_model"](config).to(device)
+    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
+    run.optimizer = opt_cls(run.model.parameters(), lr=train_cfg["learning_rate"])
+
+    sync_update_training_run(run.run_id,
+        config_snapshot=json.dumps(config),
+        seed=settings.random_seed,
+        template_key="moe",
+        dataset_name="tiny_shakespeare",
+        metrics_path=str(_metrics_path(run.run_id)),
+        device_name=_get_device_name(device),
+        param_count=_param_count(run.model),
+        package_versions=json.dumps(_get_package_versions()),
+        git_commit=_get_git_commit(),
+    )
+    _write_run_meta(run, "moe", "tiny_shakespeare")
+
+    run.started_at = time.time()
+    _set_status(run, RunStatus.RUNNING)
+    max_iters = train_cfg["max_iters"]
+    log_interval = train_cfg["eval_interval"]
+    num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
+    lr = train_cfg["learning_rate"]
+
+    torch.manual_seed(settings.random_seed)
+
+    for step in range(run.current_step, max_iters + 1):
+        run.current_step = step
+
+        if _check_pause(run, step):
+            return
+
+        xb, yb = run.dataset.get_batch("train", device)
+        _, loss, _ = run.model(xb, yb)
+        run.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        run.optimizer.step()
+        time.sleep(0.005)
+
+        if step > 0 and step % log_interval == 0:
+            if _check_pause(run, step):
+                return
+            metrics = _moe_eval(run.model, run.dataset, device, num_eval_iters)
+            _write_metric(run, {
+                "step": step,
+                "train_loss": round(metrics["train"]["loss"], 4),
+                "val_loss": round(metrics["val"]["loss"], 4),
+                "train_drop_rate": round(metrics["train"]["drop_rate"] * 100, 1),
+                "val_drop_rate": round(metrics["val"]["drop_rate"] * 100, 1),
+                "learning_rate": lr,
+                "elapsed_seconds": round(time.time() - run.started_at, 1),
+                "param_count": _param_count(run.model),
+            })
+            _save_checkpoint(run, step)
 
     _set_status(run, RunStatus.COMPLETED)
     cp = _checkpoint_path(run.run_id)
@@ -393,6 +498,7 @@ def _train_rnn(run: ActiveRun):
                     "elapsed_seconds": round(time.time() - run.started_at, 1),
                     "param_count": _param_count(run.model),
                 })
+                _save_checkpoint(run, counter)
 
     _set_status(run, RunStatus.COMPLETED)
     cp = _checkpoint_path(run.run_id)
@@ -404,6 +510,7 @@ def _train_rnn(run: ActiveRun):
 
 TRAIN_DISPATCHERS = {
     "transformer": _train_transformer,
+    "moe": _train_moe,
     "rnn": _train_rnn,
 }
 
@@ -475,7 +582,7 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
     if run is None or run.status != RunStatus.PAUSED or run.model is None:
         return None
 
-    if run.template_key == "transformer":
+    if run.template_key in ("transformer", "moe"):
         encoded = run.dataset.encode(prompt_text)
         idx = torch.tensor([encoded], dtype=torch.long, device=run.device)
         output = run.model.generate(idx, max_new_tokens=max_new_tokens)

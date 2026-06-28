@@ -19,10 +19,31 @@ import {
   updateConfig,
 } from "./hooks/useApi";
 
+const SESSION_KEY = "llm_lab_session";
+
+function saveSession(experimentId: number | null, runId: number | null, config: ExperimentConfig | null) {
+  if (experimentId != null && config != null) {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ experimentId, runId, config }));
+  } else {
+    localStorage.removeItem(SESSION_KEY);
+  }
+}
+
+function loadSession(): { experimentId: number; runId: number | null; config: ExperimentConfig } | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (s.experimentId != null && s.config != null) return s;
+  } catch { /* ignore corrupt data */ }
+  return null;
+}
+
 export default function App() {
-  const [experimentId, setExperimentId] = useState<number | null>(null);
-  const [config, setConfig] = useState<ExperimentConfig | null>(null);
-  const [runId, setRunId] = useState<number | null>(null);
+  const saved = useRef(loadSession());
+  const [experimentId, setExperimentId] = useState<number | null>(saved.current?.experimentId ?? null);
+  const [config, setConfig] = useState<ExperimentConfig | null>(saved.current?.config ?? null);
+  const [runId, setRunId] = useState<number | null>(saved.current?.runId ?? null);
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46,6 +67,7 @@ export default function App() {
     setRunId(null);
     setRunStatus(null);
     setMetrics([]);
+    saveSession(expId, null, cfg);
   }
 
   const pollStatus = useCallback(async () => {
@@ -79,6 +101,7 @@ export default function App() {
     }
     const { run_id } = await startTraining(experimentId, device);
     setRunId(run_id);
+    saveSession(experimentId, run_id, config);
     setLoading(false);
   }
 
@@ -126,7 +149,7 @@ export default function App() {
             Experiment #{experimentId}
           </span>
         </h1>
-        <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); }}>
+        <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); saveSession(null, null, null); }}>
           ← New Experiment
         </button>
       </div>
@@ -147,6 +170,7 @@ export default function App() {
             disabled={runStatus?.status === "running"}
           />
           <TrainingControls
+            runId={runId}
             runStatus={runStatus}
             onStart={handleStart}
             onPause={handlePause}

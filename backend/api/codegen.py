@@ -13,6 +13,7 @@ router = APIRouter(prefix="/api/code", tags=["code"])
 
 TEMPLATE_DIRS = {
     "transformer": Path(__file__).parent.parent / "training" / "templates" / "transformer",
+    "moe": Path(__file__).parent.parent / "training" / "templates" / "moe",
     "rnn": Path(__file__).parent.parent / "training" / "templates" / "rnn",
 }
 

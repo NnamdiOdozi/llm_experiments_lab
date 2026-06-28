@@ -2,14 +2,14 @@ export interface Preset {
   key: string;
   name: string;
   description: string;
-  template: "transformer" | "rnn";
+  template: "transformer" | "moe" | "rnn";
   model: Record<string, number | string>;
   training: Record<string, number | string>;
   dataset: string;
 }
 
 export interface ExperimentConfig {
-  template: "transformer" | "rnn";
+  template: "transformer" | "moe" | "rnn";
   model: Record<string, number | string>;
   training: Record<string, number | string>;
 }

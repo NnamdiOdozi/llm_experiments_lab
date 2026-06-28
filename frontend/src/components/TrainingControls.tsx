@@ -1,6 +1,7 @@
 import { RunStatus } from "../types";
 
 interface Props {
+  runId: number | null;
   runStatus: RunStatus | null;
   onStart: () => void;
   onPause: () => void;
@@ -40,6 +41,7 @@ function progressBar(current: number, total: number) {
 }
 
 export default function TrainingControls({
+  runId,
   runStatus,
   onStart,
   onPause,
@@ -59,6 +61,11 @@ export default function TrainingControls({
 
       {runStatus && (
         <div style={{ marginBottom: 12 }}>
+          {runId != null && (
+            <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8 }}>
+              Run #{runId}
+            </span>
+          )}
           {statusTag(runStatus.status)}
           <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>
             {device.toUpperCase()}

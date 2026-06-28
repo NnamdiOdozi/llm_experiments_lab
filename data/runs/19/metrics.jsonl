@@ -1,0 +1,2 @@
+{"step": 10, "epoch": 2, "train_loss": 2.9596, "val_loss": 2.9156, "learning_rate": 0.001, "elapsed_seconds": 33.7, "param_count": 826396, "timestamp": "2026-06-28T12:13:32.835124"}
+{"step": 20, "epoch": 4, "train_loss": 2.864, "val_loss": 2.8726, "learning_rate": 0.001, "elapsed_seconds": 40.4, "param_count": 826396, "timestamp": "2026-06-28T12:13:39.520071"}

@@ -47,3 +47,4 @@
 {"step": 4700, "train_loss": 1.1999, "val_loss": 1.4865}
 {"step": 4800, "train_loss": 1.1948, "val_loss": 1.5046}
 {"step": 4900, "train_loss": 1.1881, "val_loss": 1.4941}
+{"step": 10, "epoch": 2, "train_loss": 2.9527, "val_loss": 2.9072, "learning_rate": 0.001, "elapsed_seconds": 51.8, "param_count": 826396, "timestamp": "2026-06-28T12:04:39.760353"}
