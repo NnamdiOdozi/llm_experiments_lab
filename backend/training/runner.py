@@ -7,12 +7,15 @@ that communicate via files (status.json, metrics.jsonl, flag files).
 import json
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from backend.training import artifacts
 from backend.db import sync_update_training_run
 from backend.logging_config import training_log
+from config.settings import settings
 
 
 # Keep RunStatus constants for backward compatibility with training.py imports
@@ -153,12 +156,45 @@ def resume_run(run_id: int) -> bool:
     return True
 
 
+def _force_stop_worker(run_id: int, process: subprocess.Popen):
+    """Background thread: wait for cooperative stop, then terminate/kill if needed."""
+    grace = settings.stop_grace_seconds
+    kill_timeout = settings.stop_kill_seconds
+
+    # Stage 1: wait for cooperative exit
+    try:
+        process.wait(timeout=grace)
+        training_log.info("STOP cooperative exit run_id=%d", run_id)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Stage 2: SIGTERM
+    training_log.warning("STOP force terminate run_id=%d (no exit after %ds)", run_id, grace)
+    process.terminate()
+    try:
+        process.wait(timeout=kill_timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Stage 3: SIGKILL
+    training_log.warning("STOP force kill run_id=%d (no exit after terminate)", run_id)
+    process.kill()
+    process.wait(timeout=5)
+
+
 def stop_run(run_id: int) -> bool:
     run = active_runs.get(run_id)
     if run is not None:
-        # Live process — signal via flag
+        # Live process — signal via flag, then escalate in background
         artifacts.write_flag(run_id, "stop")
         artifacts.remove_flag(run_id, "pause")
+        threading.Thread(
+            target=_force_stop_worker,
+            args=(run_id, run.process),
+            daemon=True,
+        ).start()
         return True
 
     # Process already exited (paused) — update status directly

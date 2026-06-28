@@ -9,7 +9,6 @@ import TrainingControls from "./components/TrainingControls";
 import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
 import ExperimentNotes from "./components/ExperimentNotes";
-import ErrorBoundary from "./components/ErrorBoundary";
 import {
   startTraining,
   pauseTraining,
@@ -53,6 +52,7 @@ export default function App() {
   const [lastPollSuccess, setLastPollSuccess] = useState<number | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -135,28 +135,42 @@ export default function App() {
   async function handlePause() {
     if (runId == null) return;
     setLoading(true);
-    await pauseTraining(runId);
+    setControlError(null);
+    try {
+      await pauseTraining(runId);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Pause failed");
+    }
     setLoading(false);
   }
 
   async function handleResume() {
     if (runId == null) return;
     setLoading(true);
-    await resumeTraining(runId);
+    setControlError(null);
+    try {
+      await resumeTraining(runId);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Resume failed");
+    }
     setLoading(false);
   }
 
   async function handleStop() {
     if (runId == null) return;
     setLoading(true);
-    await stopTraining(runId);
+    setControlError(null);
+    try {
+      await stopTraining(runId);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Stop failed");
+    }
     setLoading(false);
   }
 
   // No experiment selected: show preset picker
   if (!experimentId || !config) {
     return (
-      <ErrorBoundary>
       <div style={{ maxWidth: 700, margin: "60px auto", padding: "0 20px" }}>
         <h1 style={{ fontSize: 24, marginBottom: 8 }}>LLM Experiments Lab</h1>
         <p style={{ color: "var(--text-dim)", marginBottom: 24, fontSize: 14 }}>
@@ -164,13 +178,11 @@ export default function App() {
         </p>
         <PresetPicker onSelect={handlePresetSelect} />
       </div>
-      </ErrorBoundary>
     );
   }
 
   // Experiment selected: show lab workspace
   return (
-    <ErrorBoundary>
     <div style={{ padding: 20 }}>
       {disconnected && (
         <div style={{
@@ -233,6 +245,7 @@ export default function App() {
             lastPollSuccess={lastPollSuccess}
             pollError={pollError}
             startError={startError}
+            controlError={controlError}
           />
           <ExportBar experimentId={experimentId} />
           <ExperimentNotes experimentId={experimentId} />
@@ -249,6 +262,5 @@ export default function App() {
         </div>
       </div>
     </div>
-    </ErrorBoundary>
   );
 }

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     default_device: str = "cpu"
     max_concurrent_runs: int = 2
     max_concurrent_gpu_runs: int = 1
+    stop_grace_seconds: int = 5
+    stop_kill_seconds: int = 10
 
     data_dir: Path = Path("./data")
 

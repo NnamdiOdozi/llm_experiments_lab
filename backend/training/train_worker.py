@@ -82,6 +82,7 @@ class WorkerState:
         self.started_at = 0.0
         self.metrics: list[dict] = []
         self.resume = resume
+        self.checkpoint_extra: dict = {}  # extra fields to include in checkpoint (e.g. epoch)
 
     def _total_steps(self) -> int:
         t = self.config.get("training", {})
@@ -139,16 +140,20 @@ class WorkerState:
         )
         self.update_progress()
 
-    def save_checkpoint(self, step: int):
-        torch.save({
+    def save_checkpoint(self, step: int, **extra):
+        data = {
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "step": step,
             "config": self.config,
-        }, artifacts.checkpoint_path(self.run_id))
+            **extra,
+        }
+        torch.save(data, artifacts.checkpoint_path(self.run_id))
 
-    def load_checkpoint(self):
-        """Load model/optimizer state from checkpoint. Call after model+optimizer are built."""
+    def load_checkpoint(self) -> dict:
+        """Load model/optimizer state from checkpoint. Call after model+optimizer are built.
+        Returns the full checkpoint dict for callers that need extra fields (e.g. epoch).
+        """
         cp_path = artifacts.checkpoint_path(self.run_id)
         cp = torch.load(cp_path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(cp["model_state"])
@@ -159,13 +164,14 @@ class WorkerState:
         if mf.exists():
             with open(mf) as f:
                 self.metrics = [json.loads(line) for line in f if line.strip()]
+        return cp
 
     def check_pause(self, step: int) -> bool:
         """Check pause/stop flags. Returns True if run should terminate."""
         if artifacts.has_flag(self.run_id, "pause"):
             self.set_status("pause_requested")
             self.set_status("checkpointing")
-            self.save_checkpoint(step)
+            self.save_checkpoint(step, **self.checkpoint_extra)
             sync_update_training_run(
                 self.run_id,
                 checkpoint_path=str(artifacts.checkpoint_path(self.run_id)),
@@ -437,12 +443,25 @@ def train_rnn(ws: WorkerState):
 
     torch.manual_seed(settings.random_seed)
     counter = 0
+    start_epoch = 0
+    resume_step = 0
+    if ws.resume:
+        resume_step = ws.current_step
+        counter = resume_step
+        # epoch stored by save_checkpoint(..., epoch=epoch)
+        cp_path = artifacts.checkpoint_path(ws.run_id)
+        cp_data = torch.load(cp_path, map_location="cpu", weights_only=False)
+        start_epoch = cp_data.get("epoch", 0)
+        del cp_data
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
+        ws.checkpoint_extra = {"epoch": epoch}
         h = ws.model.init_hidden(batch_size, device)
 
         for x, targets in train_loader:
             counter += 1
+            if counter <= resume_step:
+                continue  # skip already-trained batches
             ws.current_step = counter
 
             if ws.check_pause(counter):
@@ -483,9 +502,9 @@ def train_rnn(ws: WorkerState):
                     "elapsed_seconds": round(time.time() - ws.started_at, 1),
                     "param_count": _param_count(ws.model),
                 })
-                ws.save_checkpoint(counter)
+                ws.save_checkpoint(counter, epoch=epoch)
 
-    ws.save_checkpoint(counter)
+    ws.save_checkpoint(counter, epoch=epochs - 1)
     sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
     ws.set_status("completed")
 

@@ -21,6 +21,9 @@ from config.settings import settings
 
 router = APIRouter(prefix="/api/training", tags=["training"])
 
+# Serialize start requests to prevent race conditions
+_start_lock = asyncio.Lock()
+
 
 class StartRunRequest(BaseModel):
     experiment_id: int
@@ -45,36 +48,43 @@ def _count_active_runs(device_filter: str | None = None) -> int:
 
 @router.post("/start")
 async def start_training(req: StartRunRequest):
-    # Enforce concurrency limits
-    active_total = _count_active_runs()
-    if active_total >= settings.max_concurrent_runs:
-        raise HTTPException(
-            429, f"Max {settings.max_concurrent_runs} concurrent runs. Stop a run first."
+    async with _start_lock:
+        # Enforce concurrency limits — check both in-memory and DB
+        active_total = max(
+            _count_active_runs(),
+            await db.count_active_runs_in_db(),
         )
-    if req.device.startswith("cuda"):
-        gpu_count = _count_active_runs("cuda")
-        if gpu_count >= settings.max_concurrent_gpu_runs:
+        if active_total >= settings.max_concurrent_runs:
             raise HTTPException(
-                429, f"Max {settings.max_concurrent_gpu_runs} GPU run(s). Stop the GPU run first."
+                429, f"Max {settings.max_concurrent_runs} concurrent runs. Stop a run first."
             )
+        if req.device.startswith("cuda"):
+            gpu_count = max(
+                _count_active_runs("cuda"),
+                await db.count_active_runs_in_db("cuda"),
+            )
+            if gpu_count >= settings.max_concurrent_gpu_runs:
+                raise HTTPException(
+                    429, f"Max {settings.max_concurrent_gpu_runs} GPU run(s). Stop the GPU run first."
+                )
 
-    exp = await db.get_experiment(req.experiment_id)
-    if exp is None:
-        raise HTTPException(404, "Experiment not found")
+        exp = await db.get_experiment(req.experiment_id)
+        if exp is None:
+            raise HTTPException(404, "Experiment not found")
 
-    config = json.loads(exp["config_json"])
-    run_id = await db.create_training_run(
-        req.experiment_id, req.device,
-        config_snapshot=json.dumps(config),
-        template_key=config.get("template", "transformer"),
-    )
-    start_run(run_id, req.experiment_id, config, req.device)
-    training_log.info(
-        "START run_id=%d experiment_id=%d device=%s template=%s",
-        run_id, req.experiment_id, req.device, config.get("template", "transformer"),
-    )
+        config = json.loads(exp["config_json"])
+        run_id = await db.create_training_run(
+            req.experiment_id, req.device,
+            config_snapshot=json.dumps(config),
+            template_key=config.get("template", "transformer"),
+        )
+        start_run(run_id, req.experiment_id, config, req.device)
+        training_log.info(
+            "START run_id=%d experiment_id=%d device=%s template=%s",
+            run_id, req.experiment_id, req.device, config.get("template", "transformer"),
+        )
 
-    return {"run_id": run_id, "status": "queued"}
+        return {"run_id": run_id, "status": "queued"}
 
 
 @router.post("/{run_id}/pause")

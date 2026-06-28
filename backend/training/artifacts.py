@@ -29,8 +29,10 @@ def checkpoint_path(run_id: int) -> Path:
 
 
 def write_status(run_id: int, status_dict: dict):
-    with open(status_path(run_id), "w") as f:
-        json.dump(status_dict, f)
+    sp = status_path(run_id)
+    tmp = sp.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(status_dict))
+    tmp.replace(sp)
 
 
 def read_status(run_id: int) -> dict | None:

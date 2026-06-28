@@ -13,6 +13,7 @@ interface Props {
   lastPollSuccess: number | null;
   pollError: string | null;
   startError: string | null;
+  controlError: string | null;
 }
 
 function statusTag(status: string) {
@@ -56,6 +57,7 @@ export default function TrainingControls({
   lastPollSuccess,
   pollError,
   startError,
+  controlError,
 }: Props) {
   const status = runStatus?.status;
   const isActive = status === "running" || status === "starting" || status === "pause_requested" || status === "checkpointing" || status === "resuming";
@@ -71,6 +73,12 @@ export default function TrainingControls({
       {startError && (
         <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
           {startError}
+        </div>
+      )}
+
+      {controlError && (
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+          {controlError}
         </div>
       )}
 

@@ -172,6 +172,22 @@ def sync_update_training_run(run_id: int, **kwargs):
     conn.close()
 
 
+async def count_active_runs_in_db(device_filter: str | None = None) -> int:
+    """Count runs with active statuses in DB — survives API restarts."""
+    active_statuses = ("queued", "starting", "running", "pause_requested", "checkpointing", "resuming")
+    placeholders = ",".join("?" for _ in active_statuses)
+    query = f"SELECT COUNT(*) FROM training_runs WHERE status IN ({placeholders})"
+    params: list = list(active_statuses)
+    if device_filter:
+        query += " AND device LIKE ?"
+        params.append(f"{device_filter}%")
+    db = await get_db()
+    cursor = await db.execute(query, params)
+    row = await cursor.fetchone()
+    await db.close()
+    return row[0] if row else 0
+
+
 async def get_run_status_from_db(run_id: int) -> dict | None:
     """Read run status from DB — survives backend restarts."""
     db = await get_db()
