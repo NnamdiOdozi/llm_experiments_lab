@@ -16,7 +16,7 @@ yarn-error.log*
 *.safetensors
 
 # Training data & run artifacts
-data/
+
 *.db
 *.sqlite
 *.sqlite3

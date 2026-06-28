@@ -17,6 +17,7 @@ from backend.training.runner import (
     prompt_paused_model,
     get_run_status,
 )
+from config.settings import settings
 
 router = APIRouter(prefix="/api/training", tags=["training"])
 
@@ -31,8 +32,32 @@ class PromptRequest(BaseModel):
     max_new_tokens: int = 200
 
 
+def _count_active_runs(device_filter: str | None = None) -> int:
+    """Count runs with live worker processes."""
+    count = 0
+    for r in active_runs.values():
+        if r.process.poll() is not None:
+            continue  # process finished
+        if device_filter is None or r.device.startswith(device_filter):
+            count += 1
+    return count
+
+
 @router.post("/start")
 async def start_training(req: StartRunRequest):
+    # Enforce concurrency limits
+    active_total = _count_active_runs()
+    if active_total >= settings.max_concurrent_runs:
+        raise HTTPException(
+            429, f"Max {settings.max_concurrent_runs} concurrent runs. Stop a run first."
+        )
+    if req.device.startswith("cuda"):
+        gpu_count = _count_active_runs("cuda")
+        if gpu_count >= settings.max_concurrent_gpu_runs:
+            raise HTTPException(
+                429, f"Max {settings.max_concurrent_gpu_runs} GPU run(s). Stop the GPU run first."
+            )
+
     exp = await db.get_experiment(req.experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
@@ -90,35 +115,62 @@ async def prompt_model(run_id: int, req: PromptRequest):
 
 @router.get("/{run_id}/status")
 async def run_status(run_id: int):
+    # Try in-memory first (live run), then fall back to DB (after restart)
     status = get_run_status(run_id)
-    if status is None:
-        raise HTTPException(404, "Run not found")
-    return status
+    if status is not None:
+        return status
+    db_status = await db.get_run_status_from_db(run_id)
+    if db_status is not None:
+        return db_status
+    raise HTTPException(404, "Run not found")
+
+
+def _read_metrics_from_disk(run_id: int) -> list[dict]:
+    """Read metrics.jsonl from disk for runs no longer in memory."""
+    metrics_file = settings.data_dir / "runs" / str(run_id) / "metrics.jsonl"
+    if not metrics_file.exists():
+        return []
+    metrics = []
+    with open(metrics_file) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                metrics.append(json.loads(line))
+    return metrics
 
 
 @router.get("/{run_id}/metrics")
 async def get_metrics(run_id: int):
-    run = active_runs.get(run_id)
-    if run is None:
+    # Always read from disk (worker writes metrics.jsonl)
+    disk_metrics = _read_metrics_from_disk(run_id)
+    if disk_metrics:
+        return disk_metrics
+    # Check if run exists (active or in DB)
+    if run_id in active_runs:
+        return []
+    db_run = await db.get_training_run(run_id)
+    if db_run is None:
         raise HTTPException(404, "Run not found")
-    return run.metrics
+    return []
 
 
 @router.websocket("/{run_id}/ws")
 async def metrics_websocket(websocket: WebSocket, run_id: int):
     """Stream metrics to the browser as they arrive."""
+    from backend.training import artifacts
+
     await websocket.accept()
     last_sent = 0
 
     try:
         while True:
-            run = active_runs.get(run_id)
-            if run is None:
+            status = artifacts.read_status(run_id)
+            if status is None:
                 await websocket.send_json({"type": "error", "message": "Run not found"})
                 break
 
-            # Send new metrics
-            current_metrics = run.metrics
+            # Send new metrics from disk
+            current_metrics = _read_metrics_from_disk(run_id)
             if len(current_metrics) > last_sent:
                 for metric in current_metrics[last_sent:]:
                     await websocket.send_json({"type": "metric", "data": metric})
@@ -127,14 +179,14 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
             # Send status updates
             await websocket.send_json({
                 "type": "status",
-                "status": run.status.value,
-                "current_step": run.current_step,
-                "total_steps": run.config["training"]["max_iters"],
+                "status": status["status"],
+                "current_step": status.get("current_step", 0),
+                "total_steps": status.get("total_steps", 0),
             })
 
             # Stop streaming if run is done
-            if run.status.value in ("completed", "failed"):
-                await websocket.send_json({"type": "done", "status": run.status.value})
+            if status["status"] in ("completed", "failed", "cancelled"):
+                await websocket.send_json({"type": "done", "status": status["status"]})
                 break
 
             await asyncio.sleep(2)

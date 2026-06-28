@@ -170,3 +170,38 @@ def sync_update_training_run(run_id: int, **kwargs):
     conn.execute(f"UPDATE training_runs SET {set_clause} WHERE id = ?", values)
     conn.commit()
     conn.close()
+
+
+async def get_run_status_from_db(run_id: int) -> dict | None:
+    """Read run status from DB — survives backend restarts."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT id, experiment_id, status, current_step, total_steps, "
+        "template_key, started_at, completed_at, config_snapshot "
+        "FROM training_runs WHERE id = ?",
+        (run_id,),
+    )
+    row = await cursor.fetchone()
+    await db.close()
+    if row is None:
+        return None
+    r = dict(row)
+    # Compute total_steps from config if not stored
+    total = r.get("total_steps") or 0
+    if total == 0 and r.get("config_snapshot"):
+        try:
+            cfg = json.loads(r["config_snapshot"])
+            t = cfg.get("training", {})
+            total = t.get("max_iters", t.get("epochs", 0) * 100)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {
+        "run_id": r["id"],
+        "status": r["status"],
+        "current_step": r["current_step"] or 0,
+        "total_steps": total,
+        "metrics_count": 0,
+        "template": r.get("template_key") or "transformer",
+        "elapsed_seconds": 0,
+        "from_db": True,
+    }

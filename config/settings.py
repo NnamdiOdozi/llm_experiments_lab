@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     database_path: Path = Path("lab.db")
 
     default_device: str = "cpu"
-    max_concurrent_runs: int = 3
+    max_concurrent_runs: int = 2
+    max_concurrent_gpu_runs: int = 1
 
     data_dir: Path = Path("./data")
 

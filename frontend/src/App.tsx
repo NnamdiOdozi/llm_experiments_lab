@@ -9,6 +9,7 @@ import TrainingControls from "./components/TrainingControls";
 import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
 import ExperimentNotes from "./components/ExperimentNotes";
+import ErrorBoundary from "./components/ErrorBoundary";
 import {
   startTraining,
   pauseTraining,
@@ -23,15 +24,15 @@ const SESSION_KEY = "llm_lab_session";
 
 function saveSession(experimentId: number | null, runId: number | null, config: ExperimentConfig | null) {
   if (experimentId != null && config != null) {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ experimentId, runId, config }));
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ experimentId, runId, config }));
   } else {
-    localStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_KEY);
   }
 }
 
 function loadSession(): { experimentId: number; runId: number | null; config: ExperimentConfig } | null {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
+    const raw = sessionStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const s = JSON.parse(raw);
     if (s.experimentId != null && s.config != null) return s;
@@ -48,6 +49,11 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
+  const [disconnected, setDisconnected] = useState(false);
+  const [lastPollSuccess, setLastPollSuccess] = useState<number | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+  const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -77,10 +83,21 @@ export default function App() {
       setRunStatus(status);
       const m = await fetchMetrics(runId);
       setMetrics(m);
+      failCountRef.current = 0;
+      setDisconnected(false);
+      setLastPollSuccess(Date.now());
+      setPollError(null);
       if (status.status === "completed" || status.status === "failed" || status.status === "cancelled") {
         if (pollRef.current) clearInterval(pollRef.current);
       }
-    } catch { /* ignore poll errors */ }
+    } catch (err) {
+      const isNetworkError = err instanceof TypeError || (err instanceof Error && !err.message.match(/^4\d\d/));
+      if (isNetworkError) {
+        failCountRef.current += 1;
+        if (failCountRef.current >= 3) setDisconnected(true);
+      }
+      setPollError(err instanceof Error ? err.message : "Poll failed");
+    }
   }, [runId]);
 
   useEffect(() => {
@@ -93,15 +110,25 @@ export default function App() {
   async function handleStart() {
     if (experimentId == null || !config) return;
     setLoading(true);
+    setStartError(null);
     // Flush any pending config debounce before starting
     if (configTimerRef.current) {
       clearTimeout(configTimerRef.current);
       configTimerRef.current = null;
       await updateConfig(experimentId, config);
     }
-    const { run_id } = await startTraining(experimentId, device);
-    setRunId(run_id);
-    saveSession(experimentId, run_id, config);
+    try {
+      const { run_id } = await startTraining(experimentId, device);
+      setRunId(run_id);
+      saveSession(experimentId, run_id, config);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith("429")) {
+        setStartError("Max concurrent runs reached. Stop a run first.");
+      } else {
+        setStartError(msg);
+      }
+    }
     setLoading(false);
   }
 
@@ -129,6 +156,7 @@ export default function App() {
   // No experiment selected: show preset picker
   if (!experimentId || !config) {
     return (
+      <ErrorBoundary>
       <div style={{ maxWidth: 700, margin: "60px auto", padding: "0 20px" }}>
         <h1 style={{ fontSize: 24, marginBottom: 8 }}>LLM Experiments Lab</h1>
         <p style={{ color: "var(--text-dim)", marginBottom: 24, fontSize: 14 }}>
@@ -136,12 +164,35 @@ export default function App() {
         </p>
         <PresetPicker onSelect={handlePresetSelect} />
       </div>
+      </ErrorBoundary>
     );
   }
 
   // Experiment selected: show lab workspace
   return (
+    <ErrorBoundary>
     <div style={{ padding: 20 }}>
+      {disconnected && (
+        <div style={{
+          background: "var(--red, #e53e3e)",
+          color: "#fff",
+          padding: "8px 16px",
+          borderRadius: 6,
+          marginBottom: 12,
+          fontSize: 13,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}>
+          <span>⚠ Backend disconnected — restart the server and refresh</span>
+          <button
+            style={{ background: "rgba(255,255,255,0.2)", border: "none", color: "#fff", padding: "4px 10px", borderRadius: 4, cursor: "pointer" }}
+            onClick={() => { setDisconnected(false); failCountRef.current = 0; }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h1 style={{ fontSize: 20 }}>
           LLM Experiments Lab
@@ -179,6 +230,9 @@ export default function App() {
             loading={loading}
             device={device}
             onDeviceChange={setDevice}
+            lastPollSuccess={lastPollSuccess}
+            pollError={pollError}
+            startError={startError}
           />
           <ExportBar experimentId={experimentId} />
           <ExperimentNotes experimentId={experimentId} />
@@ -195,5 +249,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </ErrorBoundary>
   );
 }

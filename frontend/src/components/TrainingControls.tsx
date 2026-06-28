@@ -10,6 +10,9 @@ interface Props {
   loading: boolean;
   device: string;
   onDeviceChange: (d: string) => void;
+  lastPollSuccess: number | null;
+  pollError: string | null;
+  startError: string | null;
 }
 
 function statusTag(status: string) {
@@ -50,14 +53,33 @@ export default function TrainingControls({
   loading,
   device,
   onDeviceChange,
+  lastPollSuccess,
+  pollError,
+  startError,
 }: Props) {
   const status = runStatus?.status;
   const isActive = status === "running" || status === "starting" || status === "pause_requested" || status === "checkpointing" || status === "resuming";
   const isDone = !status || status === "completed" || status === "failed" || status === "cancelled";
 
+  const staleSeconds = lastPollSuccess ? Math.floor((Date.now() - lastPollSuccess) / 1000) : null;
+  const isStale = staleSeconds != null && staleSeconds > 10 && isActive;
+
   return (
     <div className="panel">
       <h3>Training</h3>
+
+      {startError && (
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+          {startError}
+        </div>
+      )}
+
+      {isStale && (
+        <div style={{ background: "#dd6b20", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+          Data may be stale — last update {staleSeconds}s ago
+          {pollError && <span> ({pollError})</span>}
+        </div>
+      )}
 
       {runStatus && (
         <div style={{ marginBottom: 12 }}>
