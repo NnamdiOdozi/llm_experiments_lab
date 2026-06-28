@@ -259,11 +259,11 @@ def train_transformer(ws: WorkerState):
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
+    # Checkpoint is saved AFTER completing step N, so resume from N+1
+    start_step = ws.current_step + 1 if ws.resume else 0
 
-    for step in range(ws.current_step, max_iters + 1):
+    for step in range(start_step, max_iters + 1):
         ws.current_step = step
-        if ws.check_pause(step):
-            return
 
         xb, yb = ws.dataset.get_batch("train", device)
         _, loss = ws.model(xb, yb)
@@ -271,9 +271,11 @@ def train_transformer(ws: WorkerState):
         loss.backward()
         ws.optimizer.step()
 
+        # Check pause/stop AFTER training step so checkpoint = completed step
+        if ws.check_pause(step):
+            return
+
         if step > 0 and step % log_interval == 0:
-            if ws.check_pause(step):
-                return
             losses = _transformer_eval(ws.model, ws.dataset, device, num_eval_iters)
             ws.write_metric({
                 "step": step,
@@ -349,11 +351,10 @@ def train_moe(ws: WorkerState):
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
+    start_step = ws.current_step + 1 if ws.resume else 0
 
-    for step in range(ws.current_step, max_iters + 1):
+    for step in range(start_step, max_iters + 1):
         ws.current_step = step
-        if ws.check_pause(step):
-            return
 
         xb, yb = ws.dataset.get_batch("train", device)
         _, loss, _ = ws.model(xb, yb)
@@ -361,9 +362,11 @@ def train_moe(ws: WorkerState):
         loss.backward()
         ws.optimizer.step()
 
+        # Check pause/stop AFTER training step so checkpoint = completed step
+        if ws.check_pause(step):
+            return
+
         if step > 0 and step % log_interval == 0:
-            if ws.check_pause(step):
-                return
             metrics = _moe_eval(ws.model, ws.dataset, device, num_eval_iters)
             ws.write_metric({
                 "step": step,
@@ -402,9 +405,6 @@ def train_rnn(ws: WorkerState):
     val_set = torch.utils.data.Subset(dataset, range(n_train, n_total))
 
     batch_size = train_cfg["batch_size"]
-    train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, drop_last=True,
-    )
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, drop_last=True,
     )
@@ -444,28 +444,32 @@ def train_rnn(ws: WorkerState):
     torch.manual_seed(settings.random_seed)
     counter = 0
     start_epoch = 0
-    resume_step = 0
+    resume_batch = 0  # batch index to resume from within the epoch
     if ws.resume:
-        resume_step = ws.current_step
-        counter = resume_step
-        # epoch stored by save_checkpoint(..., epoch=epoch)
         cp_path = artifacts.checkpoint_path(ws.run_id)
         cp_data = torch.load(cp_path, map_location="cpu", weights_only=False)
         start_epoch = cp_data.get("epoch", 0)
+        resume_batch = cp_data.get("batch_in_epoch", 0)
         del cp_data
+        counter = ws.current_step
 
     for epoch in range(start_epoch, epochs):
-        ws.checkpoint_extra = {"epoch": epoch}
+        # Deterministic shuffle per epoch — same seed reproduces same order
+        epoch_gen = torch.Generator().manual_seed(settings.random_seed + epoch)
+        train_loader = torch.utils.data.DataLoader(
+            train_set, batch_size=batch_size, shuffle=True, drop_last=True,
+            generator=epoch_gen,
+        )
+        ws.checkpoint_extra = {"epoch": epoch, "batch_in_epoch": 0}
         h = ws.model.init_hidden(batch_size, device)
 
-        for x, targets in train_loader:
+        for batch_idx, (x, targets) in enumerate(train_loader):
+            # Skip batches already completed in a resumed epoch
+            if epoch == start_epoch and batch_idx < resume_batch:
+                continue
             counter += 1
-            if counter <= resume_step:
-                continue  # skip already-trained batches
             ws.current_step = counter
-
-            if ws.check_pause(counter):
-                return
+            ws.checkpoint_extra = {"epoch": epoch, "batch_in_epoch": batch_idx + 1}
 
             x_encoded = one_hot_encode(x, n_chars)
             inputs = torch.from_numpy(x_encoded).to(device)
@@ -478,6 +482,10 @@ def train_rnn(ws: WorkerState):
             loss.backward()
             nn.utils.clip_grad_norm_(ws.model.parameters(), clip)
             ws.optimizer.step()
+
+            # Check pause/stop AFTER training step so checkpoint = completed step
+            if ws.check_pause(counter):
+                return
 
             if counter % print_every == 0:
                 val_h = ws.model.init_hidden(batch_size, device)
@@ -502,9 +510,9 @@ def train_rnn(ws: WorkerState):
                     "elapsed_seconds": round(time.time() - ws.started_at, 1),
                     "param_count": _param_count(ws.model),
                 })
-                ws.save_checkpoint(counter, epoch=epoch)
+                ws.save_checkpoint(counter, **ws.checkpoint_extra)
 
-    ws.save_checkpoint(counter, epoch=epochs - 1)
+    ws.save_checkpoint(counter, **ws.checkpoint_extra)
     sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
     ws.set_status("completed")
 

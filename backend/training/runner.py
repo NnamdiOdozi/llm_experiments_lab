@@ -4,7 +4,10 @@ Replaced the old threaded runner. Training now runs in separate processes
 that communicate via files (status.json, metrics.jsonl, flag files).
 """
 
+import ctypes
+import ctypes.util
 import json
+import signal
 import subprocess
 import sys
 import threading
@@ -16,6 +19,16 @@ from backend.training import artifacts
 from backend.db import sync_update_training_run
 from backend.logging_config import training_log
 from config.settings import settings
+
+
+def _set_pdeathsig():
+    """preexec_fn: worker receives SIGTERM when parent API process dies (Linux only)."""
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except (OSError, TypeError):
+        pass  # Non-Linux — skip silently
 
 
 # Keep RunStatus constants for backward compatibility with training.py imports
@@ -84,10 +97,11 @@ def start_run(run_id: int, experiment_id: int, config: dict, device: str = "cpu"
     artifacts.remove_flag(run_id, "stop")
     artifacts.remove_flag(run_id, "pause")
 
-    # Launch worker subprocess
+    # Launch worker subprocess — dies with parent via prctl
     proc = subprocess.Popen(
         [sys.executable, "-m", "backend.training.train_worker", "--run-dir", str(rd)],
         cwd=str(_project_root()),
+        preexec_fn=_set_pdeathsig,
     )
 
     active_runs[run_id] = ActiveRun(
@@ -133,11 +147,12 @@ def resume_run(run_id: int) -> bool:
     # Read config for metadata
     config = json.loads((rd / "config.json").read_text())
 
-    # Launch new worker with --resume
+    # Launch new worker with --resume — dies with parent via prctl
     proc = subprocess.Popen(
         [sys.executable, "-m", "backend.training.train_worker",
          "--run-dir", str(rd), "--resume"],
         cwd=str(_project_root()),
+        preexec_fn=_set_pdeathsig,
     )
 
     active_runs[run_id] = ActiveRun(
@@ -296,3 +311,21 @@ def get_run_status(run_id: int) -> dict | None:
         }
 
     return None
+
+
+def shutdown_all_workers():
+    """Cleanly stop all active workers — called during API shutdown."""
+    for run_id, run in list(active_runs.items()):
+        if run.process.poll() is None:
+            artifacts.write_flag(run_id, "stop")
+            training_log.info("SHUTDOWN stopping run_id=%d pid=%d", run_id, run.process.pid)
+    # Give workers grace period to exit cooperatively
+    deadline = time.time() + settings.stop_grace_seconds
+    for run_id, run in list(active_runs.items()):
+        remaining = max(0, deadline - time.time())
+        try:
+            run.process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            run.process.terminate()
+            training_log.warning("SHUTDOWN terminated run_id=%d", run_id)
+    active_runs.clear()

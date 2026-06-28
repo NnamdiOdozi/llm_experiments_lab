@@ -172,6 +172,24 @@ def sync_update_training_run(run_id: int, **kwargs):
     conn.close()
 
 
+async def reconcile_orphaned_runs() -> int:
+    """Mark runs with active status as failed — called on startup to clear stale state.
+    After a backend restart no worker processes exist, so any 'active' row is orphaned.
+    """
+    active_statuses = ("queued", "starting", "running", "pause_requested", "checkpointing", "resuming")
+    placeholders = ",".join("?" for _ in active_statuses)
+    db = await get_db()
+    cursor = await db.execute(
+        f"UPDATE training_runs SET status = 'failed', error_message = 'Backend restarted — worker lost' "
+        f"WHERE status IN ({placeholders})",
+        active_statuses,
+    )
+    count = cursor.rowcount
+    await db.commit()
+    await db.close()
+    return count
+
+
 async def count_active_runs_in_db(device_filter: str | None = None) -> int:
     """Count runs with active statuses in DB — survives API restarts."""
     active_statuses = ("queued", "starting", "running", "pause_requested", "checkpointing", "resuming")

@@ -111,13 +111,13 @@ export default function App() {
     if (experimentId == null || !config) return;
     setLoading(true);
     setStartError(null);
-    // Flush any pending config debounce before starting
-    if (configTimerRef.current) {
-      clearTimeout(configTimerRef.current);
-      configTimerRef.current = null;
-      await updateConfig(experimentId, config);
-    }
     try {
+      // Flush any pending config debounce before starting
+      if (configTimerRef.current) {
+        clearTimeout(configTimerRef.current);
+        configTimerRef.current = null;
+        await updateConfig(experimentId, config);
+      }
       const { run_id } = await startTraining(experimentId, device);
       setRunId(run_id);
       saveSession(experimentId, run_id, config);

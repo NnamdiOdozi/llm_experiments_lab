@@ -12,6 +12,7 @@ from backend.api.experiments import router as experiments_router
 from backend.api.training import router as training_router
 from backend.api.codegen import router as code_router
 from backend.logging_config import setup_logging, request_log, error_log, session_log
+from backend.training.runner import shutdown_all_workers
 from config.settings import settings
 
 
@@ -20,9 +21,14 @@ async def lifespan(app: FastAPI):
     log_path = setup_logging()
     session_log.info("Initializing database")
     await db.init_db()
+    orphaned = await db.reconcile_orphaned_runs()
+    if orphaned:
+        session_log.warning("Reconciled %d orphaned run(s) from previous session", orphaned)
     session_log.info("Application ready — serving requests")
     yield
-    session_log.info("Server shutting down")
+    session_log.info("Server shutting down — stopping active workers")
+    shutdown_all_workers()
+    session_log.info("Shutdown complete")
 
 
 app = FastAPI(
