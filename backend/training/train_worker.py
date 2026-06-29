@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from backend.training import artifacts
+from backend.training.status import RunStatus
 from backend.training.templates import TEMPLATE_REGISTRY
 from backend.training.templates.transformer.data import CharDataset, load_tiny_shakespeare
 from backend.training.templates.rnn.data import DinosDataset, load_dinos_dataset
@@ -88,6 +89,27 @@ class WorkerState:
         t = self.config.get("training", {})
         return t.get("max_iters", t.get("epochs", 0) * 100)
 
+    def yield_gpu(self, step: int):
+        """Sync + micro-sleep every N steps so WSL2 display compositor isn't starved."""
+        if settings.gpu_yield_enabled and self.device != "cpu" and step % settings.gpu_yield_interval == 0:
+            torch.cuda.synchronize()
+            time.sleep(0.001)
+
+    def sync_metadata(self, dataset_name: str):
+        """Write run metadata to DB and disk — called once at training start."""
+        sync_update_training_run(self.run_id,
+            config_snapshot=json.dumps(self.config),
+            seed=settings.random_seed,
+            template_key=self.template_key,
+            dataset_name=dataset_name,
+            metrics_path=str(artifacts.metrics_path(self.run_id)),
+            device_name=_get_device_name(self.device),
+            param_count=_param_count(self.model),
+            package_versions=json.dumps(_get_package_versions()),
+            git_commit=_get_git_commit(),
+        )
+        self.write_run_meta(dataset_name)
+
     def set_status(self, status: str):
         elapsed = time.time() - self.started_at if self.started_at > 0 else 0
         artifacts.write_status(self.run_id, {
@@ -101,9 +123,9 @@ class WorkerState:
             "pid": os.getpid(),
         })
         updates: dict = {"status": status, "current_step": self.current_step}
-        if status == "running":
+        if status == RunStatus.RUNNING:
             updates["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        elif status in ("completed", "failed"):
+        elif status in (RunStatus.COMPLETED, RunStatus.FAILED):
             updates["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         sync_update_training_run(self.run_id, **updates)
 
@@ -111,7 +133,7 @@ class WorkerState:
         """Update status.json with current step/metrics count without changing status."""
         elapsed = time.time() - self.started_at if self.started_at > 0 else 0
         status = artifacts.read_status(self.run_id)
-        current_status = status["status"] if status else "running"
+        current_status = status["status"] if status else RunStatus.RUNNING
         artifacts.write_status(self.run_id, {
             "run_id": self.run_id,
             "status": current_status,
@@ -169,18 +191,18 @@ class WorkerState:
     def check_pause(self, step: int) -> bool:
         """Check pause/stop flags. Returns True if run should terminate."""
         if artifacts.has_flag(self.run_id, "pause"):
-            self.set_status("pause_requested")
-            self.set_status("checkpointing")
+            self.set_status(RunStatus.PAUSE_REQUESTED)
+            self.set_status(RunStatus.CHECKPOINTING)
             self.save_checkpoint(step, **self.checkpoint_extra)
             sync_update_training_run(
                 self.run_id,
                 checkpoint_path=str(artifacts.checkpoint_path(self.run_id)),
             )
-            self.set_status("paused")
+            self.set_status(RunStatus.PAUSED)
             # Exit process — resume will launch a new worker from checkpoint
             sys.exit(0)
         if artifacts.has_flag(self.run_id, "stop"):
-            self.set_status("cancelled")
+            self.set_status(RunStatus.CANCELLED)
             return True
         return False
 
@@ -225,7 +247,7 @@ def train_transformer(ws: WorkerState):
     train_cfg = config["training"]
     device = ws.device
 
-    ws.set_status("starting")
+    ws.set_status(RunStatus.STARTING)
 
     text = load_tiny_shakespeare()
     ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
@@ -238,21 +260,10 @@ def train_transformer(ws: WorkerState):
     if ws.resume:
         ws.load_checkpoint()
 
-    sync_update_training_run(ws.run_id,
-        config_snapshot=json.dumps(config),
-        seed=settings.random_seed,
-        template_key="transformer",
-        dataset_name="tiny_shakespeare",
-        metrics_path=str(artifacts.metrics_path(ws.run_id)),
-        device_name=_get_device_name(device),
-        param_count=_param_count(ws.model),
-        package_versions=json.dumps(_get_package_versions()),
-        git_commit=_get_git_commit(),
-    )
-    ws.write_run_meta("tiny_shakespeare")
+    ws.sync_metadata("tiny_shakespeare")
 
     ws.started_at = time.time()
-    ws.set_status("running")
+    ws.set_status(RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
@@ -270,11 +281,7 @@ def train_transformer(ws: WorkerState):
         ws.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         ws.optimizer.step()
-
-        # Yield GPU periodically so WSL2 display compositor can run
-        if settings.gpu_yield_enabled and device != "cpu" and step % settings.gpu_yield_interval == 0:
-            torch.cuda.synchronize()
-            time.sleep(0.001)
+        ws.yield_gpu(step)
 
         # Check pause/stop AFTER training step so checkpoint = completed step
         if ws.check_pause(step):
@@ -294,7 +301,7 @@ def train_transformer(ws: WorkerState):
 
     ws.save_checkpoint(max_iters)
     sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
-    ws.set_status("completed")
+    ws.set_status(RunStatus.COMPLETED)
 
 
 # ── MoE ─────────────────────────────────────────────────────────────
@@ -322,7 +329,7 @@ def train_moe(ws: WorkerState):
     train_cfg = config["training"]
     device = ws.device
 
-    ws.set_status("starting")
+    ws.set_status(RunStatus.STARTING)
 
     text = load_tiny_shakespeare()
     ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
@@ -335,21 +342,10 @@ def train_moe(ws: WorkerState):
     if ws.resume:
         ws.load_checkpoint()
 
-    sync_update_training_run(ws.run_id,
-        config_snapshot=json.dumps(config),
-        seed=settings.random_seed,
-        template_key="moe",
-        dataset_name="tiny_shakespeare",
-        metrics_path=str(artifacts.metrics_path(ws.run_id)),
-        device_name=_get_device_name(device),
-        param_count=_param_count(ws.model),
-        package_versions=json.dumps(_get_package_versions()),
-        git_commit=_get_git_commit(),
-    )
-    ws.write_run_meta("tiny_shakespeare")
+    ws.sync_metadata("tiny_shakespeare")
 
     ws.started_at = time.time()
-    ws.set_status("running")
+    ws.set_status(RunStatus.RUNNING)
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
@@ -366,11 +362,7 @@ def train_moe(ws: WorkerState):
         ws.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         ws.optimizer.step()
-
-        # Yield GPU periodically so WSL2 display compositor can run
-        if settings.gpu_yield_enabled and device != "cpu" and step % settings.gpu_yield_interval == 0:
-            torch.cuda.synchronize()
-            time.sleep(0.001)
+        ws.yield_gpu(step)
 
         # Check pause/stop AFTER training step so checkpoint = completed step
         if ws.check_pause(step):
@@ -392,7 +384,7 @@ def train_moe(ws: WorkerState):
 
     ws.save_checkpoint(max_iters)
     sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
-    ws.set_status("completed")
+    ws.set_status(RunStatus.COMPLETED)
 
 
 # ── RNN ─────────────────────────────────────────────────────────────
@@ -403,7 +395,7 @@ def train_rnn(ws: WorkerState):
     train_cfg = config["training"]
     device = ws.device
 
-    ws.set_status("starting")
+    ws.set_status(RunStatus.STARTING)
 
     seq_len = train_cfg.get("seq_len", 50)
     dataset = load_dinos_dataset(seq_len)
@@ -430,21 +422,10 @@ def train_rnn(ws: WorkerState):
     if ws.resume:
         ws.load_checkpoint()
 
-    sync_update_training_run(ws.run_id,
-        config_snapshot=json.dumps(config),
-        seed=settings.random_seed,
-        template_key="rnn",
-        dataset_name="dinos",
-        metrics_path=str(artifacts.metrics_path(ws.run_id)),
-        device_name=_get_device_name(device),
-        param_count=_param_count(ws.model),
-        package_versions=json.dumps(_get_package_versions()),
-        git_commit=_get_git_commit(),
-    )
-    ws.write_run_meta("dinos")
+    ws.sync_metadata("dinos")
 
     ws.started_at = time.time()
-    ws.set_status("running")
+    ws.set_status(RunStatus.RUNNING)
     epochs = train_cfg.get("epochs", 50)
     clip = train_cfg.get("clip", 5)
     print_every = train_cfg.get("print_every", 10)
@@ -492,11 +473,7 @@ def train_rnn(ws: WorkerState):
             loss.backward()
             nn.utils.clip_grad_norm_(ws.model.parameters(), clip)
             ws.optimizer.step()
-
-            # Yield GPU periodically so WSL2 display compositor can run
-            if settings.gpu_yield_enabled and device != "cpu" and counter % settings.gpu_yield_interval == 0:
-                torch.cuda.synchronize()
-                time.sleep(0.001)
+            ws.yield_gpu(counter)
 
             # Check pause/stop AFTER training step so checkpoint = completed step
             if ws.check_pause(counter):
@@ -529,7 +506,7 @@ def train_rnn(ws: WorkerState):
 
     ws.save_checkpoint(counter, **ws.checkpoint_extra)
     sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
-    ws.set_status("completed")
+    ws.set_status(RunStatus.COMPLETED)
 
 
 # ── Dispatch + entry point ──────────────────────────────────────────
@@ -562,7 +539,7 @@ def main():
             raise ValueError(f"Unknown template: {template_key}")
         dispatcher(ws)
     except Exception as e:
-        ws.set_status("failed")
+        ws.set_status(RunStatus.FAILED)
         sync_update_training_run(ws.run_id, error_message=str(e))
         traceback.print_exc()
         sys.exit(1)

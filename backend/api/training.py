@@ -17,6 +17,7 @@ from backend.training.runner import (
     prompt_paused_model,
     get_run_status,
 )
+from backend.training.status import RunStatus, TERMINAL_STATUSES
 from config.settings import settings
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -84,7 +85,7 @@ async def start_training(req: StartRunRequest):
             run_id, req.experiment_id, req.device, config.get("template", "transformer"),
         )
 
-        return {"run_id": run_id, "status": "queued"}
+        return {"run_id": run_id, "status": RunStatus.QUEUED}
 
 
 @router.post("/{run_id}/pause")
@@ -108,7 +109,7 @@ async def resume_training(run_id: int):
     if not resume_run(run_id, updated_config):
         raise HTTPException(400, "Run not found or not paused")
     training_log.info("RESUME run_id=%d config_refreshed=%s", run_id, updated_config is not None)
-    return {"run_id": run_id, "status": "resuming"}
+    return {"run_id": run_id, "status": RunStatus.RESUMING}
 
 
 @router.post("/{run_id}/stop")
@@ -207,7 +208,7 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
             })
 
             # Stop streaming if run is done
-            if status["status"] in ("completed", "failed", "cancelled"):
+            if status["status"] in TERMINAL_STATUSES:
                 await websocket.send_json({"type": "done", "status": status["status"]})
                 break
 

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.training import artifacts
+from backend.training.status import RunStatus, ACTIVE_STATUSES, TERMINAL_STATUSES, PAUSED_STATUSES
 from backend.db import sync_update_training_run
 from backend.logging_config import training_log
 from config.settings import settings
@@ -29,20 +30,6 @@ def _set_pdeathsig():
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
     except (OSError, TypeError):
         pass  # Non-Linux — skip silently
-
-
-# Keep RunStatus constants for backward compatibility with training.py imports
-class RunStatus:
-    QUEUED = "queued"
-    STARTING = "starting"
-    RUNNING = "running"
-    PAUSE_REQUESTED = "pause_requested"
-    CHECKPOINTING = "checkpointing"
-    PAUSED = "paused"
-    RESUMING = "resuming"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -67,9 +54,9 @@ def _cleanup_finished():
         if run.process.poll() is not None:
             # Process exited — check if status was set properly
             status = artifacts.read_status(run_id)
-            if status and status.get("status") not in ("completed", "failed", "cancelled", "paused"):
-                artifacts.write_status(run_id, {**status, "status": "failed"})
-                sync_update_training_run(run_id, status="failed",
+            if status and status.get("status") not in TERMINAL_STATUSES | PAUSED_STATUSES:
+                artifacts.write_status(run_id, {**status, "status": RunStatus.FAILED})
+                sync_update_training_run(run_id, status=RunStatus.FAILED,
                                          error_message="Worker process exited unexpectedly")
                 training_log.warning("Worker died unexpectedly run_id=%d exit_code=%d",
                                      run_id, run.process.returncode)
@@ -99,7 +86,7 @@ def start_run(run_id: int, experiment_id: int, config: dict, device: str = "cpu"
 
     # Reset stale artifacts from previous run in same directory so the
     # WebSocket/poller doesn't briefly serve old status or metrics.
-    artifacts.write_status(run_id, {"status": "queued", "current_step": 0, "total_steps": 0})
+    artifacts.write_status(run_id, {"status": RunStatus.QUEUED, "current_step": 0, "total_steps": 0})
     metrics_file = artifacts.metrics_path(run_id)
     if metrics_file.exists():
         metrics_file.write_text("")
@@ -132,7 +119,7 @@ def pause_run(run_id: int) -> bool:
     if run is None or run.process.poll() is not None:
         return False
     status = artifacts.read_status(run_id)
-    if status is None or status.get("status") != "running":
+    if status is None or status.get("status") != RunStatus.RUNNING:
         return False
     artifacts.write_flag(run_id, "pause")
     return True
@@ -147,7 +134,7 @@ def resume_run(run_id: int, updated_config: dict | None = None) -> bool:
     """
     _cleanup_finished()
     status = artifacts.read_status(run_id)
-    if status is None or status.get("status") != "paused":
+    if status is None or status.get("status") != RunStatus.PAUSED:
         return False
 
     rd = artifacts.run_dir(run_id)
@@ -233,10 +220,10 @@ def stop_run(run_id: int) -> bool:
 
     # Process already exited (paused) — update status directly
     status = artifacts.read_status(run_id)
-    if status and status.get("status") == "paused":
-        status["status"] = "cancelled"
+    if status and status.get("status") == RunStatus.PAUSED:
+        status["status"] = RunStatus.CANCELLED
         artifacts.write_status(run_id, status)
-        sync_update_training_run(run_id, status="cancelled")
+        sync_update_training_run(run_id, status=RunStatus.CANCELLED)
         training_log.info("CANCELLED paused run_id=%d (no live process)", run_id)
         return True
 
@@ -246,7 +233,7 @@ def stop_run(run_id: int) -> bool:
 def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200) -> str | None:
     """Load checkpoint into API process, run inference, cleanup."""
     status = artifacts.read_status(run_id)
-    if status is None or status.get("status") != "paused":
+    if status is None or status.get("status") != RunStatus.PAUSED:
         return None
 
     rd = artifacts.run_dir(run_id)
@@ -330,10 +317,10 @@ def get_run_status(run_id: int) -> dict | None:
         # Check if process died unexpectedly
         run = active_runs.get(run_id)
         if run and run.process.poll() is not None:
-            if status.get("status") not in ("completed", "failed", "cancelled", "paused"):
-                status["status"] = "failed"
+            if status.get("status") not in TERMINAL_STATUSES | PAUSED_STATUSES:
+                status["status"] = RunStatus.FAILED
                 artifacts.write_status(run_id, status)
-                sync_update_training_run(run_id, status="failed",
+                sync_update_training_run(run_id, status=RunStatus.FAILED,
                                          error_message="Worker process died unexpectedly")
         return status
 
@@ -342,7 +329,7 @@ def get_run_status(run_id: int) -> dict | None:
     if run is not None:
         return {
             "run_id": run_id,
-            "status": "queued",
+            "status": RunStatus.QUEUED,
             "current_step": 0,
             "total_steps": 0,
             "metrics_count": 0,

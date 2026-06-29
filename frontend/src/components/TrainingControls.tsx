@@ -1,4 +1,4 @@
-import { RunStatus } from "../types";
+import { RunStatus, ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "../types";
 
 interface Props {
   runId: number | null;
@@ -60,8 +60,8 @@ export default function TrainingControls({
   controlError,
 }: Props) {
   const status = runStatus?.status;
-  const isActive = status === "running" || status === "starting" || status === "pause_requested" || status === "checkpointing" || status === "resuming";
-  const isDone = !status || status === "completed" || status === "failed" || status === "cancelled";
+  const isActive = status != null && ACTIVE_RUN_STATUSES.has(status);
+  const isDone = status == null || TERMINAL_RUN_STATUSES.has(status);
 
   const staleSeconds = lastPollSuccess ? Math.floor((Date.now() - lastPollSuccess) / 1000) : null;
   const isStale = staleSeconds != null && staleSeconds > 10 && isActive;

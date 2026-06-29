@@ -4,6 +4,7 @@ import json
 import sqlite3
 import aiosqlite
 
+from backend.training.status import RunStatus, ACTIVE_STATUSES
 from config.settings import settings
 
 DB_PATH = settings.database_path
@@ -118,7 +119,7 @@ async def create_training_run(experiment_id: int, device: str = "cpu", **extra) 
     cols = ["experiment_id", "device", "status"] + list(extra.keys())
     placeholders = ", ".join("?" for _ in cols)
     col_names = ", ".join(cols)
-    values = [experiment_id, device, "queued"] + list(extra.values())
+    values = [experiment_id, device, RunStatus.QUEUED] + list(extra.values())
     db = await get_db()
     cursor = await db.execute(
         f"INSERT INTO training_runs ({col_names}) VALUES ({placeholders})",
@@ -176,13 +177,13 @@ async def reconcile_orphaned_runs() -> int:
     """Mark runs with active status as failed — called on startup to clear stale state.
     After a backend restart no worker processes exist, so any 'active' row is orphaned.
     """
-    active_statuses = ("queued", "starting", "running", "pause_requested", "checkpointing", "resuming")
-    placeholders = ",".join("?" for _ in active_statuses)
+    statuses = tuple(ACTIVE_STATUSES)
+    placeholders = ",".join("?" for _ in statuses)
     db = await get_db()
     cursor = await db.execute(
         f"UPDATE training_runs SET status = 'failed', error_message = 'Backend restarted — worker lost' "
         f"WHERE status IN ({placeholders})",
-        active_statuses,
+        statuses,
     )
     count = cursor.rowcount
     await db.commit()
@@ -192,10 +193,10 @@ async def reconcile_orphaned_runs() -> int:
 
 async def count_active_runs_in_db(device_filter: str | None = None) -> int:
     """Count runs with active statuses in DB — survives API restarts."""
-    active_statuses = ("queued", "starting", "running", "pause_requested", "checkpointing", "resuming")
-    placeholders = ",".join("?" for _ in active_statuses)
+    statuses = tuple(ACTIVE_STATUSES)
+    placeholders = ",".join("?" for _ in statuses)
     query = f"SELECT COUNT(*) FROM training_runs WHERE status IN ({placeholders})"
-    params: list = list(active_statuses)
+    params: list = list(statuses)
     if device_filter:
         query += " AND device LIKE ?"
         params.append(f"{device_filter}%")

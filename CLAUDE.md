@@ -24,7 +24,7 @@ Avoid complex code that will be difficult for readers or users to understand, fo
 
 ### Commenting
 When implementing algorithms and anything hacky or experimental, please add comments so that the users can follow easily.
- 
+
 ### Logging
 User loves detailed, structured logs. Every log line should include: timestamp, correlation/request IDs, relevant entity IDs, old→new state transitions, and rich metadata. Logs are like run records — treat them as first-class data. When in doubt, log more rather than less.
 
@@ -32,7 +32,7 @@ User loves detailed, structured logs. Every log line should include: timestamp, 
 Capture and persist metrics generously. Include contextual fields (elapsed time, learning rate, param count, device info, etc.) — not just raw values. Metrics should be queryable after the fact.
 
 ### Testing & Validation
-User values test coverage. Write integration tests for new features. Validate inputs at boundaries. Document known test limitations rather than hiding them.
+User values test coverage. Write integration tests for new features. Validate inputs at boundaries. Document known test limitations rather than hiding them. Test scripts should also have cleanup in them so that I don't have stray files or stray processes running. 
 
 ### .gitignore Hygiene
 At project init or when adding new file types, audit `.gitignore` to ensure:

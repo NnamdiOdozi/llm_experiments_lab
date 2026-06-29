@@ -29,7 +29,7 @@ export interface Experiment {
 export interface TrainingRun {
   id: number;
   experiment_id: number;
-  status: string;
+  status: RunStatusValue;
   device: string;
   train_loss_history: string;
   val_loss_history: string;
@@ -41,9 +41,29 @@ export interface TrainingRun {
   completed_at: string | null;
 }
 
+/** Must match backend/training/status.py RunStatus enum */
+export type RunStatusValue =
+  | "queued"
+  | "starting"
+  | "running"
+  | "pause_requested"
+  | "checkpointing"
+  | "paused"
+  | "resuming"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export const ACTIVE_RUN_STATUSES = new Set<RunStatusValue>([
+  "queued", "starting", "running", "pause_requested", "checkpointing", "resuming",
+]);
+export const TERMINAL_RUN_STATUSES = new Set<RunStatusValue>([
+  "completed", "failed", "cancelled",
+]);
+
 export interface RunStatus {
   run_id: number;
-  status: string;
+  status: RunStatusValue;
   current_step: number;
   total_steps: number;
   metrics_count: number;
