@@ -271,6 +271,11 @@ def train_transformer(ws: WorkerState):
         loss.backward()
         ws.optimizer.step()
 
+        # Yield GPU periodically so WSL2 display compositor can run
+        if settings.gpu_yield_enabled and device != "cpu" and step % settings.gpu_yield_interval == 0:
+            torch.cuda.synchronize()
+            time.sleep(0.001)
+
         # Check pause/stop AFTER training step so checkpoint = completed step
         if ws.check_pause(step):
             return
@@ -361,6 +366,11 @@ def train_moe(ws: WorkerState):
         ws.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         ws.optimizer.step()
+
+        # Yield GPU periodically so WSL2 display compositor can run
+        if settings.gpu_yield_enabled and device != "cpu" and step % settings.gpu_yield_interval == 0:
+            torch.cuda.synchronize()
+            time.sleep(0.001)
 
         # Check pause/stop AFTER training step so checkpoint = completed step
         if ws.check_pause(step):
@@ -482,6 +492,11 @@ def train_rnn(ws: WorkerState):
             loss.backward()
             nn.utils.clip_grad_norm_(ws.model.parameters(), clip)
             ws.optimizer.step()
+
+            # Yield GPU periodically so WSL2 display compositor can run
+            if settings.gpu_yield_enabled and device != "cpu" and counter % settings.gpu_yield_interval == 0:
+                torch.cuda.synchronize()
+                time.sleep(0.001)
 
             # Check pause/stop AFTER training step so checkpoint = completed step
             if ws.check_pause(counter):

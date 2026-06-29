@@ -97,6 +97,13 @@ def start_run(run_id: int, experiment_id: int, config: dict, device: str = "cpu"
     artifacts.remove_flag(run_id, "stop")
     artifacts.remove_flag(run_id, "pause")
 
+    # Reset stale artifacts from previous run in same directory so the
+    # WebSocket/poller doesn't briefly serve old status or metrics.
+    artifacts.write_status(run_id, {"status": "queued", "current_step": 0, "total_steps": 0})
+    metrics_file = artifacts.metrics_path(run_id)
+    if metrics_file.exists():
+        metrics_file.write_text("")
+
     # Launch worker subprocess — dies with parent via prctl
     proc = subprocess.Popen(
         [sys.executable, "-m", "backend.training.train_worker", "--run-dir", str(rd)],
@@ -131,8 +138,13 @@ def pause_run(run_id: int) -> bool:
     return True
 
 
-def resume_run(run_id: int) -> bool:
-    """Resume from checkpoint — launch new worker subprocess."""
+def resume_run(run_id: int, updated_config: dict | None = None) -> bool:
+    """Resume from checkpoint — launch new worker subprocess.
+
+    If updated_config is provided (from DB), hot-reloadable fields like
+    max_iters and eval_interval are merged into the run's config.json
+    so the new worker picks them up.
+    """
     _cleanup_finished()
     status = artifacts.read_status(run_id)
     if status is None or status.get("status") != "paused":
@@ -146,6 +158,13 @@ def resume_run(run_id: int) -> bool:
 
     # Read config for metadata
     config = json.loads((rd / "config.json").read_text())
+
+    # Apply user edits made while paused (e.g. max_iters, eval_interval)
+    if updated_config:
+        for section in ("training", "inference"):
+            if section in updated_config:
+                config[section] = {**config.get(section, {}), **updated_config[section]}
+        (rd / "config.json").write_text(json.dumps(config, indent=2))
 
     # Launch new worker with --resume — dies with parent via prctl
     proc = subprocess.Popen(

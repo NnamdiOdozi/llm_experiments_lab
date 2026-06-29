@@ -97,9 +97,17 @@ async def pause_training(run_id: int):
 
 @router.post("/{run_id}/resume")
 async def resume_training(run_id: int):
-    if not resume_run(run_id):
+    # Fetch latest config from DB so edits made while paused
+    # (e.g. max_iters, eval_interval, inference params) take effect.
+    updated_config = None
+    db_run = await db.get_training_run(run_id)
+    if db_run:
+        exp = await db.get_experiment(db_run["experiment_id"])
+        if exp:
+            updated_config = json.loads(exp["config_json"])
+    if not resume_run(run_id, updated_config):
         raise HTTPException(400, "Run not found or not paused")
-    training_log.info("RESUME run_id=%d", run_id)
+    training_log.info("RESUME run_id=%d config_refreshed=%s", run_id, updated_config is not None)
     return {"run_id": run_id, "status": "resuming"}
 
 
@@ -144,8 +152,12 @@ def _read_metrics_from_disk(run_id: int) -> list[dict]:
     with open(metrics_file) as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 metrics.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # skip corrupt/partial lines from crashed runs
     return metrics
 
 

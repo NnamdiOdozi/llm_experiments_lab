@@ -19,6 +19,12 @@ User is allergic to hardcoded values. All configurable values belong in config f
 ### DRY / No Boilerplate
 If code ≥10 lines is repeated, extract to a function. Use abstractions, classes, and objects where they reduce repetition. Prefer idempotent operations — repeating an action should not produce side effects or overwrite existing state incorrectly.
 
+### Complexity
+Avoid complex code that will be difficult for readers or users to understand, for example, nested list comprehensions with more than 2 tiers.
+
+### Commenting
+When implementing algorithms and anything hacky or experimental, please add comments so that the users can follow easily.
+ 
 ### Logging
 User loves detailed, structured logs. Every log line should include: timestamp, correlation/request IDs, relevant entity IDs, old→new state transitions, and rich metadata. Logs are like run records — treat them as first-class data. When in doubt, log more rather than less.
 
