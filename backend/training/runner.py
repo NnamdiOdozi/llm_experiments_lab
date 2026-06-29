@@ -239,11 +239,22 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
     template_key = config.get("template", "transformer")
     device = config.get("device", "cpu")
 
+    # Inference params (max_new_tokens, temperature) live in the experiment
+    # config under the "inference" key — editable from the dashboard ConfigPanel.
+    # Falls back to API-provided max_new_tokens / sensible defaults.
+    inference_cfg = config.get("inference", {})
+    max_tokens = inference_cfg.get("max_new_tokens", max_new_tokens)
+    temperature = inference_cfg.get("temperature", 0.8)
+
     import torch
     from backend.training.templates import TEMPLATE_REGISTRY
 
     # Load checkpoint (weights_only=False needed for optimizer state in checkpoint)
     cp = torch.load(cp_path, map_location=device, weights_only=False)
+    # Drop optimizer state immediately — not needed for inference and can
+    # be large (same size as model weights for Adam).  Frees memory before
+    # we allocate the model tensor buffers.
+    cp.pop("optimizer_state", None)
     # Use config from checkpoint — it has runtime updates (e.g. RNN vocab_size)
     model_config = cp.get("config", config)
     model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config).to(device)
@@ -259,7 +270,7 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
         encoded = dataset.encode(prompt_text)
         idx = torch.tensor([encoded], dtype=torch.long, device=device)
         with torch.no_grad():
-            output = model.generate(idx, max_new_tokens=max_new_tokens)
+            output = model.generate(idx, max_new_tokens=max_tokens, temperature=temperature)
         result = dataset.decode(output[0].tolist())
 
     elif template_key == "rnn":
@@ -270,14 +281,24 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
                 dataset.id_to_token,
                 dataset.token_to_id,
                 prefix=prompt_text.lower(),
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=max_tokens,
                 device=device,
+                temperature=temperature,
             )
         except KeyError:
             result = "[Error: prompt contains characters not in vocabulary. Use lowercase letters only.]"
 
     del model, cp
-    training_log.info("PROMPT run_id=%d template=%s prompt='%s'", run_id, template_key, prompt_text[:50])
+    # Free CUDA cached memory so the resume worker subprocess can allocate.
+    # Without this, the API process keeps a CUDA context that blocks the
+    # worker from fitting the training model on the same GPU.
+    if device != "cpu":
+        import torch
+        torch.cuda.empty_cache()
+    training_log.info(
+        "PROMPT run_id=%d template=%s prompt='%s' max_tokens=%d temperature=%.2f",
+        run_id, template_key, prompt_text[:50], max_tokens, temperature,
+    )
     return result
 
 

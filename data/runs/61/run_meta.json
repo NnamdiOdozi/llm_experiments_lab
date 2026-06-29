@@ -1,0 +1,51 @@
+{
+  "run_id": 61,
+  "template": "moe",
+  "dataset": "tiny_shakespeare",
+  "device": "cpu",
+  "started_at": "2026-06-29T15:28:46.269334",
+  "seed": 1337,
+  "param_count": 5362241,
+  "config": {
+    "name": "Mixture of Experts (DeepSeek-style)",
+    "description": "4-layer MoE transformer with 8 half-sized experts, top-2 routing, RoPE.",
+    "template": "moe",
+    "model": {
+      "vocab_size": 65,
+      "block_size": 128,
+      "n_embd": 192,
+      "n_head": 6,
+      "n_layer": 4,
+      "dropout": 0.1,
+      "pos_encoding": "rope",
+      "activation": "gelu",
+      "num_experts": 8,
+      "top_k": 2,
+      "capacity_factor": 1.25
+    },
+    "training": {
+      "batch_size": 64,
+      "learning_rate": 0.0003,
+      "max_iters": 5000,
+      "eval_interval": 20,
+      "eval_iters": 2,
+      "optimizer": "adamw"
+    },
+    "inference": {
+      "max_new_tokens": 100,
+      "temperature": 0.8
+    },
+    "dataset": "tiny_shakespeare",
+    "run_id": 61,
+    "experiment_id": 66,
+    "device": "cpu"
+  },
+  "package_versions": {
+    "torch": "2.12.1",
+    "numpy": "2.5.0",
+    "fastapi": "0.138.1",
+    "uvicorn": "0.49.0",
+    "pydantic": "2.13.4"
+  },
+  "git_commit": "cd7dc01"
+}

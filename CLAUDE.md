@@ -1,7 +1,7 @@
 Use parallel sub-agents where practical so as to reduce run time and manage context efficiently
 I usually like to preserve tokens ie usage charges and so you should confirm with me at the start the scope of tasks so as to avoid token/context intensive operations
 Never delete files directly. Always list files first and ask for explicit confirmation
-**Database files (.db, .sqlite, .sqlite3) require EXTRA caution** — never delete, overwrite, or `rm -f` any database file without explicit user confirmation. This applies to all projects, not just lab.db. Databases contain accumulated state that cannot be recreated.
+**Database files (.db, .sqlite, .sqlite3) require EXTRA caution** — never delete, overwrite, or `rm -f` any database file without explicit user confirmation. This applies to all projects, not just lab.db. Databases contain accumulated state that cannot be recreated
 I trust the files in this project
 I want to pre-allow File Reading except for files named in the .gitignore file
 I want to pre-allow these safe bash commands so I don't get prompted every time: echo, ls, cd, cp, cat, open, grep, chmod, file, bash, sh, head, tail, pwd, mkdir, wc, which, touch, diff, test, set

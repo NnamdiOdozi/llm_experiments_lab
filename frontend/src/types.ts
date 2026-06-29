@@ -5,6 +5,7 @@ export interface Preset {
   template: "transformer" | "moe" | "rnn";
   model: Record<string, number | string>;
   training: Record<string, number | string>;
+  inference?: Record<string, number | string>;
   dataset: string;
 }
 
@@ -12,6 +13,7 @@ export interface ExperimentConfig {
   template: "transformer" | "moe" | "rnn";
   model: Record<string, number | string>;
   training: Record<string, number | string>;
+  inference?: Record<string, number | string>;
 }
 
 export interface Experiment {
@@ -54,6 +56,9 @@ export interface MetricRow {
   epoch?: number;
   train_loss: number;
   val_loss: number;
+  /** MoE-only: percentage of tokens dropped due to expert capacity overflow */
+  train_drop_rate?: number;
+  val_drop_rate?: number;
 }
 
 export interface CodeFiles {

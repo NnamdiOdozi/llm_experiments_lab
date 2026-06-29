@@ -1,0 +1,6 @@
+{"step": 20, "train_loss": 2.933, "val_loss": 2.9743, "learning_rate": 0.0003, "elapsed_seconds": 62.8, "param_count": 1827137, "timestamp": "2026-06-29T14:19:27.968512"}
+{"step": 40, "train_loss": 2.7007, "val_loss": 2.6809, "learning_rate": 0.0003, "elapsed_seconds": 124.6, "param_count": 1827137, "timestamp": "2026-06-29T14:20:29.775761"}
+{"step": 60, "train_loss": 2.5864, "val_loss": 2.5957, "learning_rate": 0.0003, "elapsed_seconds": 186.4, "param_count": 1827137, "timestamp": "2026-06-29T14:21:31.605489"}
+{"step": 80, "train_loss": 2.5293, "val_loss": 2.5495, "learning_rate": 0.0003, "elapsed_seconds": 5.5, "param_count": 1827137, "timestamp": "2026-06-29T14:25:34.446243"}
+{"step": 100, "train_loss": 2.5089, "val_loss": 2.5022, "learning_rate": 0.0003, "elapsed_seconds": 58.7, "param_count": 1827137, "timestamp": "2026-06-29T14:26:27.643978"}
+{"step": 120, "train_loss": 2.4875, "val_loss": 2.4789, "learning_rate": 0.0003, "elapsed_seconds": 114.0, "param_count": 1827137, "timestamp": "2026-06-29T14:27:22.977058"}

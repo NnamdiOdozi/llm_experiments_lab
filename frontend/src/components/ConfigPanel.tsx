@@ -15,7 +15,7 @@ const DROPDOWN_FIELDS: Record<string, string[]> = {
 function renderSection(
   title: string,
   section: Record<string, number | string>,
-  sectionKey: "model" | "training",
+  sectionKey: "model" | "training" | "inference",
   config: ExperimentConfig,
   onChange: Props["onChange"],
   disabled: boolean
@@ -73,16 +73,28 @@ function renderSection(
   );
 }
 
+const INFERENCE_DEFAULTS: Record<string, number> = { max_new_tokens: 100, temperature: 0.8 };
+
 export default function ConfigPanel({ config, onChange, disabled = false }: Props) {
+  // Normalize inference section so onChange always has all fields,
+  // even for experiments created before inference config existed.
+  const normalizedConfig: ExperimentConfig = {
+    ...config,
+    inference: { ...INFERENCE_DEFAULTS, ...config.inference },
+  };
+
   return (
     <div className="panel">
       <h3>Configuration</h3>
-      <div className={`tag ${config.template === "rnn" ? "tag-paused" : "tag-running"}`}
+      <div className={`tag ${normalizedConfig.template === "rnn" ? "tag-paused" : "tag-running"}`}
         style={{ marginBottom: 12 }}>
-        {config.template}
+        {normalizedConfig.template}
       </div>
-      {renderSection("Model", config.model, "model", config, onChange, disabled)}
-      {renderSection("Training", config.training, "training", config, onChange, disabled)}
+      {renderSection("Model", normalizedConfig.model, "model", normalizedConfig, onChange, disabled)}
+      {renderSection("Training", normalizedConfig.training, "training", normalizedConfig, onChange, disabled)}
+      {/* Inference section controls generation params (temperature, max_new_tokens)
+          used when prompting a paused model from the dashboard. */}
+      {renderSection("Inference", normalizedConfig.inference!, "inference", normalizedConfig, onChange, disabled)}
     </div>
   );
 }

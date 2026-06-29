@@ -1,0 +1,30 @@
+{
+  "name": "Mixture of Experts (DeepSeek-style)",
+  "description": "4-layer MoE transformer with 8 half-sized experts, top-2 routing, RoPE.",
+  "template": "moe",
+  "model": {
+    "vocab_size": 65,
+    "block_size": 128,
+    "n_embd": 192,
+    "n_head": 6,
+    "n_layer": 4,
+    "dropout": 0.1,
+    "pos_encoding": "rope",
+    "activation": "gelu",
+    "num_experts": 8,
+    "top_k": 2,
+    "capacity_factor": 1.25
+  },
+  "training": {
+    "batch_size": 64,
+    "learning_rate": 0.0003,
+    "max_iters": 5000,
+    "eval_interval": 20,
+    "eval_iters": 2,
+    "optimizer": "adamw"
+  },
+  "dataset": "tiny_shakespeare",
+  "run_id": 57,
+  "experiment_id": 63,
+  "device": "cpu"
+}

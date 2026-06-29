@@ -51,7 +51,7 @@ class CharRNN(nn.Module):
         )
 
     @torch.no_grad()
-    def generate(self, id_to_token, token_to_id, prefix="<", max_new_tokens=200, device="cpu"):
+    def generate(self, id_to_token, token_to_id, prefix="<", max_new_tokens=100, device="cpu", temperature=0.8):
         """Generate text character by character from a prefix."""
         self.to(device)
         self.set_eval_mode()
@@ -75,7 +75,8 @@ class CharRNN(nn.Module):
             h = tuple(each.data for each in h)
 
             out, h = self(inputs, h)
-            p = F.softmax(out, dim=1).cpu().numpy().squeeze()
+            # Scale logits by temperature before softmax — controls randomness
+            p = F.softmax(out / temperature, dim=1).cpu().numpy().squeeze()
 
             next_char_id = np.random.choice(len(token_to_id), p=p / p.sum())
             next_char = id_to_token[next_char_id]

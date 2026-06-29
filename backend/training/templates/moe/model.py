@@ -193,12 +193,14 @@ class TinyMoeLM(nn.Module):
         return logits, loss, avg_drop_rate
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
-        self.eval()
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8) -> torch.Tensor:
+        """Autoregressive generation.  temperature < 1 → sharper (more greedy),
+        temperature > 1 → flatter (more random)."""
+        self.train(False)
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]
             logits, _, _ = self(idx_cond)
-            logits = logits[:, -1, :]
+            logits = logits[:, -1, :] / temperature  # scale logits before softmax
             probs = F.softmax(logits, dim=-1)
             next_idx = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_idx], dim=1)

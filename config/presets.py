@@ -1,4 +1,9 @@
-"""Hardcoded experiment presets for Tier 1 (replaces auth + templates system)."""
+"""Hardcoded experiment presets for Tier 1 (replaces auth + templates system).
+
+Each preset includes an "inference" section with generation parameters
+(max_new_tokens, temperature) that are editable from the dashboard and
+used by prompt_paused_model() when generating text from a checkpoint.
+"""
 
 # --- Transformer templates ---
 
@@ -23,6 +28,10 @@ BASELINE_CONFIG = {
         "eval_interval": 20,
         "eval_iters": 2,
         "optimizer": "adamw",
+    },
+    "inference": {
+        "max_new_tokens": 100,
+        "temperature": 0.8,
     },
     "dataset": "tiny_shakespeare",
 }
@@ -52,6 +61,10 @@ MOE_CONFIG = {
         "eval_iters": 2,
         "optimizer": "adamw",
     },
+    "inference": {
+        "max_new_tokens": 100,
+        "temperature": 0.8,
+    },
     "dataset": "tiny_shakespeare",
 }
 
@@ -77,6 +90,10 @@ LR_SENSITIVITY_CONFIG = {
         "eval_iters": 2,
         "optimizer": "adamw",
     },
+    "inference": {
+        "max_new_tokens": 100,
+        "temperature": 0.8,
+    },
     "dataset": "tiny_shakespeare",
 }
 
@@ -100,6 +117,10 @@ RNN_BASELINE_CONFIG = {
         "clip": 5,
         "print_every": 10,
         "optimizer": "adam",
+    },
+    "inference": {
+        "max_new_tokens": 100,
+        "temperature": 0.8,
     },
     "dataset": "dinos",
 }

@@ -134,6 +134,32 @@ Requires: Phase 3 stable
 - [ ] Volume mounts for data/runs/
 - [ ] Container lifecycle management
 
+
+Most of this should **stay**. You should not need to rip it all out.
+
+The clean split is:
+
+- **Keep:** checkpoint semantics, resume semantics, status/metrics artifacts, and most of `train_worker.py`. Those are about the training lifecycle itself, not about whether the worker is launched locally or inside Docker.
+- **Probably keep:** `reconcile_orphaned_runs()` in [backend/db.py](/home/nodozi/projects/NEBIUS_MAR_2026/Nebius_serverless/llm_experiments_lab/backend/db.py:175). Even with Docker, you still want a recovery path for jobs that disappear, crash, or get orphaned from the API’s point of view.
+- **Likely replace or abstract:** the local-process supervision pieces in [backend/training/runner.py](/home/nodozi/projects/NEBIUS_MAR_2026/Nebius_serverless/llm_experiments_lab/backend/training/runner.py:85), especially `subprocess.Popen`, `preexec_fn=_set_pdeathsig`, and `shutdown_all_workers()`. Those are specifically for “API launches child process on same machine”.
+- **Frontend changes stay:** the `handleStart()` fix in [frontend/src/App.tsx](/home/nodozi/projects/NEBIUS_MAR_2026/Nebius_serverless/llm_experiments_lab/frontend/src/App.tsx:110) is independent of Docker.
+
+The best way to think about it is:
+- `train_worker.py` is your reusable execution unit
+- current `runner.py` is just the **local backend adapter**
+- later you add a **Docker/job adapter** instead of launching with `Popen`
+
+So the migration should be more “swap the launcher/orchestrator” than “rewrite the training logic”.
+
+A good future shape is:
+- keep `train_worker.py` mostly unchanged
+- introduce an interface like `RunBackend` or `TrainingLauncher`
+- current implementation: `LocalSubprocessLauncher`
+- future implementation: `DockerJobLauncher` or `NebiusJobLauncher`
+
+That way, the Linux-only parent-death logic and local shutdown sweep become local-mode-only code, while the checkpoint/resume fixes remain universal.
+
+Short answer: **the training/resume fixes remain; the local process-management code is the part most likely to be replaced or isolated behind an abstraction.** If you want, I can sketch the exact refactor boundary now so the Docker migration is low-friction later.
 ---
 
 ## Architecture before/after

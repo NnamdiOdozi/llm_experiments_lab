@@ -5,6 +5,7 @@ import ConfigPanel from "./components/ConfigPanel";
 import ArchSchematic from "./components/ArchSchematic";
 import CodeView from "./components/CodeView";
 import LossChart from "./components/LossChart";
+import DropRateChart from "./components/DropRateChart";
 import TrainingControls from "./components/TrainingControls";
 import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
@@ -253,7 +254,17 @@ export default function App() {
 
         {/* Main area */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <LossChart metrics={metrics} />
+          {/* Loss + MoE drop rate charts side-by-side when MoE data present */}
+          <div style={{ display: "flex", gap: 16 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <LossChart metrics={metrics} />
+            </div>
+            {metrics.some((m) => m.train_drop_rate != null) && (
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <DropRateChart metrics={metrics} />
+              </div>
+            )}
+          </div>
           <ArchSchematic config={config} />
           {runId != null && (
             <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
