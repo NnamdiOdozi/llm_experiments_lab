@@ -32,6 +32,17 @@ def _set_pdeathsig():
         pass  # Non-Linux — skip silently
 
 
+def _popen_kwargs() -> dict:
+    """Platform-specific subprocess.Popen kwargs for child process management.
+
+    Linux/WSL: preexec_fn with prctl(PR_SET_PDEATHSIG) — worker auto-dies when parent exits.
+    Windows: CREATE_NEW_PROCESS_GROUP — worker gets own group for clean signaling.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"preexec_fn": _set_pdeathsig}
+
+
 @dataclass
 class ActiveRun:
     """Tracks a subprocess training worker."""
@@ -91,11 +102,11 @@ def start_run(run_id: int, experiment_id: int, config: dict, device: str = "cpu"
     if metrics_file.exists():
         metrics_file.write_text("")
 
-    # Launch worker subprocess — dies with parent via prctl
+    # Launch worker subprocess — platform-aware process management
     proc = subprocess.Popen(
         [sys.executable, "-m", "backend.training.train_worker", "--run-dir", str(rd)],
         cwd=str(_project_root()),
-        preexec_fn=_set_pdeathsig,
+        **_popen_kwargs(),
     )
 
     active_runs[run_id] = ActiveRun(
@@ -153,12 +164,12 @@ def resume_run(run_id: int, updated_config: dict | None = None) -> bool:
                 config[section] = {**config.get(section, {}), **updated_config[section]}
         (rd / "config.json").write_text(json.dumps(config, indent=2))
 
-    # Launch new worker with --resume — dies with parent via prctl
+    # Launch new worker with --resume — platform-aware process management
     proc = subprocess.Popen(
         [sys.executable, "-m", "backend.training.train_worker",
          "--run-dir", str(rd), "--resume"],
         cwd=str(_project_root()),
-        preexec_fn=_set_pdeathsig,
+        **_popen_kwargs(),
     )
 
     active_runs[run_id] = ActiveRun(

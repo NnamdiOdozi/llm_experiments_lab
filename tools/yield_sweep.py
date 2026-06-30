@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+from tools.compat import kill_backend as _kill_backend, venv_python, venv_script
+
 SETTINGS_PATH = "config/settings.py"
 
 # (interval_steps, sleep_seconds, label)
@@ -51,13 +53,12 @@ def set_yield_config(content, interval, sleep_val):
 
 
 def kill_backend():
-    subprocess.run("kill $(pgrep -f 'uvicorn backend') 2>/dev/null", shell=True)
-    time.sleep(2)
+    _kill_backend()
 
 
 def start_backend():
     proc = subprocess.Popen(
-        [".venv/bin/uvicorn", "backend.main:app", "--port", "8000"],
+        [venv_script("uvicorn"), "backend.main:app", "--port", "8000"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     time.sleep(4)
@@ -66,7 +67,7 @@ def start_backend():
 
 def run_probe(template="transformer"):
     result = subprocess.run(
-        [".venv/bin/python3", "tools/gpu_probe.py", "--template", template],
+        [venv_python(), "tools/gpu_probe.py", "--template", template],
         capture_output=True, text=True, timeout=180,
     )
     return result.stdout + result.stderr

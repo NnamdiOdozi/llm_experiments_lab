@@ -20,6 +20,8 @@ import time
 
 import httpx
 
+from tools.compat import find_nvidia_smi
+
 # Real preset configs matching presets.py
 CONFIGS = {
     "transformer": {
@@ -58,7 +60,7 @@ def gpu_stats() -> dict:
     """Snapshot from nvidia-smi: utilization, memory, temperature."""
     try:
         out = subprocess.check_output([
-            "/usr/lib/wsl/lib/nvidia-smi",
+            find_nvidia_smi(),
             "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ], timeout=5, stderr=subprocess.DEVNULL).decode().strip()

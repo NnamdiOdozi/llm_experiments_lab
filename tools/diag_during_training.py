@@ -5,8 +5,11 @@ Captures: RAM, swap, VRAM, GPU util/temp/power, CPU load, top processes.
 """
 
 import subprocess
+import sys
 import time
 import httpx
+
+from tools.compat import find_nvidia_smi
 
 BASE = "http://localhost:8000"
 
@@ -29,7 +32,7 @@ CONFIG = {
 def gpu_stats():
     try:
         out = subprocess.check_output([
-            "/usr/lib/wsl/lib/nvidia-smi",
+            find_nvidia_smi(),
             "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ], timeout=5, stderr=subprocess.DEVNULL).decode().strip()
@@ -40,6 +43,18 @@ def gpu_stats():
 
 
 def ram_stats():
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-Command",
+                 "[math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize/1024),"
+                 "[math]::Round(((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize - "
+                 "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory)/1024)"],
+                timeout=10, stderr=subprocess.DEVNULL,
+            ).decode().strip().split()
+            return f"RAM:{out[1]}MB/{out[0]}MB" if len(out) >= 2 else "RAM:?"
+        except Exception:
+            return "RAM:?(win)"
     out = subprocess.check_output(["free", "-m"], timeout=5).decode()
     for line in out.splitlines():
         if line.startswith("Mem:"):
@@ -52,6 +67,8 @@ def ram_stats():
 
 
 def mem_stats():
+    if sys.platform == "win32":
+        return ram_stats()  # Windows: single RAM line, no separate swap
     out = subprocess.check_output(["free", "-m"], timeout=5).decode()
     ram = swap = ""
     for line in out.splitlines():
@@ -65,8 +82,20 @@ def mem_stats():
 
 
 def cpu_load():
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(
+                ["wmic", "cpu", "get", "LoadPercentage", "/format:csv"],
+                timeout=10, stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            for line in out.splitlines():
+                parts = line.strip().split(",")
+                if parts and parts[-1].strip().isdigit():
+                    return f"Load:{parts[-1].strip()}%"
+        except Exception:
+            pass
+        return "Load:?(win)"
     out = subprocess.check_output(["uptime"], timeout=5).decode().strip()
-    # Extract load average
     idx = out.find("load average:")
     if idx >= 0:
         return "Load:" + out[idx + 13:].strip()
@@ -74,10 +103,20 @@ def cpu_load():
 
 
 def top_cpu_procs():
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-Command",
+                 "Get-Process | Sort-Object CPU -Descending | Select-Object -First 3 "
+                 "-Property ProcessName,CPU | Format-Table -HideTableHeaders"],
+                timeout=10, stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            return out.replace("\n", " | ") if out else "?(win)"
+        except Exception:
+            return "?(win)"
     out = subprocess.check_output(
         ["ps", "aux", "--sort=-%cpu"], timeout=5
     ).decode().splitlines()
-    # Skip header, get top 3
     procs = []
     for line in out[1:4]:
         parts = line.split(None, 10)

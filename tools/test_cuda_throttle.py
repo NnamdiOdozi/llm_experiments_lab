@@ -17,6 +17,8 @@ import sys
 import time
 import httpx
 
+from tools.compat import find_nvidia_smi
+
 BASE = "http://localhost:8000"
 
 CONFIG = {
@@ -40,7 +42,7 @@ def nvidia_smi_responsive(timeout=3):
     try:
         t0 = time.time()
         subprocess.check_output(
-            ["/usr/lib/wsl/lib/nvidia-smi", "--query-gpu=utilization.gpu",
+            [find_nvidia_smi(), "--query-gpu=utilization.gpu",
              "--format=csv,noheader,nounits"],
             timeout=timeout, stderr=subprocess.DEVNULL,
         )
