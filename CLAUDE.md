@@ -20,13 +20,13 @@ User is allergic to hardcoded values. All configurable values belong in config f
 If code ≥10 lines is repeated, extract to a function. Use abstractions, classes, and objects where they reduce repetition. Prefer idempotent operations — repeating an action should not produce side effects or overwrite existing state incorrectly.
 
 ### Complexity
-Avoid complex code that will be difficult for readers or users to understand, for example, nested list comprehensions with more than 2 tiers.
+Avoid complex code that will be difficult for readers or users to understand, for example, nested list comprehensions with more than 2 tiers. When doing writing code or refactors that will touch more than 50 lines of code, you should do a itemized plan and scope that shows which files will be touched and approx number of new lines of code in each. For longer bits of coding do not do them in one go but sequentially follow the plan.  
 
 ### Commenting
-When implementing algorithms and anything hacky or experimental, please add comments so that the users can follow easily.
+When implementing algorithms and anything hacky or experimental, please add comments so that the users can follow easily. When you solve a tricky bug you MUST document the solution to this in the DESIGN_CHOICES document and comment around the new code. This is to avoi forgetting about this and mindlessly refactoring the code in a way that causes regression.
 
 ### Logging
-User loves detailed, structured logs. Every log line should include: timestamp, correlation/request IDs, relevant entity IDs, old→new state transitions, and rich metadata. Logs are like run records — treat them as first-class data. When in doubt, log more rather than less.
+User loves detailed, structured logs. Every log line should include: timestamp, correlation/request IDs, relevant entity IDs, old→new state transitions, and rich metadata. Logs are like run records — treat them as first-class data. When in doubt, log more rather than less. There should be no silent failings.
 
 ### Metrics
 Capture and persist metrics generously. Include contextual fields (elapsed time, learning rate, param count, device info, etc.) — not just raw values. Metrics should be queryable after the fact.
