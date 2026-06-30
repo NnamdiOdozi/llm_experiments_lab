@@ -84,27 +84,24 @@ class WorkerState:
         self.metrics: list[dict] = []
         self.resume = resume
         self.checkpoint_extra: dict = {}  # extra fields to include in checkpoint (e.g. epoch)
-        self._last_yield: float = 0.0  # wall-clock of last GPU yield
+        self._last_progress: float = 0.0  # wall-clock of last progress update
 
     def _total_steps(self) -> int:
         t = self.config.get("training", {})
         return t.get("max_iters", t.get("epochs", 0) * 100)
 
     def yield_gpu(self, step: int):
-        """Time-based GPU yield — sync + sleep so WSL2 display compositor can render.
-
-        Also writes status.json so the dashboard has a fresh current_step
-        between eval intervals.  Fires every gpu_yield_interval_sec (~100ms)
-        regardless of training speed.
-        """
-        if not settings.gpu_yield_enabled or self.device == "cpu":
-            return
-        now = time.time()
-        if now - self._last_yield >= settings.gpu_yield_interval_sec:
+        """Sync + micro-sleep every N steps so WSL2 display compositor isn't starved."""
+        if settings.gpu_yield_enabled and self.device != "cpu" and step % settings.gpu_yield_interval == 0:
             torch.cuda.synchronize()
             time.sleep(settings.gpu_yield_sleep)
+
+    def maybe_update_progress(self):
+        """Throttled progress update — writes status.json at most every 2s."""
+        now = time.time()
+        if now - self._last_progress >= 2.0:
             self.update_progress()
-            self._last_yield = now
+            self._last_progress = now
 
     def sync_metadata(self, dataset_name: str):
         """Write run metadata to DB and disk — called once at training start."""
@@ -235,27 +232,11 @@ class WorkerState:
             json.dump(meta, f, indent=2)
 
 
-# ── Shared helpers ──────────────────────────────────────────────────
-
-
-def _complete_run(ws: WorkerState, final_step: int):
-    """Save final checkpoint, record path in DB, mark completed."""
-    ws.save_checkpoint(final_step, **ws.checkpoint_extra)
-    sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
-    ws.set_status(RunStatus.COMPLETED)
-
-
-# ── Iter-based training (transformer + MoE) ────────────────────────
-#
-# Transformer and MoE share the same loop structure: max_iters steps
-# over a CharDataset with get_batch().  The only differences are the
-# forward call return shape and the eval metrics, handled by the
-# eval_fn callback.
+# ── Transformer ─────────────────────────────────────────────────────
 
 
 @torch.no_grad()
-def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) -> dict:
-    """Eval for vanilla transformer — returns {"train_loss": ..., "val_loss": ...}."""
+def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) -> dict[str, float]:
     model.eval()
     out = {}
     for split in ("train", "val"):
@@ -264,41 +245,12 @@ def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) 
             x, y = dataset.get_batch(split, device)
             _, loss = model(x, y)
             losses[k] = loss.item()
-        out[f"{split}_loss"] = round(losses.mean().item(), 4)
+        out[split] = losses.mean().item()
     model.train()
     return out
 
 
-@torch.no_grad()
-def _moe_eval(model, dataset, device: str, num_iters: int) -> dict:
-    """Eval for MoE — returns loss + drop rate per split."""
-    model.eval()
-    out = {}
-    for split in ("train", "val"):
-        losses = torch.zeros(num_iters)
-        drop_rates = torch.zeros(num_iters)
-        for k in range(num_iters):
-            x, y = dataset.get_batch(split, device)
-            _, loss, drop_rate = model(x, y)
-            losses[k] = loss.item()
-            drop_rates[k] = drop_rate if isinstance(drop_rate, float) else drop_rate.item()
-        out[f"{split}_loss"] = round(losses.mean().item(), 4)
-        out[f"{split}_drop_rate"] = round(drop_rates.mean().item() * 100, 1)
-    model.train()
-    return out
-
-
-# Eval function type: (model, dataset, device, num_iters) -> dict of metric fields
-EvalFn = type(lambda model, dataset, device, num_iters: {})
-
-
-def _train_iter_based(ws: WorkerState, template_key: str, dataset_name: str, eval_fn: EvalFn):
-    """Shared iter-based training loop for transformer and MoE.
-
-    Both use CharDataset with get_batch(), max_iters stepping, and periodic eval.
-    The eval_fn callback returns a dict of metric fields (e.g. train_loss, val_loss,
-    and optionally train_drop_rate/val_drop_rate for MoE).
-    """
+def train_transformer(ws: WorkerState):
     config = ws.config
     train_cfg = config["training"]
     device = ws.device
@@ -308,7 +260,7 @@ def _train_iter_based(ws: WorkerState, template_key: str, dataset_name: str, eva
     text = load_tiny_shakespeare()
     ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
 
-    template = TEMPLATE_REGISTRY[template_key]
+    template = TEMPLATE_REGISTRY["transformer"]
     ws.model = template["build_model"](config).to(device)
     opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
     ws.optimizer = opt_cls(ws.model.parameters(), lr=train_cfg["learning_rate"])
@@ -316,7 +268,7 @@ def _train_iter_based(ws: WorkerState, template_key: str, dataset_name: str, eva
     if ws.resume:
         ws.load_checkpoint()
 
-    ws.sync_metadata(dataset_name)
+    ws.sync_metadata("tiny_shakespeare")
 
     ws.started_at = time.time()
     ws.set_status(RunStatus.RUNNING)
@@ -333,39 +285,116 @@ def _train_iter_based(ws: WorkerState, template_key: str, dataset_name: str, eva
         ws.current_step = step
 
         xb, yb = ws.dataset.get_batch("train", device)
-        # Forward: transformer returns (logits, loss), MoE returns (logits, loss, drop_rate).
-        # We only need the loss for backprop — extra outputs are computed in eval_fn.
-        outputs = ws.model(xb, yb)
-        loss = outputs[1]
+        _, loss = ws.model(xb, yb)
         ws.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         ws.optimizer.step()
         ws.yield_gpu(step)
+        ws.maybe_update_progress()
 
         # Check pause/stop AFTER training step so checkpoint = completed step
         if ws.check_pause(step):
             return
 
         if step > 0 and step % log_interval == 0:
-            eval_metrics = eval_fn(ws.model, ws.dataset, device, num_eval_iters)
+            losses = _transformer_eval(ws.model, ws.dataset, device, num_eval_iters)
             ws.write_metric({
                 "step": step,
-                **eval_metrics,
+                "train_loss": round(losses["train"], 4),
+                "val_loss": round(losses["val"], 4),
                 "learning_rate": lr,
                 "elapsed_seconds": round(time.time() - ws.started_at, 1),
                 "param_count": _param_count(ws.model),
             })
             ws.save_checkpoint(step)
 
-    _complete_run(ws, max_iters)
+    ws.save_checkpoint(max_iters)
+    sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
+    ws.set_status(RunStatus.COMPLETED)
 
 
-def train_transformer(ws: WorkerState):
-    _train_iter_based(ws, "transformer", "tiny_shakespeare", _transformer_eval)
+# ── MoE ─────────────────────────────────────────────────────────────
+
+
+@torch.no_grad()
+def _moe_eval(model, dataset, device: str, num_iters: int) -> dict[str, dict[str, float]]:
+    model.eval()
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(num_iters)
+        drop_rates = torch.zeros(num_iters)
+        for k in range(num_iters):
+            x, y = dataset.get_batch(split, device)
+            _, loss, drop_rate = model(x, y)
+            losses[k] = loss.item()
+            drop_rates[k] = drop_rate if isinstance(drop_rate, float) else drop_rate.item()
+        out[split] = {"loss": losses.mean().item(), "drop_rate": drop_rates.mean().item()}
+    model.train()
+    return out
 
 
 def train_moe(ws: WorkerState):
-    _train_iter_based(ws, "moe", "tiny_shakespeare", _moe_eval)
+    config = ws.config
+    train_cfg = config["training"]
+    device = ws.device
+
+    ws.set_status(RunStatus.STARTING)
+
+    text = load_tiny_shakespeare()
+    ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
+
+    template = TEMPLATE_REGISTRY["moe"]
+    ws.model = template["build_model"](config).to(device)
+    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
+    ws.optimizer = opt_cls(ws.model.parameters(), lr=train_cfg["learning_rate"])
+
+    if ws.resume:
+        ws.load_checkpoint()
+
+    ws.sync_metadata("tiny_shakespeare")
+
+    ws.started_at = time.time()
+    ws.set_status(RunStatus.RUNNING)
+    max_iters = train_cfg["max_iters"]
+    log_interval = train_cfg["eval_interval"]
+    num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
+    lr = train_cfg["learning_rate"]
+
+    torch.manual_seed(settings.random_seed)
+    start_step = ws.current_step + 1 if ws.resume else 0
+
+    for step in range(start_step, max_iters + 1):
+        ws.current_step = step
+
+        xb, yb = ws.dataset.get_batch("train", device)
+        _, loss, _ = ws.model(xb, yb)
+        ws.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        ws.optimizer.step()
+        ws.yield_gpu(step)
+        ws.maybe_update_progress()
+
+        # Check pause/stop AFTER training step so checkpoint = completed step
+        if ws.check_pause(step):
+            return
+
+        if step > 0 and step % log_interval == 0:
+            metrics = _moe_eval(ws.model, ws.dataset, device, num_eval_iters)
+            ws.write_metric({
+                "step": step,
+                "train_loss": round(metrics["train"]["loss"], 4),
+                "val_loss": round(metrics["val"]["loss"], 4),
+                "train_drop_rate": round(metrics["train"]["drop_rate"] * 100, 1),
+                "val_drop_rate": round(metrics["val"]["drop_rate"] * 100, 1),
+                "learning_rate": lr,
+                "elapsed_seconds": round(time.time() - ws.started_at, 1),
+                "param_count": _param_count(ws.model),
+            })
+            ws.save_checkpoint(step)
+
+    ws.save_checkpoint(max_iters)
+    sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
+    ws.set_status(RunStatus.COMPLETED)
 
 
 # ── RNN ─────────────────────────────────────────────────────────────
@@ -455,6 +484,7 @@ def train_rnn(ws: WorkerState):
             nn.utils.clip_grad_norm_(ws.model.parameters(), clip)
             ws.optimizer.step()
             ws.yield_gpu(counter)
+            ws.maybe_update_progress()
 
             # Check pause/stop AFTER training step so checkpoint = completed step
             if ws.check_pause(counter):
@@ -485,7 +515,9 @@ def train_rnn(ws: WorkerState):
                 })
                 ws.save_checkpoint(counter, **ws.checkpoint_extra)
 
-    _complete_run(ws, counter)
+    ws.save_checkpoint(counter, **ws.checkpoint_extra)
+    sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
+    ws.set_status(RunStatus.COMPLETED)
 
 
 # ── Dispatch + entry point ──────────────────────────────────────────

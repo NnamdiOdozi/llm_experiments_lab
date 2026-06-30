@@ -24,7 +24,7 @@ BASELINE_CONFIG = {
     "training": {
         "batch_size": 64,
         "learning_rate": 3e-4,
-        "max_iters": 5000,
+        "max_iters": 1000,
         "eval_interval": 20,
         "eval_iters": 2,
         "optimizer": "adamw",
@@ -56,7 +56,7 @@ MOE_CONFIG = {
     "training": {
         "batch_size": 64,
         "learning_rate": 3e-4,
-        "max_iters": 5000,
+        "max_iters": 1000,
         "eval_interval": 20,
         "eval_iters": 2,
         "optimizer": "adamw",
@@ -85,7 +85,7 @@ LR_SENSITIVITY_CONFIG = {
     "training": {
         "batch_size": 64,
         "learning_rate": 3e-3,
-        "max_iters": 5000,
+        "max_iters": 1000,
         "eval_interval": 20,
         "eval_iters": 2,
         "optimizer": "adamw",

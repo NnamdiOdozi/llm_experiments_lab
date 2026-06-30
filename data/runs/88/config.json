@@ -1,0 +1,29 @@
+{
+  "template": "transformer",
+  "model": {
+    "vocab_size": 65,
+    "block_size": 32,
+    "n_embd": 32,
+    "n_head": 2,
+    "n_layer": 1,
+    "dropout": 0.0,
+    "pos_encoding": "learned",
+    "activation": "gelu"
+  },
+  "training": {
+    "batch_size": 8,
+    "learning_rate": 0.0003,
+    "max_iters": 1000,
+    "eval_interval": 10,
+    "eval_iters": 1,
+    "optimizer": "adamw"
+  },
+  "inference": {
+    "max_new_tokens": 10,
+    "temperature": 0.8
+  },
+  "dataset": "tiny_shakespeare",
+  "run_id": 88,
+  "experiment_id": 90,
+  "device": "cuda"
+}

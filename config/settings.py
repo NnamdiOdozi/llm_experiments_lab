@@ -14,13 +14,12 @@ class Settings(BaseSettings):
     max_concurrent_gpu_runs: int = 1
     stop_grace_seconds: int = 5
     stop_kill_seconds: int = 10
-    # GPU yield — periodically sync GPU and sleep so WSL2 display compositor
-    # isn't starved.  Time-based (not step-based) so it adapts to training
-    # speed.  Disable in Docker/native Linux where there's no shared
-    # display compositor.
+    # GPU yield — sync GPU every N training steps to prevent WSL2 display
+    # compositor starvation.  Disable in Docker/native Linux where there's
+    # no shared display compositor.
     gpu_yield_enabled: bool = True
-    gpu_yield_interval_sec: float = 0.1   # yield every 100ms of wall time
-    gpu_yield_sleep: float = 0.02         # 20ms sleep — just over one 60fps frame
+    gpu_yield_interval: int = 5
+    gpu_yield_sleep: float = 0.200  # 200ms — long enough to drain GPU driver queue
 
     data_dir: Path = Path("./data")
 
