@@ -158,6 +158,27 @@ Three transformer presets repeat most fields, varying only name, pos_encoding, a
 
 ---
 
+## 7. Chatbot Audit-Log Matching is a Substring Check, Not Structured Data
+
+`backend/chatbot/context.py::_get_last_audit_change()` finds the most
+recent config/experiment change for the grounded chatbot by searching the
+current session's log file for the substring `"id=<experiment_id> "`.
+This works because every `audit_log.info(...)` call in
+`backend/api/experiments.py` formats its message as either `id=%d ...` or
+`experiment_id=%d ...`, and both forms end in `id=<N> ` followed by more
+text — so one substring check covers both.
+
+**This is coupled to the exact audit log message format.** If a future
+`audit_log.info(...)` call site is added or changed such that the
+experiment ID is no longer immediately followed by a space (e.g. it's
+last on the line, or formatted as `id: 5` instead of `id=5`), the
+chatbot will silently stop finding "last change" for that log line — no
+error, just an empty/stale result. If you touch audit log message
+formats, check `_get_last_audit_change()`'s tests
+(`tests/test_chatbot_context.py`) still pass.
+
+---
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
