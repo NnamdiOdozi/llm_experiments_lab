@@ -50,7 +50,7 @@ describe("useChatStream", () => {
   it("streams assistant deltas into a growing message", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn((url: string, opts?: RequestInit) => {
+      vi.fn((_url: string, opts?: RequestInit) => {
         if (!opts) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
         return Promise.resolve(
           sseResponse([
@@ -78,7 +78,7 @@ describe("useChatStream", () => {
   it("sets unavailable on a 503 response and does not add a phantom assistant message", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn((url: string, opts?: RequestInit) => {
+      vi.fn((_url: string, opts?: RequestInit) => {
         if (!opts) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
         return Promise.resolve(new Response(JSON.stringify({ detail: "unavailable" }), { status: 503 }));
       })
@@ -98,7 +98,7 @@ describe("useChatStream", () => {
   it("surfaces an error event from the stream", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn((url: string, opts?: RequestInit) => {
+      vi.fn((_url: string, opts?: RequestInit) => {
         if (!opts) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
         return Promise.resolve(
           sseResponse([`event: error\ndata: ${JSON.stringify({ error: "Token Factory timed out" })}\n\n`])
