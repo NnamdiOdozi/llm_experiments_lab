@@ -45,7 +45,10 @@ class Settings(BaseSettings):
     # Grounded chatbot / Nebius Token Factory
     nebius_key: str | None = None
     token_factory_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
-    token_factory_model: str = "Qwen/Qwen3-235B-A22B-Thinking-2507"
+    # "Thinking-2507" doesn't exist on Token Factory (verified via GET /v1/models
+    # on 2026-07-10) — Qwen3-Next-80B-A3B-Thinking is the closest match that still
+    # has extended-reasoning mode, which is the property this chatbot needs.
+    token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
     chatbot_log_tail_lines: int = 50
     chatbot_history_window_turns: int = 10
 
