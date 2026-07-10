@@ -39,3 +39,19 @@ def _read_template_source(template: str) -> str:
     if not parts:
         return f"(No source found for template '{template}')"
     return "\n\n".join(parts)
+
+
+def _format_loss_snapshot(run: dict | None) -> str:
+    """Recent loss trend for the current run. Reads train_loss_history only —
+    each metric row written by train_worker.py includes both train_loss and
+    val_loss together (see backend/training/train_worker.py), so a second
+    read of val_loss_history would be redundant."""
+    if run is None:
+        return "No training run has been started for this experiment yet."
+    train_history = json.loads(run.get("train_loss_history") or "[]")
+    recent = train_history[-20:]
+    return "\n".join([
+        f"Run status: {run.get('status')}",
+        f"Step: {run.get('current_step', 0)} / {run.get('total_steps', 0)}",
+        f"Recent metrics (last {len(recent)} points): {json.dumps(recent)}",
+    ])
