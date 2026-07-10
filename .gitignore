@@ -252,3 +252,8 @@ LLM Architecture/Homework_2/data/cifar-10-python.tar.gz
 # ssh keys
 nebius_ssh_key
 nebius_ssh_key.pub
+
+# Nebius service-account private keys / credentials
+*.pem
+sa_*.json
+*_private_key*

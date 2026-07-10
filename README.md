@@ -1,6 +1,6 @@
 # LLM Experiments Lab
 
-Browser-based lab for hands-on LLM architecture experiments. Pick a preset model config, tweak hyperparameters, train on CPU, and watch loss curves update live.
+Browser-based lab for hands-on LLM architecture experiments. Pick a preset model config, tweak hyperparameters, train on CPU or GPU, and watch loss curves update live.
 
 ## What It Does
 
@@ -63,7 +63,7 @@ Open `http://localhost:5173` in browser.
 
 1. **Pick a preset** from the landing page — this creates an experiment in the database.
 2. **Tweak config** in the left sidebar (model dimensions, training hyperparams).
-3. **Click Start** — training begins on CPU. Loss chart updates live.
+3. **Click Start** — training begins on the selected device (CPU or GPU). Loss chart updates live.
 4. **Pause** mid-training to prompt the model and see its current text generation quality.
 5. **Resume or Stop** when ready.
 6. **Export** your experiment as a `.py` script or `.ipynb` notebook via the export bar.
@@ -110,4 +110,7 @@ llm_experiments_lab/
 
 Working: preset selection, experiment creation, training with live metrics, pause/resume/stop, model prompting during pause, code view, export to .py and .ipynb.
 
-Training runs on CPU only. No GPU/auth/multi-user support yet.
+Training runs on CPU or GPU (device selectable per run; see `default_device`,
+`max_concurrent_gpu_runs`, and the `gpu_yield_*` settings in `config/settings.py`).
+No auth/multi-user support yet. Offloading jobs to a remote Nebius serverless
+backend is planned but not yet wired up.
