@@ -230,9 +230,6 @@ dw_batch_output/
 # Application logs
 logs/
 
-# Test outputs
-tests/
-
 # Eval outputs
 doubleword_evals/
 
