@@ -11,6 +11,7 @@ from backend import db
 from backend.api.experiments import router as experiments_router
 from backend.api.training import router as training_router
 from backend.api.codegen import router as code_router
+from backend.api.chatbot import router as chatbot_router
 from backend.logging_config import setup_logging, request_log, error_log, session_log
 from backend.training.runner import shutdown_all_workers
 from config.settings import settings
@@ -70,6 +71,7 @@ async def log_requests(request: Request, call_next):
 app.include_router(experiments_router)
 app.include_router(training_router)
 app.include_router(code_router)
+app.include_router(chatbot_router)
 
 
 @app.get("/api/health")

@@ -39,3 +39,98 @@ def _read_template_source(template: str) -> str:
     if not parts:
         return f"(No source found for template '{template}')"
     return "\n\n".join(parts)
+
+
+def _format_loss_snapshot(run: dict | None) -> str:
+    """Recent loss trend for the current run. Reads train_loss_history only —
+    each metric row written by train_worker.py includes both train_loss and
+    val_loss together (see backend/training/train_worker.py), so a second
+    read of val_loss_history would be redundant."""
+    if run is None:
+        return "No training run has been started for this experiment yet."
+    train_history = json.loads(run.get("train_loss_history") or "[]")
+    recent = train_history[-20:]
+    return "\n".join([
+        f"Run status: {run.get('status')}",
+        f"Step: {run.get('current_step', 0)} / {run.get('total_steps', 0)}",
+        f"Recent metrics (last {len(recent)} points): {json.dumps(recent)}",
+    ])
+
+
+def _get_last_audit_change(experiment_id: int) -> str | None:
+    """Most recent [AUDIT] log line for this experiment, or None.
+
+    Matching is a plain substring check for "id=<N> " — this matches both
+    "id=%d" and "experiment_id=%d" audit call sites (see
+    backend/api/experiments.py) since both end in "id=<N> " followed by
+    more fields. Fragile if audit_log.info() call sites change format —
+    documented in docs/DESIGN_DECISIONS.md.
+    """
+    log_path = get_log_path()
+    if not log_path.exists():
+        return None
+    marker = f"id={experiment_id} "
+    match = None
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            if "lab.audit" in line and marker in line:
+                match = line.rstrip("\n")
+    return match
+
+
+def _get_log_tail(n: int) -> list[str]:
+    """Last n lines of the current session's log file, any category."""
+    log_path = get_log_path()
+    if not log_path.exists():
+        return []
+    with open(log_path, encoding="utf-8") as f:
+        return list(deque(f, maxlen=n))
+
+
+def _build_session_context(experiment: dict, config: dict, template: str) -> str:
+    source = _read_template_source(template)
+    return (
+        f"Experiment: {experiment['name']}\n"
+        f"Architecture template: {template}\n"
+        f"Description: {config.get('description', '')}\n"
+        f"Current config:\n{json.dumps(config, indent=2)}\n\n"
+        f"Source code for this architecture ({template}):\n{source}"
+    )
+
+
+def _build_volatile_snapshot(experiment_id: int, run: dict | None) -> str:
+    parts = [_format_loss_snapshot(run)]
+    last_change = _get_last_audit_change(experiment_id)
+    if last_change:
+        parts.append(f"Last change made: {last_change}")
+    log_tail = _get_log_tail(settings.chatbot_log_tail_lines)
+    if log_tail:
+        parts.append("Recent log lines:\n" + "".join(log_tail))
+    return "\n\n".join(parts)
+
+
+def assemble_messages(
+    experiment: dict, run: dict | None, history: list[dict], user_message: str
+) -> list[dict]:
+    """Builds the full message list for one chatbot turn.
+
+    Ordering is deliberate — static content first, volatile snapshot last,
+    stapled to the current user message. See module docstring and
+    docs/superpowers/specs/2026-07-10-grounded-chatbot-design.md §3.
+
+    `history` must NOT include the message currently being sent — callers
+    fetch history before writing the new user message to avoid duplicating
+    it here.
+    """
+    config = json.loads(experiment["config_json"])
+    template = config.get("template", "transformer")
+
+    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages.append({"role": "system", "content": _build_session_context(experiment, config, template)})
+
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    volatile = _build_volatile_snapshot(experiment["id"], run)
+    messages.append({"role": "user", "content": f"{volatile}\n\nUser question: {user_message}"})
+    return messages
