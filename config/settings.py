@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # Branding
     github_url: str = "https://github.com/NnamdiOdozi/llm-experiments-lab"
 
+    # Grounded chatbot / Nebius Token Factory
+    nebius_key: str | None = None
+    token_factory_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
+    token_factory_model: str = "Qwen/Qwen3-235B-A22B-Thinking-2507"
+    chatbot_log_tail_lines: int = 50
+    chatbot_history_window_turns: int = 10
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
