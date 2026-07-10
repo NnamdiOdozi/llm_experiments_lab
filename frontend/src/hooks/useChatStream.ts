@@ -3,6 +3,11 @@ import { ChatMessage } from "../types";
 
 const BASE = "/api/chatbot";
 
+// Module-level counter for client-generated message IDs (negative, so they
+// never collide with server-assigned positive IDs once persisted rows come
+// back from GET .../messages). Shared across all useChatStream() instances —
+// fine because only one ChatPanel is ever mounted at a time (see App.tsx).
+// If a multi-panel UI is ever built, switch this to per-instance state.
 let nextLocalId = -1;
 
 function localMessage(experimentId: number, role: "user" | "assistant", content: string): ChatMessage {
