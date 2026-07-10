@@ -46,6 +46,18 @@ CREATE TABLE IF NOT EXISTS training_runs (
     git_commit TEXT,
     FOREIGN KEY (experiment_id) REFERENCES experiments(id)
 );
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER NOT NULL REFERENCES experiments(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    latency_ms INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Columns added after initial schema — ALTER TABLE for existing DBs
@@ -157,6 +169,52 @@ async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
         (experiment_id,),
     )
     rows = await cursor.fetchall()
+    await db.close()
+    return [dict(r) for r in rows]
+
+
+async def add_chat_message(
+    experiment_id: int,
+    role: str,
+    content: str,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    latency_ms: int | None = None,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        "INSERT INTO chat_messages "
+        "(experiment_id, role, content, prompt_tokens, completion_tokens, total_tokens, latency_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (experiment_id, role, content, prompt_tokens, completion_tokens, total_tokens, latency_ms),
+    )
+    await db.commit()
+    row_id = cursor.lastrowid
+    await db.close()
+    return row_id
+
+
+async def get_chat_messages(experiment_id: int, limit: int | None = None) -> list[dict]:
+    """Chat history for an experiment, oldest first.
+
+    limit=None returns full history (for the UI). limit=N returns only the
+    most recent N messages, still in chronological order (for the sliding
+    window sent to the LLM) — same function serves both callers.
+    """
+    db = await get_db()
+    if limit is None:
+        cursor = await db.execute(
+            "SELECT * FROM chat_messages WHERE experiment_id = ? ORDER BY id ASC",
+            (experiment_id,),
+        )
+        rows = await cursor.fetchall()
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM chat_messages WHERE experiment_id = ? ORDER BY id DESC LIMIT ?",
+            (experiment_id, limit),
+        )
+        rows = list(reversed(await cursor.fetchall()))
     await db.close()
     return [dict(r) for r in rows]
 
