@@ -86,3 +86,15 @@ export interface CodeFiles {
   template: string;
   files: Record<string, string>;
 }
+
+export interface ChatMessage {
+  id: number;
+  experiment_id: number;
+  role: "user" | "assistant";
+  content: string;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  latency_ms: number | null;
+  created_at: string;
+}
