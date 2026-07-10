@@ -73,3 +73,41 @@ def test_get_log_tail_returns_last_n_lines(tmp_path, monkeypatch):
 
     assert len(tail) == 5
     assert tail[-1].strip() == "line 99"
+
+
+def test_assemble_messages_structure(monkeypatch, tmp_path):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-10 10:00:00 | INFO  | lab.audit | Config updated: experiment_id=1 changed={\"lr\": [0.001, 0.003]}\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    experiment = {
+        "id": 1,
+        "name": "My experiment",
+        "config_json": json.dumps({"template": "transformer", "description": "baseline"}),
+    }
+    run = {
+        "status": "running",
+        "current_step": 10,
+        "total_steps": 100,
+        "train_loss_history": json.dumps([{"step": 10, "train_loss": 2.0, "val_loss": 2.1}]),
+    }
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+    ]
+
+    messages = context.assemble_messages(experiment, run, history, "What does this loss mean?")
+
+    assert messages[0]["role"] == "system"
+    assert "grounded lab assistant" in messages[0]["content"]
+    assert messages[1]["role"] == "system"
+    assert "RotaryPositionalEncoding" in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "earlier question"}
+    assert messages[3] == {"role": "assistant", "content": "earlier answer"}
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert "What does this loss mean?" in last["content"]
+    assert "running" in last["content"]
+    assert "experiment_id=1" in last["content"]
