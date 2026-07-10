@@ -257,3 +257,6 @@ nebius_ssh_key.pub
 *.pem
 sa_*.json
 *_private_key*
+
+# git worktrees (superpowers)
+.worktrees/
