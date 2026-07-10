@@ -10,6 +10,7 @@ import TrainingControls from "./components/TrainingControls";
 import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
 import ExperimentNotes from "./components/ExperimentNotes";
+import ChatPanel from "./components/ChatPanel";
 import {
   startTraining,
   pauseTraining,
@@ -265,6 +266,7 @@ export default function App() {
               </div>
             )}
           </div>
+          <ChatPanel experimentId={experimentId} />
           <ArchSchematic config={config} />
           {runId != null && (
             <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
