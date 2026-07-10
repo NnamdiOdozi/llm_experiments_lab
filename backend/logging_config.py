@@ -7,6 +7,7 @@ Log categories (prefixed in messages):
   [PROMPT]    — Pause-and-prompt inference calls
   [AUDIT]     — Config changes, experiment creation
   [SESSION]   — Server startup/shutdown
+  [CHATBOT]   — Grounded chatbot requests to Token Factory
 """
 
 import logging
@@ -22,6 +23,7 @@ training_log = logging.getLogger("lab.training")
 prompt_log = logging.getLogger("lab.prompt")
 audit_log = logging.getLogger("lab.audit")
 session_log = logging.getLogger("lab.session")
+chatbot_log = logging.getLogger("lab.chatbot")
 
 _SESSION_START = time.strftime("%Y-%m-%d_%H-%M-%S")
 
