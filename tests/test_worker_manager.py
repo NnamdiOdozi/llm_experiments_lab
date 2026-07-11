@@ -17,7 +17,10 @@ async def test_ensure_worker_creates_new_endpoint_when_none_exists(temp_db, monk
         return "aiendpoint-new"
 
     async def fake_get_endpoint(endpoint_id):
-        return {"status": {"state": "RUNNING", "public_endpoints": ["https://new.tunnel.nebius.cloud"]}}
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://new.tunnel.nebius.cloud"]},
+        }
 
     monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
@@ -27,6 +30,31 @@ async def test_ensure_worker_creates_new_endpoint_when_none_exists(temp_db, monk
     assert worker["worker_status"] == WorkerStatus.READY
     assert worker["nebius_endpoint_id"] == "aiendpoint-new"
     assert worker["endpoint_url"] == "https://new.tunnel.nebius.cloud"
+
+
+async def test_ensure_worker_records_the_actual_platform_and_preset(temp_db, monkeypatch):
+    """Regression test for the 2026-07-11 incident: the frontend showed the
+    *configured* nebius_cpu_preset (8vcpu-32gb) while the real endpoint was
+    still 4vcpu-16gb, because nothing captured the endpoint's real spec."""
+    async def fake_create_endpoint(**kwargs):
+        return "aiendpoint-new"
+
+    async def fake_get_endpoint(endpoint_id):
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://new.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    # Config says 8vcpu-32gb, but the fake endpoint's real spec is 4vcpu-16gb —
+    # the stored value must be the real one, not the configured one.
+    monkeypatch.setattr(worker_manager.settings, "nebius_cpu_preset", "8vcpu-32gb")
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["actual_platform"] == "cpu-d3"
+    assert worker["actual_preset"] == "4vcpu-16gb"
 
 
 async def test_ensure_worker_reuses_ready_worker_without_recreating(temp_db, monkeypatch):

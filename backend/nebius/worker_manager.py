@@ -96,7 +96,11 @@ async def ensure_worker(device: str) -> dict:
         if endpoint.get("status", {}).get("state") == "RUNNING":
             url = endpoints_client.extract_public_url(endpoint)
             if url:
-                await db.update_worker_session(session_id, worker_status=WorkerStatus.READY, endpoint_url=url)
+                spec = endpoint.get("spec", {})
+                await db.update_worker_session(
+                    session_id, worker_status=WorkerStatus.READY, endpoint_url=url,
+                    actual_platform=spec.get("platform"), actual_preset=spec.get("preset"),
+                )
                 await db.touch_worker_session(session_id)
                 nebius_log.info(
                     "Worker ready — session_id=%s endpoint_id=%s url=%s", session_id, endpoint_id, url,

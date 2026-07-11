@@ -260,3 +260,4 @@ sa_*.json
 
 # git worktrees (superpowers)
 .worktrees/
+.superpowers/

@@ -81,6 +81,13 @@ def extract_public_url(endpoint: dict) -> str | None:
     return None
 
 
+async def get_logs(endpoint_id: str, tail: int = 200) -> str:
+    """Recent raw container logs — evidence/debugging, not the structured-events feed."""
+    return await _run_cli(
+        "ai", "endpoint", "logs", endpoint_id, "--tail", str(tail), "--timestamps",
+    )
+
+
 async def start_endpoint(endpoint_id: str) -> None:
     await _run_cli("ai", "endpoint", "start", "--id", endpoint_id)
 

@@ -91,6 +91,23 @@ async def test_start_endpoint_calls_cli_with_id(monkeypatch):
     assert captured["args"] == ("ai", "endpoint", "start", "--id", "aiendpoint-abc123")
 
 
+async def test_get_logs_calls_cli_with_tail_and_timestamps(monkeypatch):
+    captured = {}
+
+    async def fake_run_cli(*args):
+        captured["args"] = args
+        return "2026-07-11T22:00:00Z INFO Uvicorn running\n"
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    logs = await endpoints_client.get_logs("aiendpoint-abc123", tail=50)
+
+    assert captured["args"] == (
+        "ai", "endpoint", "logs", "aiendpoint-abc123", "--tail", "50", "--timestamps",
+    )
+    assert logs == "2026-07-11T22:00:00Z INFO Uvicorn running\n"
+
+
 async def test_stop_endpoint_calls_cli_with_id(monkeypatch):
     captured = {}
 

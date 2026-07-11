@@ -26,6 +26,21 @@ async def test_create_and_get_worker_session(temp_db):
     assert session["worker_status"] == WorkerStatus.NONE
     assert session["nebius_endpoint_id"] is None
     assert session["endpoint_url"] is None
+    assert session["actual_platform"] is None
+    assert session["actual_preset"] is None
+
+
+async def test_update_worker_session_stores_actual_platform_and_preset(temp_db):
+    await db.create_worker_session(
+        session_id="sess-actual", device_type="cpu", backend_type="nebius_endpoint",
+        idle_timeout_seconds=1800,
+    )
+
+    await db.update_worker_session("sess-actual", actual_platform="cpu-d3", actual_preset="4vcpu-16gb")
+
+    session = await db.get_worker_session("sess-actual")
+    assert session["actual_platform"] == "cpu-d3"
+    assert session["actual_preset"] == "4vcpu-16gb"
 
 
 async def test_get_worker_session_returns_none_for_unknown(temp_db):

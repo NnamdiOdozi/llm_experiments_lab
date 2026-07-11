@@ -274,7 +274,7 @@ export default function App() {
           {runId != null && (
             <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
           )}
-          <CodeView experimentId={experimentId} />
+          <CodeView experimentId={experimentId} runId={runId} device={device} />
         </div>
 
         {/* Right pane: Lab Assistant, sticky, runs top-to-bottom of the viewport */}
