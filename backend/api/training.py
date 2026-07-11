@@ -32,6 +32,10 @@ _start_lock = asyncio.Lock()
 class StartRunRequest(BaseModel):
     experiment_id: int
     device: str = "cpu"
+    # Chosen per-request by the frontend, the same way device already is —
+    # NOT settings.training_backend, which is only that dropdown's initial
+    # suggestion. See docs/DESIGN_DECISIONS.md §11.
+    backend: str = "local"
 
 
 class PromptRequest(BaseModel):
@@ -150,14 +154,14 @@ async def start_training(req: StartRunRequest):
             config_snapshot=json.dumps(config),
             template_key=config.get("template", "transformer"),
         )
-        if settings.training_backend == "nebius_endpoint":
+        if req.backend == "nebius_endpoint":
             await _start_remote_run(run_id, exp, req.device)
         else:
             start_run(run_id, req.experiment_id, config, req.device)
         training_log.info(
             "START run_id=%d experiment_id=%d device=%s template=%s backend=%s",
             run_id, req.experiment_id, req.device, config.get("template", "transformer"),
-            settings.training_backend,
+            req.backend,
         )
 
         return {"run_id": run_id, "status": RunStatus.QUEUED}

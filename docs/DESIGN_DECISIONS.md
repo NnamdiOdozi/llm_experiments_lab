@@ -287,6 +287,36 @@ can diverge the moment either one changes after the fact. Anywhere both
 exist, the per-instance value must win for display — global config is only
 a default for *new* things, never a description of *existing* ones.
 
+## 11. `training_backend` Is a Per-Request Choice, Not a Global Switch
+
+**Change (2026-07-11), following directly from §10:** `training_backend`
+in `config/settings.py` used to be the *only* way to pick local vs.
+Nebius-endpoint execution — set once via `TRAINING_BACKEND` env var at
+server startup, applying to every run for that process's lifetime. Restart
+the server with a different value to change it; there was no way to pick
+per run.
+
+This didn't match how `device` (CPU/GPU) already worked — that's chosen on
+the frontend per experiment, no restart needed — and users reasonably
+expected the same for local-vs-serverless, especially after §10 made clear
+that different runs legitimately use different backends over a session's
+lifetime.
+
+**Fix:** `StartRunRequest` (`backend/api/training.py`) gained a `backend`
+field, defaulting to `"local"`. `POST /api/training/start` branches on
+`req.backend`, not `settings.training_backend` — the setting is now only
+the frontend dropdown's pre-selected value on first load, never consulted
+by the backend once a request carries its own explicit choice. Frontend:
+`PresetPicker` (landing page) and `TrainingControls` (in-workspace, next to
+the existing device selector, shown between runs) both gained a matching
+Backend dropdown, mirroring exactly how device selection already works in
+both places.
+
+**Note:** `settings.training_backend` itself still exists but is now
+effectively dead as a runtime switch — nothing reads it to decide a run's
+backend anymore. Kept for now as a documented historical field / possible
+future default-seeding use; safe to remove if that never materializes.
+
 ---
 
 ## File Layout
