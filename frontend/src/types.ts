@@ -83,6 +83,15 @@ export interface MetricRow {
   /** MoE-only: percentage of tokens dropped due to expert capacity overflow */
   train_drop_rate?: number;
   val_drop_rate?: number;
+  /** Resource utilization, sampled by the worker alongside loss — best-effort,
+   * absent if psutil/nvidia-smi sampling failed. GPU fields only for cuda runs. */
+  cpu_percent?: number;
+  ram_used_mb?: number;
+  ram_total_mb?: number;
+  gpu_utilization_pct?: number;
+  gpu_memory_used_mb?: number;
+  gpu_memory_total_mb?: number;
+  gpu_temp_c?: number;
 }
 
 export interface CodeFiles {

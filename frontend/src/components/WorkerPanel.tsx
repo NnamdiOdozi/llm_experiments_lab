@@ -20,6 +20,20 @@ function tabButtonStyle(active: boolean) {
   };
 }
 
+function formatUsage(m: MetricRow): string {
+  const parts: string[] = [];
+  if (m.cpu_percent != null) parts.push(`cpu=${m.cpu_percent.toFixed(0)}%`);
+  if (m.ram_used_mb != null && m.ram_total_mb != null) {
+    parts.push(`ram=${Math.round(m.ram_used_mb)}/${Math.round(m.ram_total_mb)}MB`);
+  }
+  if (m.gpu_utilization_pct != null) parts.push(`gpu=${m.gpu_utilization_pct.toFixed(0)}%`);
+  if (m.gpu_memory_used_mb != null && m.gpu_memory_total_mb != null) {
+    parts.push(`gpu_mem=${Math.round(m.gpu_memory_used_mb)}/${Math.round(m.gpu_memory_total_mb)}MB`);
+  }
+  if (m.gpu_temp_c != null) parts.push(`gpu_temp=${m.gpu_temp_c.toFixed(0)}C`);
+  return parts.length ? " " + parts.join(" ") : "";
+}
+
 export default function WorkerPanel({ runId, device }: Props) {
   const [subTab, setSubTab] = useState<SubTab>("events");
   const [status, setStatus] = useState<RunStatus | null>(null);
@@ -79,7 +93,7 @@ export default function WorkerPanel({ runId, device }: Props) {
   const eventLines = [
     ...(status ? [`STATUS ${status.status} step=${status.current_step}/${status.total_steps}`] : []),
     ...metrics.map(
-      (m) => `STEP step=${m.step} loss=${m.train_loss.toFixed(4)} val_loss=${m.val_loss.toFixed(4)}`,
+      (m) => `STEP step=${m.step} loss=${m.train_loss.toFixed(4)} val_loss=${m.val_loss.toFixed(4)}${formatUsage(m)}`,
     ),
   ];
 

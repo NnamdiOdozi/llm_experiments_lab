@@ -15,6 +15,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
+import psutil
 import torch
 import torch.nn as nn
 
@@ -63,6 +64,40 @@ def _get_package_versions() -> dict:
 
 def _param_count(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
+
+
+def _sample_resource_usage(device: str) -> dict:
+    """CPU/RAM always (psutil); GPU utilization/memory/temp only for cuda
+    devices (nvidia-smi). Best-effort — utilization is supplementary
+    telemetry, not correctness-critical, so failures don't stop training.
+    2026-07-12 addition, see docs/DESIGN_DECISIONS.md.
+    """
+    usage = {}
+    try:
+        usage["cpu_percent"] = psutil.cpu_percent(interval=None)
+        vm = psutil.virtual_memory()
+        usage["ram_used_mb"] = round(vm.used / 1024 / 1024, 1)
+        usage["ram_total_mb"] = round(vm.total / 1024 / 1024, 1)
+    except Exception as exc:
+        print(f"[train_worker] psutil sampling failed: {exc}", file=sys.stderr)
+
+    if device.startswith("cuda"):
+        try:
+            result = sp.run(
+                ["nvidia-smi",
+                 "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+            gpu_util, mem_used, mem_total, temp = result.stdout.strip().split(", ")
+            usage["gpu_utilization_pct"] = float(gpu_util)
+            usage["gpu_memory_used_mb"] = float(mem_used)
+            usage["gpu_memory_total_mb"] = float(mem_total)
+            usage["gpu_temp_c"] = float(temp)
+        except Exception as exc:
+            print(f"[train_worker] nvidia-smi sampling failed: {exc}", file=sys.stderr)
+
+    return usage
 
 
 # ── Worker state ────────────────────────────────────────────────────
@@ -155,6 +190,7 @@ class WorkerState:
 
     def write_metric(self, metric_row: dict):
         metric_row["timestamp"] = datetime.datetime.now().isoformat()
+        metric_row.update(_sample_resource_usage(self.device))
         self.metrics.append(metric_row)
         with open(artifacts.metrics_path(self.run_id), "a") as f:
             f.write(json.dumps(metric_row) + "\n")
