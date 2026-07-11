@@ -187,6 +187,38 @@ Like the audit lookup, this only sees the current server session's log —
 prompt exchanges from before a backend restart are invisible to the chatbot
 (accepted v1 tradeoff, same as "last change" tracking).
 
+## 8. `nebius` CLI Calls Must Close stdin and Be Timeout-Bounded
+
+**Incident (2026-07-11):** a live smoke test of the endpoint track hung
+indefinitely. `POST /api/training/start` never returned. Root cause:
+`backend/nebius/endpoints_client.py::_run_cli()` spawned the `nebius` CLI
+via `asyncio.create_subprocess_exec` without setting `stdin=`, so the
+child inherited uvicorn's stdin — which, running as a background process,
+never produces EOF. The `nebius ai endpoint start` subprocess sat blocked
+waiting for input that would never arrive. Running the exact same CLI
+command directly in a terminal with `< /dev/null` returned in seconds
+(with an unrelated transient API error), confirming the hang was
+stdin-related, not a slow API call.
+
+**Fix:** every `_run_cli()` call now passes `stdin=asyncio.subprocess.DEVNULL`
+explicitly, and the whole call is wrapped in `asyncio.wait_for(...,
+timeout=settings.nebius_cli_timeout_seconds)` as a second line of defense
+— if some other future CLI call hangs for a different reason, it fails
+loudly after `nebius_cli_timeout_seconds` (default 60s) instead of hanging
+the request forever. On timeout the subprocess is explicitly killed
+(`proc.kill()` + `await proc.wait()`) so it doesn't leak as a zombie.
+
+**If you add another subprocess call anywhere in this codebase** (CLI
+wrapper, external tool, etc.), close stdin explicitly rather than relying
+on the default inherited-from-parent behavior — it works fine when run
+interactively or under pytest, and only breaks under a real long-running
+server process, which makes it easy to miss until it happens in production.
+
+Separately: `nebius_endpoint_ready_timeout_seconds` (the poll-loop timeout
+for "wait until the endpoint reaches RUNNING") was bumped from 180s to
+360s after being told endpoint creation can take up to ~5 minutes in
+practice — noticeably longer than the plan doc's 30-90s estimate.
+
 ---
 
 ## File Layout

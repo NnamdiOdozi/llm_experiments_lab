@@ -3,11 +3,12 @@ import { Preset, ExperimentConfig } from "../types";
 import { fetchPresets, createFromPreset } from "../hooks/useApi";
 
 interface Props {
-  onSelect: (experimentId: number, config: ExperimentConfig) => void;
+  onSelect: (experimentId: number, config: ExperimentConfig, device: string) => void;
 }
 
 export default function PresetPicker({ onSelect }: Props) {
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [device, setDevice] = useState("cpu");
 
   useEffect(() => {
     fetchPresets().then(setPresets);
@@ -20,12 +21,23 @@ export default function PresetPicker({ onSelect }: Props) {
       model: p.model,
       training: p.training,
     };
-    onSelect(experiment_id, config);
+    onSelect(experiment_id, config, device);
   }
 
   return (
     <div className="panel">
       <h3>Choose a Preset</h3>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
+        <select
+          value={device}
+          onChange={(e) => setDevice(e.target.value)}
+          style={{ fontSize: 12, padding: "4px 8px" }}
+        >
+          <option value="cpu">CPU</option>
+          <option value="cuda">GPU (CUDA)</option>
+        </select>
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         {presets.map((p) => (
           <button

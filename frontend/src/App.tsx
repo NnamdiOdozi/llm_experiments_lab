@@ -11,6 +11,7 @@ import PausePrompt from "./components/PausePrompt";
 import ExportBar from "./components/ExportBar";
 import ExperimentNotes from "./components/ExperimentNotes";
 import ChatPanel from "./components/ChatPanel";
+import WorkerIdleBanner from "./components/WorkerIdleBanner";
 import {
   startTraining,
   pauseTraining,
@@ -69,12 +70,13 @@ export default function App() {
     }
   }
 
-  function handlePresetSelect(expId: number, cfg: ExperimentConfig) {
+  function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string) {
     setExperimentId(expId);
     setConfig(cfg);
     setRunId(null);
     setRunStatus(null);
     setMetrics([]);
+    setDevice(selectedDevice);
     saveSession(expId, null, cfg);
   }
 
@@ -207,6 +209,7 @@ export default function App() {
           </button>
         </div>
       )}
+      <WorkerIdleBanner device={device} />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h1 style={{ fontSize: 20 }}>
           LLM Experiments Lab

@@ -8,6 +8,7 @@ Log categories (prefixed in messages):
   [AUDIT]     — Config changes, experiment creation
   [SESSION]   — Server startup/shutdown
   [CHATBOT]   — Grounded chatbot requests to Token Factory
+  [NEBIUS]    — Nebius Serverless endpoint lifecycle (create/start/stop, remote run proxying)
 """
 
 import logging
@@ -24,6 +25,7 @@ prompt_log = logging.getLogger("lab.prompt")
 audit_log = logging.getLogger("lab.audit")
 session_log = logging.getLogger("lab.session")
 chatbot_log = logging.getLogger("lab.chatbot")
+nebius_log = logging.getLogger("lab.nebius")
 
 _SESSION_START = time.strftime("%Y-%m-%d_%H-%M-%S")
 

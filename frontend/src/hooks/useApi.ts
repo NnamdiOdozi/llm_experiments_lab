@@ -53,6 +53,21 @@ export function promptModel(runId: number, prompt: string) {
   });
 }
 
+export interface WorkerStatus {
+  worker_status: string;
+  seconds_idle: number | null;
+  idle_timeout_seconds: number | null;
+  warning_seconds: number | null;
+}
+
+export function getWorkerStatus(device: string) {
+  return api<WorkerStatus>(`/nebius/workers/${device}`);
+}
+
+export function sendWorkerHeartbeat(device: string) {
+  return api<{ ok: boolean }>(`/nebius/workers/${device}/heartbeat`, { method: "POST" });
+}
+
 export function fetchRunStatus(runId: number) {
   return api<import("../types").RunStatus>(`/training/${runId}/status`);
 }
