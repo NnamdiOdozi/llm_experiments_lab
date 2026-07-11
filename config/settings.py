@@ -74,7 +74,12 @@ class Settings(BaseSettings):
     # `nebius ai endpoint create`/`start` call succeed.
     # GPU platform+preset are also UNVERIFIED placeholders from the plan doc's
     # example command — confirm before first GPU use.
-    nebius_backend_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-backend:phase2"
+    # Split into two images on 2026-07-12 (see Dockerfile.trainer-cpu/-gpu and
+    # scripts/build_push_trainer_*.sh) — the single llm-lab-backend:phase2
+    # monolith pulled CUDA torch even for the CPU endpoint. Both default to
+    # :latest; override per-deploy via env var once real tags are pushed.
+    nebius_cpu_trainer_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-trainer-cpu:latest"
+    nebius_gpu_trainer_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-trainer-gpu:latest"
     nebius_subnet_id: str = "vpcsubnet-your-subnet-id-here"
     nebius_cpu_platform: str = "cpu-d3"
     nebius_cpu_preset: str = "8vcpu-32gb"  # unverified at this size, see comment above
