@@ -391,7 +391,7 @@ async def get_run_status_from_db(run_id: int) -> dict | None:
     db = await get_db()
     cursor = await db.execute(
         "SELECT id, experiment_id, status, current_step, total_steps, "
-        "template_key, started_at, completed_at, config_snapshot "
+        "template_key, started_at, completed_at, config_snapshot, execution_backend "
         "FROM training_runs WHERE id = ?",
         (run_id,),
     )
@@ -418,4 +418,5 @@ async def get_run_status_from_db(run_id: int) -> dict | None:
         "template": r.get("template_key") or "transformer",
         "elapsed_seconds": 0,
         "from_db": True,
+        "execution_backend": r.get("execution_backend") or "local",
     }

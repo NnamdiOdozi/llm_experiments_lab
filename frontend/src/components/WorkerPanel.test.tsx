@@ -25,7 +25,7 @@ describe("WorkerPanel", () => {
       warning_seconds: null, backend_mode: "local", preset: null,
     });
     vi.spyOn(api, "fetchRunStatus").mockResolvedValue({
-      run_id: 5, status: "running", current_step: 20, total_steps: 100, metrics_count: 1, template: "transformer", elapsed_seconds: 10,
+      run_id: 5, status: "running", current_step: 20, total_steps: 100, metrics_count: 1, template: "transformer", elapsed_seconds: 10, execution_backend: "local",
     });
     vi.spyOn(api, "fetchMetrics").mockResolvedValue([
       { step: 20, train_loss: 2.9688, val_loss: 3.0093 },

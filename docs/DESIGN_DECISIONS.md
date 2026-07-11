@@ -248,6 +248,45 @@ state must be sourced from that infrastructure's own reported state, not
 from the config that was used (or intended) to create it. Config describes
 intent; only the provider's API describes reality.
 
+## 10. Per-Run Backend Must Come From the Run, Not Global Config
+
+**Incident (2026-07-11):** a screenshot showed a run tagged `CPU · Serverless`
+with the idle-timeout banner simultaneously claiming the worker was stopped
+due to inactivity — visibly contradictory. Checked the DB directly: the run
+in question had `execution_backend='local'`, but the tag showed "Serverless"
+anyway.
+
+Root cause: `TrainingControls`'s worker tag and `WorkerIdleBanner` both read
+`GET /api/nebius/workers/{device}` — the app's *current global*
+`training_backend` setting — completely independent of which
+`execution_backend` the specific run being viewed actually used. A run
+started under `local` mode keeps `execution_backend='local'` on its DB row
+forever, but if the server was later restarted with
+`TRAINING_BACKEND=nebius_endpoint`, every run's tag would start showing
+"Serverless" regardless of what that run actually used — exactly the
+class of bug as §9, one level up: config was standing in for a fact that
+can only be true per-instance (there, per-endpoint; here, per-run).
+
+**Fix:** every run-status response (`backend/training/runner.py::get_run_status()`,
+`backend/db.py::get_run_status_from_db()`, and the remote-proxy override in
+`backend/api/training.py::run_status()`) now carries `execution_backend`
+reflecting *that run's own* value — for local runs this is trivially
+`"local"` (a subprocess's own status.json has no concept of remote
+execution), for remote runs the controller explicitly overrides whatever
+the proxied endpoint's response claims (its own status.json also always
+says "local" from its own point of view, which is correct for it but wrong
+from the controller's). The frontend now branches on
+`runStatus.execution_backend`, not a global settings poll, and
+`WorkerIdleBanner` is hidden entirely when the current run is definitively
+local — showing remote-worker idle status while looking at a local run is
+noise, not signal.
+
+**General lesson, extending §9:** "current global config" and "the actual
+backend a specific already-started thing is using" are different facts that
+can diverge the moment either one changes after the fact. Anywhere both
+exist, the per-instance value must win for display — global config is only
+a default for *new* things, never a description of *existing* ones.
+
 ---
 
 ## File Layout
