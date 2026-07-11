@@ -34,11 +34,12 @@ export default function ChatPanel({ experimentId }: Props) {
   }
 
   return (
-    <div className="panel">
+    <div className="panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <h3>Lab Assistant</h3>
       <div
         style={{
-          maxHeight: 300,
+          flex: 1,
+          minHeight: 0,
           overflowY: "auto",
           display: "flex",
           flexDirection: "column",
@@ -67,13 +68,30 @@ export default function ChatPanel({ experimentId }: Props) {
         <div ref={bottomRef} />
       </div>
       {error && <p style={{ fontSize: 12, color: "var(--red)" }}>{error}</p>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <input
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Ask about this run..."
-          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-          style={{ flex: 1 }}
+          rows={4}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter inserts a newline (standard chat convention)
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSubmit();
+            }
+          }}
+          style={{
+            width: "100%",
+            resize: "vertical",
+            fontSize: 13,
+            fontFamily: "inherit",
+            background: "var(--bg)",
+            color: "var(--text)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            padding: 8,
+          }}
         />
         <button className="btn-primary" onClick={handleSubmit} disabled={loading}>
           {loading ? "..." : "Send"}

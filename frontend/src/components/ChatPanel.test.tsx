@@ -71,4 +71,18 @@ describe("ChatPanel", () => {
     render(<ChatPanel experimentId={1} />);
     expect(screen.getByRole("button", { name: /\.\.\./ })).toBeDisabled();
   });
+
+  it("submits on Enter but not on Shift+Enter", () => {
+    const sendMessage = mockHook();
+    render(<ChatPanel experimentId={1} />);
+
+    const input = screen.getByPlaceholderText(/ask about this run/i);
+    fireEvent.change(input, { target: { value: "hello" } });
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(sendMessage).toHaveBeenCalledWith("hello");
+  });
 });
