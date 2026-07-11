@@ -12,6 +12,34 @@ async def temp_db(tmp_path, monkeypatch):
     await db.init_db()
 
 
+async def test_create_new_worker_uses_the_correct_image_per_device_type(temp_db, monkeypatch):
+    """Regression guard for the CPU/GPU image split (2026-07-12) — a CPU
+    worker must never accidentally get the CUDA-bearing GPU image, and
+    vice versa."""
+    monkeypatch.setattr(worker_manager.settings, "nebius_cpu_trainer_image", "registry/llm-lab-trainer-cpu:latest")
+    monkeypatch.setattr(worker_manager.settings, "nebius_gpu_trainer_image", "registry/llm-lab-trainer-gpu:latest")
+    captured = {}
+
+    async def fake_create_endpoint(**kwargs):
+        captured["image"] = kwargs["image"]
+        return "aiendpoint-new"
+
+    async def fake_get_endpoint(endpoint_id):
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://new.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    await worker_manager.ensure_worker("cpu")
+    assert captured["image"] == "registry/llm-lab-trainer-cpu:latest"
+
+    await worker_manager.ensure_worker("cuda")
+    assert captured["image"] == "registry/llm-lab-trainer-gpu:latest"
+
+
 async def test_ensure_worker_creates_new_endpoint_when_none_exists(temp_db, monkeypatch):
     async def fake_create_endpoint(**kwargs):
         return "aiendpoint-new"

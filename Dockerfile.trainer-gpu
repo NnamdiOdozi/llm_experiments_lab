@@ -1,0 +1,36 @@
+# nvidia/cuda base (not plain python:slim) — matches the exact image the
+# plan doc's GPU smoke test already used. Needed for nvidia-smi and the
+# CUDA driver-level libraries to actually be present; a plain slim image
+# isn't guaranteed to have either, which would silently break the GPU
+# utilization metrics (backend/training/train_worker.py). Ubuntu 24.04
+# ships Python 3.12 by default, matching the CPU image's version.
+FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Official installer, not pip — avoids Ubuntu 24.04's PEP 668
+# externally-managed-environment restriction entirely.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+COPY pyproject.toml uv.lock ./
+# pyproject.toml's torch source already points at the cu130 (CUDA) wheel
+# index for Linux/Windows — no swap needed here, unlike the CPU image.
+RUN uv sync --no-dev
+
+COPY backend ./backend
+COPY config ./config
+
+ENV PYTHONPATH=/app
+ENV HOST=0.0.0.0
+ENV PORT=8000
+# Not WSL2 — no shared display compositor to starve. See config/settings.py.
+ENV GPU_YIELD_ENABLED=false
+
+EXPOSE 8000
+
+CMD ["uv", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

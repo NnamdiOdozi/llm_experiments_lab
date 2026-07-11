@@ -1,0 +1,26 @@
+FROM python:3.12.12-slim
+
+WORKDIR /app
+
+RUN pip install uv
+
+COPY pyproject.toml uv.lock ./
+# pyproject.toml pins torch to the CUDA (cu130) wheel index for the GPU
+# image — this image needs the much smaller CPU-only wheel instead. Sync
+# everything else from the locked resolution, then swap just torch.
+# See docs/DESIGN_DECISIONS.md.
+RUN uv sync --no-dev \
+    && uv pip install --python .venv --index-url https://download.pytorch.org/whl/cpu --reinstall-package torch torch
+
+COPY backend ./backend
+COPY config ./config
+
+ENV PYTHONPATH=/app
+ENV HOST=0.0.0.0
+ENV PORT=8000
+# Not WSL2 — no shared display compositor to starve. See config/settings.py.
+ENV GPU_YIELD_ENABLED=false
+
+EXPOSE 8000
+
+CMD ["uv", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
