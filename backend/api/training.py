@@ -3,11 +3,13 @@
 import asyncio
 import json
 
+import httpx
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from backend import db
 from backend.logging_config import training_log, prompt_log
+from backend.nebius import worker_manager
 from backend.training.runner import (
     active_runs,
     start_run,
@@ -18,6 +20,7 @@ from backend.training.runner import (
     get_run_status,
 )
 from backend.training.status import RunStatus, TERMINAL_STATUSES
+from backend.training.worker_status import device_type_for, session_id_for
 from config.settings import settings
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -45,6 +48,74 @@ def _count_active_runs(device_filter: str | None = None) -> int:
         if device_filter is None or r.device.startswith(device_filter):
             count += 1
     return count
+
+
+async def _remote_endpoint_url(db_run: dict) -> str | None:
+    """The endpoint currently backing this run's device, if it's still known."""
+    session_id = session_id_for(device_type_for(db_run["device"]))
+    worker = await db.get_worker_session(session_id)
+    return worker["endpoint_url"] if worker else None
+
+
+async def _proxy(db_run: dict, method: str, path: str, json_body: dict | None = None) -> dict:
+    """Forward a training-control call to the remote endpoint, using its own
+    remote_run_id — the frontend never sees that id, only the local run_id.
+    """
+    endpoint_url = await _remote_endpoint_url(db_run)
+    if endpoint_url is None:
+        raise HTTPException(502, "Remote worker endpoint not available")
+    remote_path = path.format(run_id=db_run["remote_run_id"])
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.request(method, f"{endpoint_url}{remote_path}", json=json_body)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
+    """Mirror the experiment onto the CPU/GPU endpoint and start training there.
+
+    The endpoint is an ephemeral execution worker, not durable storage — the
+    local training_runs row (updated below) stays the system of record. The
+    frontend only ever deals with the local run_id; remote_run_id is an
+    internal detail used to address the endpoint's own copy of the run.
+    """
+    try:
+        worker = await worker_manager.ensure_worker(device)
+    except worker_manager.WorkerProvisionError as exc:
+        await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
+        training_log.error("Worker provisioning failed — run_id=%d: %s", run_id, exc)
+        raise HTTPException(502, f"Remote worker unavailable: {exc}")
+
+    endpoint_url = worker["endpoint_url"]
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            exp_resp = await client.request(
+                "POST", f"{endpoint_url}/api/experiments",
+                json={"name": exp["name"], "config": json.loads(exp["config_json"]), "preset_key": exp["preset_key"]},
+            )
+            exp_resp.raise_for_status()
+            remote_experiment_id = exp_resp.json()["id"]
+
+            run_resp = await client.request(
+                "POST", f"{endpoint_url}/api/training/start",
+                json={"experiment_id": remote_experiment_id, "device": device},
+            )
+            run_resp.raise_for_status()
+            remote_run_id = run_resp.json()["run_id"]
+    except httpx.HTTPError as exc:
+        await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
+        training_log.error("Remote training start failed — run_id=%d: %s", run_id, exc)
+        raise HTTPException(502, f"Remote training start failed: {exc}")
+
+    await db.update_training_run(
+        run_id, execution_backend="nebius_endpoint",
+        remote_endpoint_id=worker["nebius_endpoint_id"], remote_run_id=remote_run_id,
+    )
+    await db.touch_worker_session(worker["session_id"])
+    training_log.info(
+        "Remote run started — run_id=%d remote_run_id=%d endpoint_id=%s device=%s",
+        run_id, remote_run_id, worker["nebius_endpoint_id"], device,
+    )
 
 
 @router.post("/start")
@@ -79,17 +150,33 @@ async def start_training(req: StartRunRequest):
             config_snapshot=json.dumps(config),
             template_key=config.get("template", "transformer"),
         )
-        start_run(run_id, req.experiment_id, config, req.device)
+        if settings.training_backend == "nebius_endpoint":
+            await _start_remote_run(run_id, exp, req.device)
+        else:
+            start_run(run_id, req.experiment_id, config, req.device)
         training_log.info(
-            "START run_id=%d experiment_id=%d device=%s template=%s",
+            "START run_id=%d experiment_id=%d device=%s template=%s backend=%s",
             run_id, req.experiment_id, req.device, config.get("template", "transformer"),
+            settings.training_backend,
         )
 
         return {"run_id": run_id, "status": RunStatus.QUEUED}
 
 
+def _is_remote(db_run: dict | None) -> bool:
+    return db_run is not None and db_run.get("execution_backend") == "nebius_endpoint"
+
+
 @router.post("/{run_id}/pause")
 async def pause_training(run_id: int):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            await _proxy(db_run, "POST", "/api/training/{run_id}/pause")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote pause failed: {exc}")
+        training_log.info("PAUSE requested (remote) run_id=%d", run_id)
+        return {"run_id": run_id, "status": "pausing"}
     if not pause_run(run_id):
         raise HTTPException(400, "Run not found or not running")
     training_log.info("PAUSE requested run_id=%d", run_id)
@@ -98,10 +185,20 @@ async def pause_training(run_id: int):
 
 @router.post("/{run_id}/resume")
 async def resume_training(run_id: int):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            # NOTE: does not push config edits made while paused to the remote
+            # mirrored experiment — known gap, local resume already does this
+            # (see updated_config below), remote resume doesn't yet.
+            await _proxy(db_run, "POST", "/api/training/{run_id}/resume")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote resume failed: {exc}")
+        training_log.info("RESUME (remote) run_id=%d", run_id)
+        return {"run_id": run_id, "status": RunStatus.RESUMING}
     # Fetch latest config from DB so edits made while paused
     # (e.g. max_iters, eval_interval, inference params) take effect.
     updated_config = None
-    db_run = await db.get_training_run(run_id)
     if db_run:
         exp = await db.get_experiment(db_run["experiment_id"])
         if exp:
@@ -114,6 +211,14 @@ async def resume_training(run_id: int):
 
 @router.post("/{run_id}/stop")
 async def stop_training(run_id: int):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            await _proxy(db_run, "POST", "/api/training/{run_id}/stop")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote stop failed: {exc}")
+        training_log.info("STOP (remote) run_id=%d", run_id)
+        return {"run_id": run_id, "status": "stopping"}
     if not stop_run(run_id):
         raise HTTPException(400, "Run not found")
     training_log.info("STOP run_id=%d", run_id)
@@ -122,6 +227,21 @@ async def stop_training(run_id: int):
 
 @router.post("/{run_id}/prompt")
 async def prompt_model(run_id: int, req: PromptRequest):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(
+                db_run, "POST", "/api/training/{run_id}/prompt",
+                {"prompt": req.prompt, "max_new_tokens": req.max_new_tokens},
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote prompt failed: {exc}")
+        output = result.get("output")
+        prompt_log.info(
+            "run_id=%d (remote) payload=%s", run_id,
+            json.dumps({"prompt": req.prompt, "output": output}),
+        )
+        return {"run_id": run_id, "prompt": req.prompt, "output": output}
     result = prompt_paused_model(run_id, req.prompt, req.max_new_tokens)
     if result is None:
         raise HTTPException(400, "Run not paused or model not available")
@@ -139,6 +259,14 @@ async def prompt_model(run_id: int, req: PromptRequest):
 
 @router.get("/{run_id}/status")
 async def run_status(run_id: int):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(db_run, "GET", "/api/training/{run_id}/status")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote status fetch failed: {exc}")
+        result["run_id"] = run_id  # never leak the endpoint's own remote run_id
+        return result
     # Try in-memory first (live run), then fall back to DB (after restart)
     status = get_run_status(run_id)
     if status is not None:
@@ -169,6 +297,12 @@ def _read_metrics_from_disk(run_id: int) -> list[dict]:
 
 @router.get("/{run_id}/metrics")
 async def get_metrics(run_id: int):
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            return await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote metrics fetch failed: {exc}")
     # Always read from disk (worker writes metrics.jsonl)
     disk_metrics = _read_metrics_from_disk(run_id)
     if disk_metrics:
@@ -176,7 +310,6 @@ async def get_metrics(run_id: int):
     # Check if run exists (active or in DB)
     if run_id in active_runs:
         return []
-    db_run = await db.get_training_run(run_id)
     if db_run is None:
         raise HTTPException(404, "Run not found")
     return []
@@ -189,8 +322,39 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
 
     await websocket.accept()
     last_sent = 0
+    db_run = await db.get_training_run(run_id)
 
     try:
+        if _is_remote(db_run):
+            # Endpoint has no push channel back to us, so poll its REST routes
+            # on the same cadence the local branch below polls disk.
+            while True:
+                try:
+                    status = await _proxy(db_run, "GET", "/api/training/{run_id}/status")
+                    current_metrics = await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
+                except httpx.HTTPError:
+                    await websocket.send_json({"type": "error", "message": "Remote worker unreachable"})
+                    break
+
+                if isinstance(current_metrics, list) and len(current_metrics) > last_sent:
+                    for metric in current_metrics[last_sent:]:
+                        await websocket.send_json({"type": "metric", "data": metric})
+                    last_sent = len(current_metrics)
+
+                await websocket.send_json({
+                    "type": "status",
+                    "status": status.get("status"),
+                    "current_step": status.get("current_step", 0),
+                    "total_steps": status.get("total_steps", 0),
+                })
+
+                if status.get("status") in TERMINAL_STATUSES:
+                    await websocket.send_json({"type": "done", "status": status.get("status")})
+                    break
+
+                await asyncio.sleep(2)
+            return
+
         while True:
             status = artifacts.read_status(run_id)
             if status is None:

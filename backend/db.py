@@ -5,6 +5,7 @@ import sqlite3
 import aiosqlite
 
 from backend.training.status import RunStatus, ACTIVE_STATUSES
+from backend.training.worker_status import WorkerStatus, TERMINAL_WORKER_STATUSES
 from config.settings import settings
 
 DB_PATH = settings.database_path
@@ -44,6 +45,9 @@ CREATE TABLE IF NOT EXISTS training_runs (
     param_count INTEGER,
     package_versions TEXT,
     git_commit TEXT,
+    execution_backend TEXT DEFAULT 'local',
+    remote_endpoint_id TEXT,
+    remote_run_id INTEGER,
     FOREIGN KEY (experiment_id) REFERENCES experiments(id)
 );
 
@@ -57,6 +61,22 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     total_tokens INTEGER,
     latency_ms INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Remote worker (Nebius endpoint) lifecycle — separate from training_runs.
+-- One worker_session can host multiple training_runs over its lifetime.
+CREATE TABLE IF NOT EXISTS worker_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL UNIQUE,
+    device_type TEXT NOT NULL,
+    backend_type TEXT NOT NULL,
+    worker_status TEXT NOT NULL DEFAULT 'none',
+    nebius_endpoint_id TEXT,
+    endpoint_url TEXT,
+    idle_timeout_seconds INTEGER NOT NULL,
+    last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -73,6 +93,9 @@ _MIGRATIONS = [
     ("param_count", "INTEGER"),
     ("package_versions", "TEXT"),
     ("git_commit", "TEXT"),
+    ("execution_backend", "TEXT DEFAULT 'local'"),
+    ("remote_endpoint_id", "TEXT"),
+    ("remote_run_id", "INTEGER"),
 ]
 
 
@@ -215,6 +238,72 @@ async def get_chat_messages(experiment_id: int, limit: int | None = None) -> lis
             (experiment_id, limit),
         )
         rows = list(reversed(await cursor.fetchall()))
+    await db.close()
+    return [dict(r) for r in rows]
+
+
+# ── Worker sessions (Track B remote job workers) ──
+
+async def create_worker_session(
+    session_id: str, device_type: str, backend_type: str, idle_timeout_seconds: int,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        "INSERT INTO worker_sessions "
+        "(session_id, device_type, backend_type, idle_timeout_seconds) "
+        "VALUES (?, ?, ?, ?)",
+        (session_id, device_type, backend_type, idle_timeout_seconds),
+    )
+    await db.commit()
+    row_id = cursor.lastrowid
+    await db.close()
+    return row_id
+
+
+async def get_worker_session(session_id: str) -> dict | None:
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM worker_sessions WHERE session_id = ?", (session_id,),
+    )
+    row = await cursor.fetchone()
+    await db.close()
+    if row is None:
+        return None
+    return dict(row)
+
+
+async def update_worker_session(session_id: str, **kwargs):
+    set_clause = ", ".join(f"{k} = ?" for k in kwargs)
+    values = list(kwargs.values()) + [session_id]
+    db = await get_db()
+    await db.execute(
+        f"UPDATE worker_sessions SET {set_clause} WHERE session_id = ?", values,
+    )
+    await db.commit()
+    await db.close()
+
+
+async def touch_worker_session(session_id: str):
+    """Bump last_activity_at — called on any command/heartbeat for idle-timeout tracking."""
+    db = await get_db()
+    await db.execute(
+        "UPDATE worker_sessions SET last_activity_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ?",
+        (session_id,),
+    )
+    await db.commit()
+    await db.close()
+
+
+async def list_active_worker_sessions() -> list[dict]:
+    statuses = tuple(TERMINAL_WORKER_STATUSES)
+    placeholders = ",".join("?" for _ in statuses)
+    db = await get_db()
+    cursor = await db.execute(
+        f"SELECT * FROM worker_sessions WHERE worker_status NOT IN ({placeholders})",
+        statuses,
+    )
+    rows = await cursor.fetchall()
     await db.close()
     return [dict(r) for r in rows]
 
