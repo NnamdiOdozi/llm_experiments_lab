@@ -60,19 +60,24 @@ class Settings(BaseSettings):
     gpu_idle_timeout_seconds: int = 600   # 10 min — matches plan doc's GPU worker policy
     cpu_idle_timeout_seconds: int = 1800  # 30 min — matches plan doc's CPU worker policy
     # Warn the user this many seconds before the idle timeout actually stops the
-    # worker, so they get a "Remain logged in" chance — see 2026-07-11 session.
+    # worker, so they get a "Continue session" chance — see 2026-07-11 session.
     gpu_idle_warning_seconds: int = 300   # warns at the 5-min-idle mark (10 min total)
     cpu_idle_warning_seconds: int = 600   # warns at the 20-min-idle mark (30 min total)
     idle_scan_interval_seconds: int = 30
 
-    # Nebius endpoint client — image/subnet/CPU platform+preset proven working
-    # via the manual endpoint smoke test, see evidence/nebius-endpoint/endpoint.json.
-    # GPU platform+preset are UNVERIFIED placeholders from the plan doc's example
-    # command — confirm against `nebius ai endpoint presets` before first GPU use.
+    # Nebius endpoint client — image/subnet/CPU platform proven working via the
+    # manual endpoint smoke test, see evidence/nebius-endpoint/endpoint.json.
+    # nebius_cpu_preset was bumped 4vcpu-16gb -> 8vcpu-32gb on 2026-07-11
+    # (requested size increase) — UNVERIFIED at this size, same 1:4 vCPU:RAM
+    # ratio as the proven 4vcpu-16gb preset, but not yet smoke-tested. The CLI
+    # has no preset-listing command; confirm by watching the next real
+    # `nebius ai endpoint create`/`start` call succeed.
+    # GPU platform+preset are also UNVERIFIED placeholders from the plan doc's
+    # example command — confirm before first GPU use.
     nebius_backend_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-backend:phase2"
     nebius_subnet_id: str = "vpcsubnet-e00yp4qcbmpde8x2nc"
     nebius_cpu_platform: str = "cpu-d3"
-    nebius_cpu_preset: str = "4vcpu-16gb"
+    nebius_cpu_preset: str = "8vcpu-32gb"  # unverified at this size, see comment above
     nebius_gpu_platform: str = "gpu-l40s-a"       # unverified
     nebius_gpu_preset: str = "1gpu-8vcpu-32gb"    # unverified
     nebius_cpu_endpoint_name: str = "llm-lab-cpu-trainer"
