@@ -19,10 +19,18 @@ class WorkerProvisionError(RuntimeError):
 
 
 async def _create_new_worker(session_id: str, device_type: str) -> str:
+    """Create a fresh endpoint and point session_id at it.
+
+    Idempotent w.r.t. the session_id row: called both for a brand-new
+    session (no row yet) and for recovery when an existing session's
+    endpoint was deleted outside the app (row exists, just needs a new
+    endpoint_id) — so it must not assume the row is absent.
+    """
     idle_timeout = (
         settings.gpu_idle_timeout_seconds if device_type == "gpu" else settings.cpu_idle_timeout_seconds
     )
-    await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
+    if await db.get_worker_session(session_id) is None:
+        await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
     endpoint_id = await endpoints_client.create_endpoint(
         name=settings.nebius_gpu_endpoint_name if device_type == "gpu" else settings.nebius_cpu_endpoint_name,
         image=settings.nebius_backend_image,
@@ -55,15 +63,36 @@ async def ensure_worker(device: str) -> dict:
         endpoint_id = await _create_new_worker(session_id, device_type)
     else:
         endpoint_id = session["nebius_endpoint_id"]
-        await endpoints_client.start_endpoint(endpoint_id)
-        await db.update_worker_session(session_id, worker_status=WorkerStatus.STARTING)
-        nebius_log.info("Worker starting — session_id=%s endpoint_id=%s", session_id, endpoint_id)
+        try:
+            await endpoints_client.start_endpoint(endpoint_id)
+            await db.update_worker_session(session_id, worker_status=WorkerStatus.STARTING)
+            nebius_log.info("Worker starting — session_id=%s endpoint_id=%s", session_id, endpoint_id)
+        except endpoints_client.NebiusEndpointError as exc:
+            # Endpoint was likely deleted outside the app (console, another
+            # process, etc.) — our DB row is stale. Self-heal by creating a
+            # fresh one rather than failing the request. See 2026-07-11 session.
+            nebius_log.warning(
+                "Existing endpoint could not be started, assuming it was deleted "
+                "outside the app — session_id=%s endpoint_id=%s error=%s. Creating a new one.",
+                session_id, endpoint_id, exc,
+            )
+            endpoint_id = await _create_new_worker(session_id, device_type)
 
     max_attempts = max(
         1, settings.nebius_endpoint_ready_timeout_seconds // settings.nebius_endpoint_poll_interval_seconds,
     )
     for _ in range(max_attempts):
-        endpoint = await endpoints_client.get_endpoint(endpoint_id)
+        try:
+            endpoint = await endpoints_client.get_endpoint(endpoint_id)
+        except endpoints_client.NebiusEndpointError as exc:
+            # Same self-heal, but for disappearing between start and poll.
+            nebius_log.warning(
+                "Endpoint disappeared while waiting for it to become ready — "
+                "session_id=%s endpoint_id=%s error=%s. Creating a new one.",
+                session_id, endpoint_id, exc,
+            )
+            endpoint_id = await _create_new_worker(session_id, device_type)
+            continue
         if endpoint.get("status", {}).get("state") == "RUNNING":
             url = endpoints_client.extract_public_url(endpoint)
             if url:
