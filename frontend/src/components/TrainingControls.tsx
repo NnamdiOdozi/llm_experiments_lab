@@ -12,6 +12,8 @@ interface Props {
   loading: boolean;
   device: string;
   onDeviceChange: (d: string) => void;
+  backend: string;
+  onBackendChange: (b: string) => void;
   lastPollSuccess: number | null;
   pollError: string | null;
   startError: string | null;
@@ -62,6 +64,8 @@ export default function TrainingControls({
   loading,
   device,
   onDeviceChange,
+  backend,
+  onBackendChange,
   lastPollSuccess,
   pollError,
   startError,
@@ -134,16 +138,29 @@ export default function TrainingControls({
       )}
 
       {isDone && (
-        <div style={{ marginBottom: 10 }}>
-          <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
-          <select
-            value={device}
-            onChange={(e) => onDeviceChange(e.target.value)}
-            style={{ fontSize: 12, padding: "4px 8px" }}
-          >
-            <option value="cpu">CPU</option>
-            <option value="cuda">GPU (CUDA)</option>
-          </select>
+        <div style={{ marginBottom: 10, display: "flex", gap: 16 }}>
+          <div>
+            <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
+            <select
+              value={device}
+              onChange={(e) => onDeviceChange(e.target.value)}
+              style={{ fontSize: 12, padding: "4px 8px" }}
+            >
+              <option value="cpu">CPU</option>
+              <option value="cuda">GPU (CUDA)</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Backend</label>
+            <select
+              value={backend}
+              onChange={(e) => onBackendChange(e.target.value)}
+              style={{ fontSize: 12, padding: "4px 8px" }}
+            >
+              <option value="local">Local</option>
+              <option value="nebius_endpoint">Serverless (Nebius)</option>
+            </select>
+          </div>
         </div>
       )}
 

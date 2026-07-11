@@ -27,10 +27,10 @@ export function listExperiments() {
   return api<import("../types").Experiment[]>("/experiments");
 }
 
-export function startTraining(experimentId: number, device: string = "cpu") {
+export function startTraining(experimentId: number, device: string = "cpu", backend: string = "local") {
   return api<{ run_id: number }>("/training/start", {
     method: "POST",
-    body: JSON.stringify({ experiment_id: experimentId, device }),
+    body: JSON.stringify({ experiment_id: experimentId, device, backend }),
   });
 }
 

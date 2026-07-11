@@ -52,6 +52,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
+  const [backend, setBackend] = useState("local");
   const [showOpenRuns, setShowOpenRuns] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
   const [lastPollSuccess, setLastPollSuccess] = useState<number | null>(null);
@@ -72,13 +73,14 @@ export default function App() {
     }
   }
 
-  function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string) {
+  function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string, selectedBackend: string) {
     setExperimentId(expId);
     setConfig(cfg);
     setRunId(null);
     setRunStatus(null);
     setMetrics([]);
     setDevice(selectedDevice);
+    setBackend(selectedBackend);
     saveSession(expId, null, cfg);
   }
 
@@ -124,7 +126,7 @@ export default function App() {
         configTimerRef.current = null;
         await updateConfig(experimentId, config);
       }
-      const { run_id } = await startTraining(experimentId, device);
+      const { run_id } = await startTraining(experimentId, device, backend);
       setRunId(run_id);
       saveSession(experimentId, run_id, config);
     } catch (err) {
@@ -263,6 +265,8 @@ export default function App() {
             loading={loading}
             device={device}
             onDeviceChange={setDevice}
+            backend={backend}
+            onBackendChange={setBackend}
             lastPollSuccess={lastPollSuccess}
             pollError={pollError}
             startError={startError}

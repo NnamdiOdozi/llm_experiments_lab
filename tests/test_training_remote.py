@@ -1,7 +1,10 @@
 """Remote (nebius_endpoint) proxying in backend/api/training.py.
 
-Local-mode behavior is covered implicitly by not touching training_backend
-(defaults to "local") — these tests only cover the new remote branch.
+The backend to use is chosen per-request (StartRunRequest.backend), not by
+the app-wide training_backend setting — users pick local vs serverless per
+run from the frontend, the same way they already pick device (2026-07-11
+session). Local-mode behavior is covered implicitly by not passing
+backend="nebius_endpoint" — these tests only cover the remote branch.
 """
 
 import httpx
@@ -64,11 +67,6 @@ async def client():
         yield c
 
 
-@pytest.fixture(autouse=True)
-def remote_backend(monkeypatch):
-    monkeypatch.setattr(training_module.settings, "training_backend", "nebius_endpoint")
-
-
 def _fake_worker():
     return {
         "session_id": "worker-cpu",
@@ -91,7 +89,10 @@ async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkey
     ])
     monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
 
-    resp = await client.post("/api/training/start", json={"experiment_id": exp_id, "device": "cpu"})
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
 
     assert resp.status_code == 200
     run_id = resp.json()["run_id"]
@@ -114,9 +115,48 @@ async def test_start_training_marks_run_failed_when_worker_unavailable(temp_db, 
 
     monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
 
-    resp = await client.post("/api/training/start", json={"experiment_id": exp_id, "device": "cpu"})
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
 
     assert resp.status_code == 502
+
+
+async def test_start_training_defaults_to_local_when_backend_omitted(temp_db, client, monkeypatch):
+    async def fail_if_called(device):
+        raise AssertionError("should not touch the remote worker when backend is omitted")
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fail_if_called)
+
+    resp = await client.post("/api/training/start", json={"experiment_id": temp_db, "device": "cpu"})
+
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    db_run = await db.get_training_run(run_id)
+    assert db_run["execution_backend"] == "local"
+
+
+async def test_start_training_stays_local_even_if_global_setting_is_remote(temp_db, client, monkeypatch):
+    """Per-request choice must win over whatever the global setting is —
+    that setting is only the frontend's initial suggestion. See
+    docs/DESIGN_DECISIONS.md §10/§11."""
+    monkeypatch.setattr(training_module.settings, "training_backend", "nebius_endpoint")
+
+    async def fail_if_called(device):
+        raise AssertionError("should not touch the remote worker when backend=local is explicit")
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fail_if_called)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": temp_db, "device": "cpu", "backend": "local"},
+    )
+
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    db_run = await db.get_training_run(run_id)
+    assert db_run["execution_backend"] == "local"
 
 
 async def test_pause_training_proxies_to_remote_run(temp_db, client, monkeypatch):
