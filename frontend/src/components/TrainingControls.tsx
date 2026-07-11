@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { RunStatus, ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "../types";
+import { getWorkerStatus } from "../hooks/useApi";
 
 interface Props {
   runId: number | null;
@@ -25,6 +27,12 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function formatPreset(preset: string | null): string {
+  if (!preset) return "";
+  const match = preset.match(/^(\d+)vcpu-(\d+)gb$/i);
+  return match ? `${match[1]}vCPU / ${match[2]}GB` : preset;
 }
 
 function progressBar(current: number, total: number) {
@@ -63,6 +71,18 @@ export default function TrainingControls({
   const isActive = status != null && ACTIVE_RUN_STATUSES.has(status);
   const isDone = status == null || TERMINAL_RUN_STATUSES.has(status);
 
+  const [backendMode, setBackendMode] = useState<string | null>(null);
+  const [preset, setPreset] = useState<string | null>(null);
+  useEffect(() => {
+    getWorkerStatus(device).then((s) => {
+      setBackendMode(s.backend_mode);
+      setPreset(s.preset);
+    });
+  }, [device]);
+  const workerTag = backendMode === "nebius_endpoint"
+    ? [device.toUpperCase(), formatPreset(preset), "Serverless"].filter(Boolean).join(" · ")
+    : `${device.toUpperCase()} · Local`;
+
   const staleSeconds = lastPollSuccess ? Math.floor((Date.now() - lastPollSuccess) / 1000) : null;
   const isStale = staleSeconds != null && staleSeconds > 10 && isActive;
 
@@ -98,7 +118,7 @@ export default function TrainingControls({
           )}
           {statusTag(runStatus.status)}
           <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>
-            {device.toUpperCase()}
+            {workerTag}
           </span>
           <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 10 }}>
             Step {runStatus.current_step} / {runStatus.total_steps}

@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS worker_sessions (
     worker_status TEXT NOT NULL DEFAULT 'none',
     nebius_endpoint_id TEXT,
     endpoint_url TEXT,
+    actual_platform TEXT,
+    actual_preset TEXT,
     idle_timeout_seconds INTEGER NOT NULL,
     last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,6 +100,12 @@ _MIGRATIONS = [
     ("remote_run_id", "INTEGER"),
 ]
 
+# worker_sessions columns added after initial schema
+_WORKER_SESSION_MIGRATIONS = [
+    ("actual_platform", "TEXT"),
+    ("actual_preset", "TEXT"),
+]
+
 
 async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DB_PATH)
@@ -114,6 +122,11 @@ async def init_db():
     for col_name, col_type in _MIGRATIONS:
         try:
             await db.execute(f"ALTER TABLE training_runs ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass  # Column already exists
+    for col_name, col_type in _WORKER_SESSION_MIGRATIONS:
+        try:
+            await db.execute(f"ALTER TABLE worker_sessions ADD COLUMN {col_name} {col_type}")
         except Exception:
             pass  # Column already exists
     await db.commit()

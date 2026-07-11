@@ -58,6 +58,8 @@ export interface WorkerStatus {
   seconds_idle: number | null;
   idle_timeout_seconds: number | null;
   warning_seconds: number | null;
+  backend_mode: string;
+  preset: string | null;
 }
 
 export function getWorkerStatus(device: string) {
@@ -66,6 +68,10 @@ export function getWorkerStatus(device: string) {
 
 export function sendWorkerHeartbeat(device: string) {
   return api<{ ok: boolean }>(`/nebius/workers/${device}/heartbeat`, { method: "POST" });
+}
+
+export function getWorkerLogs(device: string) {
+  return api<{ logs: string }>(`/nebius/workers/${device}/logs`);
 }
 
 export function fetchRunStatus(runId: number) {

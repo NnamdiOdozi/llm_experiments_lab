@@ -219,6 +219,35 @@ for "wait until the endpoint reaches RUNNING") was bumped from 180s to
 360s after being told endpoint creation can take up to ~5 minutes in
 practice — noticeably longer than the plan doc's 30-90s estimate.
 
+## 9. Worker Spec Display Must Read the Real Endpoint, Never the Config
+
+**Incident (2026-07-11):** `config/settings.py::nebius_cpu_preset` was bumped
+from `4vcpu-16gb` to `8vcpu-32gb`, and the frontend's worker tag started
+showing `8vCPU / 32GB` — but the actual running endpoint was still the
+original `4vcpu-16gb` one, never recreated. The tag was silently wrong,
+actively misleading about what compute is really running.
+
+Root cause: `backend/api/nebius.py::get_worker_status()` returned
+`settings.nebius_cpu_preset`/`nebius_gpu_preset` directly — the config value
+that would be used for a *future* `create_endpoint` call, not what any
+*existing* endpoint is actually running. A settings change doesn't
+retroactively resize a live endpoint; compute specs are fixed at creation
+time.
+
+**Fix:** `worker_sessions` gained `actual_platform`/`actual_preset` columns.
+`worker_manager.py::ensure_worker()` captures these from the endpoint's own
+`spec.platform`/`spec.preset` (the CLI's real answer, from `nebius ai
+endpoint get`) at the moment it confirms RUNNING, and `get_worker_status()`
+now returns that stored value — `None` if no endpoint has ever actually
+been provisioned, never a config-based guess. The frontend tag renders
+`CPU · Serverless` (no spec segment) until a preset value is genuinely
+known, then `CPU · 4vCPU / 16GB · Serverless` once it is.
+
+**General lesson:** any UI field claiming to describe live infrastructure
+state must be sourced from that infrastructure's own reported state, not
+from the config that was used (or intended) to create it. Config describes
+intent; only the provider's API describes reality.
+
 ---
 
 ## File Layout

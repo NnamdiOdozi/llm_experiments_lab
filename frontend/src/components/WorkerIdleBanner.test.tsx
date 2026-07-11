@@ -11,6 +11,7 @@ describe("WorkerIdleBanner", () => {
   it("renders nothing when there is no worker", async () => {
     vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
       worker_status: "none", seconds_idle: null, idle_timeout_seconds: null, warning_seconds: null,
+      backend_mode: "local", preset: null,
     });
 
     const { container } = render(<WorkerIdleBanner device="cpu" />);
@@ -22,6 +23,7 @@ describe("WorkerIdleBanner", () => {
   it("renders nothing when the worker is ready and not within the warning window", async () => {
     vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
       worker_status: "ready", seconds_idle: 60, idle_timeout_seconds: 1800, warning_seconds: 600,
+      backend_mode: "nebius_endpoint", preset: "8vcpu-32gb",
     });
 
     const { container } = render(<WorkerIdleBanner device="cpu" />);
@@ -33,6 +35,7 @@ describe("WorkerIdleBanner", () => {
   it("shows a countdown warning when within the warning window", async () => {
     vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
       worker_status: "ready", seconds_idle: 1290, idle_timeout_seconds: 1800, warning_seconds: 600,
+      backend_mode: "nebius_endpoint", preset: "8vcpu-32gb",
     });
 
     render(<WorkerIdleBanner device="cpu" />);
@@ -44,6 +47,7 @@ describe("WorkerIdleBanner", () => {
   it("sends a heartbeat and re-polls when Continue session is clicked", async () => {
     const getStatus = vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
       worker_status: "ready", seconds_idle: 1290, idle_timeout_seconds: 1800, warning_seconds: 600,
+      backend_mode: "nebius_endpoint", preset: "8vcpu-32gb",
     });
     const heartbeat = vi.spyOn(api, "sendWorkerHeartbeat").mockResolvedValue({ ok: true });
 
@@ -59,6 +63,7 @@ describe("WorkerIdleBanner", () => {
   it("shows a stopped notice that can be dismissed", async () => {
     vi.spyOn(api, "getWorkerStatus").mockResolvedValue({
       worker_status: "stopped", seconds_idle: 1900, idle_timeout_seconds: 1800, warning_seconds: 600,
+      backend_mode: "nebius_endpoint", preset: "8vcpu-32gb",
     });
 
     render(<WorkerIdleBanner device="cpu" />);
