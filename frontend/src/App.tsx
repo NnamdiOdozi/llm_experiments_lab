@@ -223,7 +223,7 @@ export default function App() {
         style={{
           display: "grid",
           // 190px right pane ≈ 50mm at 96dpi — dedicated Lab Assistant column
-          gridTemplateColumns: "300px 1fr 190px",
+          gridTemplateColumns: "300px 1fr 570px",
           gap: 16,
           alignItems: "start",
         }}

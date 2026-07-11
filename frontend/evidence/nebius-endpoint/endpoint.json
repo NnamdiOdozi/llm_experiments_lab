@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "id": "aiendpoint-e00a6g6wf8vvqw1nph",
+    "parent_id": "project-e00vvbxgpr00cqrnb6j749",
+    "name": "llm-lab-smoke",
+    "resource_version": "1",
+    "created_at": "2026-07-11T16:11:12.368122Z",
+    "updated_at": "2026-07-11T16:11:12.368122Z"
+  },
+  "spec": {
+    "image": "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-backend:phase2",
+    "ports": [
+      {
+        "container_port": 8000,
+        "host_port": 8000,
+        "protocol": "HTTP"
+      }
+    ],
+    "platform": "cpu-d3",
+    "preset": "4vcpu-16gb",
+    "disk": {
+      "type": "NETWORK_SSD",
+      "size_bytes": "268435456000"
+    },
+    "subnet_id": "vpcsubnet-e00yp4qcbmpde8x2nc"
+  },
+  "status": {
+    "private_endpoints": [
+      "10.0.0.4:8000"
+    ],
+    "public_endpoints": [
+      "https://port8000-nr2ywyb08x9nkct.tunnel.applications.eu-north1.nebius.cloud"
+    ],
+    "instances": [
+      {
+        "state": "RUNNING",
+        "compute_instance_id": "computeinstance-e00y0nsaw589mxr07d",
+        "compute_instance_state": "RUNNING",
+        "private_ip": "10.0.0.4"
+      }
+    ],
+    "state": "RUNNING"
+  }
+}
