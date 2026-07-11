@@ -8,10 +8,12 @@
 # Safe to run on a CPU-only build machine.
 #
 # Run from anywhere — resolves the repo root from this script's own path.
-# Requires: docker CLI already logged in to the registry (docker-credential-nebius,
-# see ~/.nebius/bin — set up in the 2026-07 session), nebius CLI for the
-# registry path lookup (falls back to NEBIUS_REGISTRY if the CLI isn't
-# configured on this machine).
+# Requires: docker CLI installed, and `nebius registry configure-helper` run
+# once on this machine so `docker push` authenticates automatically — via a
+# VM-attached service account if there is one, otherwise whatever `nebius`
+# profile is active. No manual `docker login` needed either way. Also
+# requires the `nebius` CLI itself for the registry path lookup below
+# (falls back to NEBIUS_REGISTRY if unavailable).
 #
 # Usage:
 #   scripts/build_push_trainer_gpu.sh [tag]
