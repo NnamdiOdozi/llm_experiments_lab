@@ -177,6 +177,16 @@ error, just an empty/stale result. If you touch audit log message
 formats, check `_get_last_audit_change()`'s tests
 (`tests/test_chatbot_context.py`) still pass.
 
+The same coupling applies to pause-and-prompt visibility:
+`backend/api/training.py::prompt_model` logs each exchange as
+`run_id=<N> payload=<json>` (full prompt + full output + step, JSON-encoded
+so embedded newlines can't break the one-line-per-record format), and
+`context.py::_get_prompt_history()` parses those lines back out for the
+Lab Assistant. If you change that log line's format, update both sides.
+Like the audit lookup, this only sees the current server session's log —
+prompt exchanges from before a backend restart are invisible to the chatbot
+(accepted v1 tradeoff, same as "last change" tracking).
+
 ---
 
 ## File Layout
