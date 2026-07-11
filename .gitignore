@@ -153,6 +153,7 @@ celerybeat.pid
 # Environments
 .env
 .env.claude
+frontend/.env.local
 .envrc
 .venv
 env/
