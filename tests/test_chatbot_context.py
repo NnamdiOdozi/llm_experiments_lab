@@ -111,3 +111,52 @@ def test_assemble_messages_structure(monkeypatch, tmp_path):
     assert "What does this loss mean?" in last["content"]
     assert "running" in last["content"]
     assert "experiment_id=1" in last["content"]
+
+
+def _prompt_line(run_id: int, step: int, prompt: str, output: str) -> str:
+    payload = json.dumps({"step": step, "prompt": prompt, "output": output})
+    return f"2026-07-11 12:00:00 | INFO  | lab.prompt | run_id={run_id} payload={payload}\n"
+
+
+def test_get_prompt_history_returns_pairs_for_run(tmp_path, monkeypatch):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        _prompt_line(7, 500, "The king said", "xqz jkl")
+        + _prompt_line(99, 500, "other run", "ignored")
+        + _prompt_line(7, 3000, "The king said", "to the queen, well")
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    history = context._get_prompt_history(7)
+
+    assert len(history) == 2
+    assert history[0] == {"step": 500, "prompt": "The king said", "output": "xqz jkl"}
+    assert history[1]["step"] == 3000
+    assert "queen" in history[1]["output"]
+
+
+def test_get_prompt_history_skips_malformed_and_missing_file(tmp_path, monkeypatch):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-11 12:00:00 | INFO  | lab.prompt | run_id=7 payload={broken json\n"
+        + _prompt_line(7, 100, "ok", "fine")
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+    assert context._get_prompt_history(7) == [{"step": 100, "prompt": "ok", "output": "fine"}]
+
+    monkeypatch.setattr(context, "get_log_path", lambda: tmp_path / "nope.log")
+    assert context._get_prompt_history(7) == []
+
+
+def test_volatile_snapshot_includes_prompt_history(tmp_path, monkeypatch):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(_prompt_line(7, 500, "The king said", "xqz jkl"))
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    run = {"id": 7, "status": "paused", "current_step": 500, "total_steps": 1000,
+           "train_loss_history": json.dumps([])}
+    snapshot = context._build_volatile_snapshot(1, run)
+
+    assert "The king said" in snapshot
+    assert "xqz jkl" in snapshot
+    assert "step 500" in snapshot

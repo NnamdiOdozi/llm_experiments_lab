@@ -57,25 +57,41 @@ def _format_loss_snapshot(run: dict | None) -> str:
     ])
 
 
+def _scan_log_lines(category_marker: str, id_marker: str) -> list[str]:
+    """Lines from the current session log matching both substrings, in file
+    order. Substring matching is coupled to the exact log message formats —
+    documented in docs/DESIGN_DECISIONS.md."""
+    log_path = get_log_path()
+    if not log_path.exists():
+        return []
+    with open(log_path, encoding="utf-8") as f:
+        return [line.rstrip("\n") for line in f if category_marker in line and id_marker in line]
+
+
 def _get_last_audit_change(experiment_id: int) -> str | None:
     """Most recent [AUDIT] log line for this experiment, or None.
 
-    Matching is a plain substring check for "id=<N> " — this matches both
-    "id=%d" and "experiment_id=%d" audit call sites (see
-    backend/api/experiments.py) since both end in "id=<N> " followed by
-    more fields. Fragile if audit_log.info() call sites change format —
-    documented in docs/DESIGN_DECISIONS.md.
+    The "id=<N> " marker matches both "id=%d" and "experiment_id=%d" audit
+    call sites (see backend/api/experiments.py) since both end in "id=<N> "
+    followed by more fields.
     """
-    log_path = get_log_path()
-    if not log_path.exists():
-        return None
-    marker = f"id={experiment_id} "
-    match = None
-    with open(log_path, encoding="utf-8") as f:
-        for line in f:
-            if "lab.audit" in line and marker in line:
-                match = line.rstrip("\n")
-    return match
+    matches = _scan_log_lines("lab.audit", f"id={experiment_id} ")
+    return matches[-1] if matches else None
+
+
+def _get_prompt_history(run_id: int) -> list[dict]:
+    """Pause-and-prompt exchanges for this run, oldest first, capped to the
+    most recent 10 (mirrors the [-20:] loss-history cap above). Parses the
+    JSON payload written by backend/api/training.py::prompt_model."""
+    pairs = []
+    for line in _scan_log_lines("lab.prompt", f"run_id={run_id} "):
+        if "payload=" not in line:
+            continue
+        try:
+            pairs.append(json.loads(line.split("payload=", 1)[1]))
+        except json.JSONDecodeError:
+            continue
+    return pairs[-10:]
 
 
 def _get_log_tail(n: int) -> list[str]:
@@ -103,6 +119,18 @@ def _build_volatile_snapshot(experiment_id: int, run: dict | None) -> str:
     last_change = _get_last_audit_change(experiment_id)
     if last_change:
         parts.append(f"Last change made: {last_change}")
+    if run is not None and run.get("id") is not None:
+        prompts = _get_prompt_history(run["id"])
+        if prompts:
+            lines = [
+                f"At step {p.get('step')}, user prompted: {json.dumps(p.get('prompt'))} "
+                f"→ model output: {json.dumps(p.get('output'))}"
+                for p in prompts
+            ]
+            parts.append(
+                "Pause-and-prompt history (the user prompts the paused half-trained model "
+                "to see how output quality evolves as training proceeds):\n" + "\n".join(lines)
+            )
     log_tail = _get_log_tail(settings.chatbot_log_tail_lines)
     if log_tail:
         parts.append("Recent log lines:\n" + "".join(log_tail))

@@ -125,9 +125,14 @@ async def prompt_model(run_id: int, req: PromptRequest):
     result = prompt_paused_model(run_id, req.prompt, req.max_new_tokens)
     if result is None:
         raise HTTPException(400, "Run not paused or model not available")
+    # Full prompt+output logged as one JSON payload — the chatbot's context
+    # builder (backend/chatbot/context.py::_get_prompt_history) parses these
+    # lines back out so the Lab Assistant can see pause-and-prompt exchanges.
+    status = get_run_status(run_id) or {}
     prompt_log.info(
-        "run_id=%d prompt='%s' max_tokens=%d output_len=%d",
-        run_id, req.prompt[:50], req.max_new_tokens, len(result),
+        "run_id=%d payload=%s",
+        run_id,
+        json.dumps({"step": status.get("current_step"), "prompt": req.prompt, "output": result}),
     )
     return {"run_id": run_id, "prompt": req.prompt, "output": result}
 
