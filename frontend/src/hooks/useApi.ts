@@ -74,6 +74,22 @@ export function getWorkerLogs(device: string) {
   return api<{ logs: string }>(`/nebius/workers/${device}/logs`);
 }
 
+export interface OpenRun {
+  id: number;
+  experiment_id: number;
+  experiment_name: string;
+  status: string;
+  device: string;
+  execution_backend: string;
+  current_step: number;
+  total_steps: number;
+  started_at: string | null;
+}
+
+export function fetchOpenRuns() {
+  return api<OpenRun[]>("/training/open");
+}
+
 export function fetchRunStatus(runId: number) {
   return api<import("../types").RunStatus>(`/training/${runId}/status`);
 }

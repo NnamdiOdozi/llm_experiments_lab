@@ -167,6 +167,15 @@ def _is_remote(db_run: dict | None) -> bool:
     return db_run is not None and db_run.get("execution_backend") == "nebius_endpoint"
 
 
+@router.get("/open")
+async def list_open_runs():
+    """Every non-terminal run across all experiments — feeds the Experiments
+    page so a stuck run can be found and stopped even outside its own
+    session's browser state.
+    """
+    return await db.list_open_runs()
+
+
 @router.post("/{run_id}/pause")
 async def pause_training(run_id: int):
     db_run = await db.get_training_run(run_id)
