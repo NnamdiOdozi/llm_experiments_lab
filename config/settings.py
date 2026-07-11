@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from pydantic_settings import BaseSettings
 
 
@@ -51,6 +52,39 @@ class Settings(BaseSettings):
     token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
     chatbot_log_tail_lines: int = 50
     chatbot_history_window_turns: int = 10
+
+    # Remote training backend — endpoint-only after the 2026-07-11 pivot away
+    # from jobs (Nebius jobs have no public URL for the controller to route
+    # training requests to; endpoints do). See docs/NEBIUS_SERVERLESS_IMPLEMENTATION_PLAN.md.
+    training_backend: Literal["local", "nebius_endpoint"] = "local"
+    gpu_idle_timeout_seconds: int = 600   # 10 min — matches plan doc's GPU worker policy
+    cpu_idle_timeout_seconds: int = 1800  # 30 min — matches plan doc's CPU worker policy
+    # Warn the user this many seconds before the idle timeout actually stops the
+    # worker, so they get a "Remain logged in" chance — see 2026-07-11 session.
+    gpu_idle_warning_seconds: int = 300   # warns at the 5-min-idle mark (10 min total)
+    cpu_idle_warning_seconds: int = 600   # warns at the 20-min-idle mark (30 min total)
+    idle_scan_interval_seconds: int = 30
+
+    # Nebius endpoint client — image/subnet/CPU platform+preset proven working
+    # via the manual endpoint smoke test, see evidence/nebius-endpoint/endpoint.json.
+    # GPU platform+preset are UNVERIFIED placeholders from the plan doc's example
+    # command — confirm against `nebius ai endpoint presets` before first GPU use.
+    nebius_backend_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-backend:phase2"
+    nebius_subnet_id: str = "vpcsubnet-your-subnet-id-here"
+    nebius_cpu_platform: str = "cpu-d3"
+    nebius_cpu_preset: str = "4vcpu-16gb"
+    nebius_gpu_platform: str = "gpu-l40s-a"       # unverified
+    nebius_gpu_preset: str = "1gpu-8vcpu-32gb"    # unverified
+    nebius_cpu_endpoint_name: str = "llm-lab-cpu-trainer"
+    nebius_gpu_endpoint_name: str = "llm-lab-gpu-trainer"
+    nebius_endpoint_container_port: int = 8000
+    nebius_endpoint_poll_interval_seconds: int = 3
+    # Endpoint creation can take up to ~5 min in practice (per 2026-07-11 session,
+    # confirmed higher than the plan doc's 30-90s estimate) — 360s gives buffer.
+    nebius_endpoint_ready_timeout_seconds: int = 360
+    # Guards every single `nebius` CLI invocation — without this, a stuck CLI call
+    # (seen live 2026-07-11: hung on stdin under uvicorn) blocks the request forever.
+    nebius_cli_timeout_seconds: int = 60
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
