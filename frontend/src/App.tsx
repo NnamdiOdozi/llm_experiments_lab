@@ -12,6 +12,7 @@ import ExportBar from "./components/ExportBar";
 import ExperimentNotes from "./components/ExperimentNotes";
 import ChatPanel from "./components/ChatPanel";
 import WorkerIdleBanner from "./components/WorkerIdleBanner";
+import OpenRunsPage from "./components/OpenRunsPage";
 import {
   startTraining,
   pauseTraining,
@@ -51,6 +52,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
+  const [showOpenRuns, setShowOpenRuns] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
   const [lastPollSuccess, setLastPollSuccess] = useState<number | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -172,11 +174,18 @@ export default function App() {
     setLoading(false);
   }
 
+  if (showOpenRuns) {
+    return <OpenRunsPage onClose={() => setShowOpenRuns(false)} />;
+  }
+
   // No experiment selected: show preset picker
   if (!experimentId || !config) {
     return (
       <div style={{ maxWidth: 700, margin: "60px auto", padding: "0 20px" }}>
-        <h1 style={{ fontSize: 24, marginBottom: 8 }}>LLM Experiments Lab</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <h1 style={{ fontSize: 24 }}>LLM Experiments Lab</h1>
+          <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
+        </div>
         <p style={{ color: "var(--text-dim)", marginBottom: 24, fontSize: 14 }}>
           Pick a preset to create an experiment. Tweak the config, train, and watch loss curves.
         </p>
@@ -217,9 +226,12 @@ export default function App() {
             Experiment #{experimentId}
           </span>
         </h1>
-        <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); saveSession(null, null, null); }}>
-          ← New Experiment
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
+          <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); saveSession(null, null, null); }}>
+            ← New Experiment
+          </button>
+        </div>
       </div>
 
       <div

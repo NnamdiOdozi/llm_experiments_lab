@@ -4,7 +4,7 @@ import json
 import sqlite3
 import aiosqlite
 
-from backend.training.status import RunStatus, ACTIVE_STATUSES
+from backend.training.status import RunStatus, ACTIVE_STATUSES, TERMINAL_STATUSES
 from backend.training.worker_status import WorkerStatus, TERMINAL_WORKER_STATUSES
 from config.settings import settings
 
@@ -203,6 +203,25 @@ async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
     cursor = await db.execute(
         "SELECT * FROM training_runs WHERE experiment_id = ? ORDER BY started_at DESC",
         (experiment_id,),
+    )
+    rows = await cursor.fetchall()
+    await db.close()
+    return [dict(r) for r in rows]
+
+
+async def list_open_runs() -> list[dict]:
+    """Every run not in a terminal state, across all experiments — the set a
+    user would want to see/stop from an "Experiments" overview page.
+    """
+    statuses = tuple(TERMINAL_STATUSES)
+    placeholders = ",".join("?" for _ in statuses)
+    db = await get_db()
+    cursor = await db.execute(
+        f"SELECT training_runs.*, experiments.name AS experiment_name "
+        f"FROM training_runs JOIN experiments ON experiments.id = training_runs.experiment_id "
+        f"WHERE training_runs.status NOT IN ({placeholders}) "
+        f"ORDER BY training_runs.id DESC",
+        statuses,
     )
     rows = await cursor.fetchall()
     await db.close()
