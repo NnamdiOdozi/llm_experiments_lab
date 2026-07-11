@@ -30,12 +30,22 @@ export function useChatStream(experimentId: number) {
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
-  useEffect(() => {
+    useEffect(() => {
     fetch(`${BASE}/${experimentId}/messages`)
-      .then((res) => res.json())
-      .then(setMessages)
+      .then((res) => {
+        if (res.status === 404) {
+          setUnavailable(true);
+          return [];
+        }
+        if (!res.ok) return [];
+        return res.json();
+      })
+      .then((data) => {
+        setMessages(Array.isArray(data) ? data : []);
+      })
       .catch(() => {
         // History load failure isn't fatal — the panel still works for new messages
+        setMessages([]);
       });
   }, [experimentId]);
 
