@@ -222,7 +222,8 @@ export default function App() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "300px 1fr",
+          // 190px right pane ≈ 50mm at 96dpi — dedicated Lab Assistant column
+          gridTemplateColumns: "300px 1fr 190px",
           gap: 16,
           alignItems: "start",
         }}
@@ -266,12 +267,16 @@ export default function App() {
               </div>
             )}
           </div>
-          <ChatPanel experimentId={experimentId} />
           <ArchSchematic config={config} />
           {runId != null && (
             <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
           )}
           <CodeView experimentId={experimentId} />
+        </div>
+
+        {/* Right pane: Lab Assistant, sticky, runs top-to-bottom of the viewport */}
+        <div style={{ position: "sticky", top: 20, height: "calc(100vh - 100px)" }}>
+          <ChatPanel experimentId={experimentId} />
         </div>
       </div>
     </div>
