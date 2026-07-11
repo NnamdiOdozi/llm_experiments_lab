@@ -275,6 +275,11 @@ async def run_status(run_id: int):
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote status fetch failed: {exc}")
         result["run_id"] = run_id  # never leak the endpoint's own remote run_id
+        # The endpoint's own status.json thinks it's "local" from its own
+        # perspective (it's a local subprocess to that container) — from the
+        # controller's perspective this run is remote. Override, don't trust
+        # whatever the proxied response says. See docs/DESIGN_DECISIONS.md §10.
+        result["execution_backend"] = "nebius_endpoint"
         return result
     # Try in-memory first (live run), then fall back to DB (after restart)
     status = get_run_status(run_id)

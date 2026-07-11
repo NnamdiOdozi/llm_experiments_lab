@@ -71,15 +71,20 @@ export default function TrainingControls({
   const isActive = status != null && ACTIVE_RUN_STATUSES.has(status);
   const isDone = status == null || TERMINAL_RUN_STATUSES.has(status);
 
-  const [backendMode, setBackendMode] = useState<string | null>(null);
+  // The run's OWN execution_backend, not the app's current global setting —
+  // a run started under one setting keeps its own value even if the global
+  // setting changes later (or a different run is using different infra).
+  // See docs/DESIGN_DECISIONS.md §10.
+  const isRemoteRun = runStatus?.execution_backend === "nebius_endpoint";
   const [preset, setPreset] = useState<string | null>(null);
   useEffect(() => {
-    getWorkerStatus(device).then((s) => {
-      setBackendMode(s.backend_mode);
-      setPreset(s.preset);
-    });
-  }, [device]);
-  const workerTag = backendMode === "nebius_endpoint"
+    if (!isRemoteRun) {
+      setPreset(null);
+      return;
+    }
+    getWorkerStatus(device).then((s) => setPreset(s.preset));
+  }, [device, isRemoteRun]);
+  const workerTag = isRemoteRun
     ? [device.toUpperCase(), formatPreset(preset), "Serverless"].filter(Boolean).join(" · ")
     : `${device.toUpperCase()} · Local`;
 

@@ -146,7 +146,11 @@ async def test_get_status_translates_remote_run_id_back_to_local(temp_db, client
     await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
 
     fake_client = FakeAsyncClient([
-        FakeResponse({"run_id": 7, "status": "running", "current_step": 20, "total_steps": 100}),
+        # The endpoint's own status.json reports "local" from its own
+        # perspective (it's a local subprocess to that container) — the
+        # controller must override this, not trust it. Regression test for
+        # the 2026-07-11 incident (see docs/DESIGN_DECISIONS.md §10).
+        FakeResponse({"run_id": 7, "status": "running", "current_step": 20, "total_steps": 100, "execution_backend": "local"}),
     ])
     monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
 
@@ -157,3 +161,4 @@ async def test_get_status_translates_remote_run_id_back_to_local(temp_db, client
     assert body["run_id"] == run_id
     assert body["status"] == "running"
     assert body["current_step"] == 20
+    assert body["execution_backend"] == "nebius_endpoint"

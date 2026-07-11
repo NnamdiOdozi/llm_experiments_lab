@@ -333,6 +333,10 @@ def get_run_status(run_id: int) -> dict | None:
                 artifacts.write_status(run_id, status)
                 sync_update_training_run(run_id, status=RunStatus.FAILED,
                                          error_message="Worker process died unexpectedly")
+        # This whole function only ever reads a local subprocess worker's own
+        # status.json — it has no concept of remote execution, so this is
+        # always "local" from here. See docs/DESIGN_DECISIONS.md §10.
+        status["execution_backend"] = "local"
         return status
 
     # No status file yet — check if run just launched
@@ -346,6 +350,7 @@ def get_run_status(run_id: int) -> dict | None:
             "metrics_count": 0,
             "template": run.template_key,
             "elapsed_seconds": 0,
+            "execution_backend": "local",
         }
 
     return None

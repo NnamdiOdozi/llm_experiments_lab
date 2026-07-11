@@ -69,6 +69,10 @@ export interface RunStatus {
   metrics_count: number;
   template: string;
   elapsed_seconds: number;
+  /** "local" or "nebius_endpoint" — this run's own actual backend, not the
+   * app's current global setting. A run started under one setting keeps its
+   * own value even if the global setting changes later. */
+  execution_backend: string;
 }
 
 export interface MetricRow {

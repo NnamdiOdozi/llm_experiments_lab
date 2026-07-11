@@ -218,7 +218,10 @@ export default function App() {
           </button>
         </div>
       )}
-      <WorkerIdleBanner device={device} />
+      {/* Hide when the current run is definitively local — a remote worker's
+          idle status is irrelevant noise if you're not using it right now.
+          See docs/DESIGN_DECISIONS.md §10. */}
+      {runStatus?.execution_backend !== "local" && <WorkerIdleBanner device={device} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h1 style={{ fontSize: 20 }}>
           LLM Experiments Lab
