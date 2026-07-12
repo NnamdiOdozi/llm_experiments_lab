@@ -28,6 +28,12 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 # Serialize start requests to prevent race conditions
 _start_lock = asyncio.Lock()
 
+# run_id -> in-flight background task for a remote run's provisioning
+# (ensure_worker + mirror experiment + remote start). Lets Cancel/Stop
+# actually interrupt provisioning instead of only being able to stop an
+# already-running remote run. See _start_remote_run() and stop_training().
+_provisioning_tasks: dict[int, asyncio.Task] = {}
+
 
 class StartRunRequest(BaseModel):
     experiment_id: int
@@ -82,44 +88,69 @@ async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
     local training_runs row (updated below) stays the system of record. The
     frontend only ever deals with the local run_id; remote_run_id is an
     internal detail used to address the endpoint's own copy of the run.
+
+    Runs as a backgrounded asyncio.Task (see start_training), not awaited
+    directly inside the HTTP request — provisioning can take up to ~6
+    minutes and the request must return immediately with the run_id so the
+    frontend can poll status and Stop can cancel it mid-flight. Because
+    there's no HTTP request context by the time this runs, failures update
+    the run's DB status directly instead of raising HTTPException (nothing
+    would receive it).
     """
     try:
-        worker = await worker_manager.ensure_worker(device)
-    except worker_manager.WorkerProvisionError as exc:
-        await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
-        training_log.error("Worker provisioning failed — run_id=%d: %s", run_id, exc)
-        raise HTTPException(502, f"Remote worker unavailable: {exc}")
+        try:
+            worker = await worker_manager.ensure_worker(device)
+        except worker_manager.WorkerBusyError as exc:
+            # Not a failure — a different request already has this device's
+            # worker mid-provision. Leave the run's own status untouched (no
+            # FAILED) so the user can just retry once the worker's ready,
+            # instead of spawning a second endpoint for the same device.
+            training_log.info("Worker busy, run not started — run_id=%d: %s", run_id, exc)
+            return
+        except worker_manager.WorkerProvisionError as exc:
+            await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
+            training_log.error("Worker provisioning failed — run_id=%d: %s", run_id, exc)
+            return
 
-    endpoint_url = worker["endpoint_url"]
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            exp_resp = await client.request(
-                "POST", f"{endpoint_url}/api/experiments",
-                json={"name": exp["name"], "config": json.loads(exp["config_json"]), "preset_key": exp["preset_key"]},
-            )
-            exp_resp.raise_for_status()
-            remote_experiment_id = exp_resp.json()["id"]
+        endpoint_url = worker["endpoint_url"]
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                exp_resp = await client.request(
+                    "POST", f"{endpoint_url}/api/experiments",
+                    json={"name": exp["name"], "config": json.loads(exp["config_json"]), "preset_key": exp["preset_key"]},
+                )
+                exp_resp.raise_for_status()
+                remote_experiment_id = exp_resp.json()["id"]
 
-            run_resp = await client.request(
-                "POST", f"{endpoint_url}/api/training/start",
-                json={"experiment_id": remote_experiment_id, "device": device},
-            )
-            run_resp.raise_for_status()
-            remote_run_id = run_resp.json()["run_id"]
-    except httpx.HTTPError as exc:
-        await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
-        training_log.error("Remote training start failed — run_id=%d: %s", run_id, exc)
-        raise HTTPException(502, f"Remote training start failed: {exc}")
+                run_resp = await client.request(
+                    "POST", f"{endpoint_url}/api/training/start",
+                    json={"experiment_id": remote_experiment_id, "device": device},
+                )
+                run_resp.raise_for_status()
+                remote_run_id = run_resp.json()["run_id"]
+        except httpx.HTTPError as exc:
+            await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
+            training_log.error("Remote training start failed — run_id=%d: %s", run_id, exc)
+            return
 
-    await db.update_training_run(
-        run_id, execution_backend="nebius_endpoint",
-        remote_endpoint_id=worker["nebius_endpoint_id"], remote_run_id=remote_run_id,
-    )
-    await db.touch_worker_session(worker["session_id"])
-    training_log.info(
-        "Remote run started — run_id=%d remote_run_id=%d endpoint_id=%s device=%s",
-        run_id, remote_run_id, worker["nebius_endpoint_id"], device,
-    )
+        await db.update_training_run(
+            run_id, execution_backend="nebius_endpoint",
+            remote_endpoint_id=worker["nebius_endpoint_id"], remote_run_id=remote_run_id,
+        )
+        await db.touch_worker_session(worker["session_id"])
+        training_log.info(
+            "Remote run started — run_id=%d remote_run_id=%d endpoint_id=%s device=%s",
+            run_id, remote_run_id, worker["nebius_endpoint_id"], device,
+        )
+    except asyncio.CancelledError:
+        # Cancelled via Stop while still provisioning (see stop_training) —
+        # stop_training already sets CANCELLED itself, but set it here too
+        # in case the cancellation lands between stop_training's DB write
+        # and this task actually being scheduled to see it; both writes are
+        # idempotent so there's no harm in doing it from both sides.
+        await db.update_training_run(run_id, status=RunStatus.CANCELLED)
+        training_log.info("Remote run provisioning cancelled — run_id=%d", run_id)
+        raise
 
 
 @router.post("/start")
@@ -153,9 +184,26 @@ async def start_training(req: StartRunRequest):
             req.experiment_id, req.device,
             config_snapshot=json.dumps(config),
             template_key=config.get("template", "transformer"),
+            # Set immediately from the user's actual choice, not left to the
+            # 'local' schema default — _start_remote_run only used to set
+            # this near the END of provisioning (after mirroring the
+            # experiment remotely), which was invisible before Part F's
+            # backgrounding change (the request blocked until it was set).
+            # Now that /start returns immediately and the frontend polls
+            # status right away, that gap became directly visible: a
+            # serverless run showed "local" for its entire ~6min
+            # provisioning window. See docs/DESIGN_DECISIONS.md.
+            execution_backend=req.backend,
         )
         if req.backend == "nebius_endpoint":
-            await _start_remote_run(run_id, exp, req.device)
+            # Backgrounded, not awaited — provisioning can take up to ~6
+            # minutes and the request must return the run_id immediately
+            # (frontend polls status from there), same fire-and-forget
+            # shape the local path below already uses. See _start_remote_run
+            # and _provisioning_tasks for how Stop cancels this mid-flight.
+            task = asyncio.create_task(_start_remote_run(run_id, exp, req.device))
+            _provisioning_tasks[run_id] = task
+            task.add_done_callback(lambda _t, rid=run_id: _provisioning_tasks.pop(rid, None))
         else:
             start_run(run_id, req.experiment_id, config, req.device)
         training_log.info(
@@ -224,6 +272,19 @@ async def resume_training(run_id: int):
 
 @router.post("/{run_id}/stop")
 async def stop_training(run_id: int):
+    # Check for an in-flight provisioning task first — execution_backend
+    # isn't set on the run until _start_remote_run finishes successfully,
+    # so _is_remote(db_run) below would be False the whole time it's still
+    # provisioning, and stop_run() (the local-only path) would report "not
+    # found" for it. Without this, there was no way to stop a remote run
+    # during its up-to-~6min provisioning window at all.
+    task = _provisioning_tasks.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+        await db.update_training_run(run_id, status=RunStatus.CANCELLED)
+        training_log.info("STOP (cancelled in-flight provisioning) run_id=%d", run_id)
+        return {"run_id": run_id, "status": "stopping"}
+
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
         try:

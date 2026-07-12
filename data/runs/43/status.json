@@ -1,1 +1,1 @@
-{"run_id": 43, "status": "paused", "current_step": 12, "total_steps": 5000, "metrics_count": 1, "template": "rnn", "elapsed_seconds": 42.2, "pid": 71781}
+{"run_id": 43, "status": "cancelled", "current_step": 12, "total_steps": 5000, "metrics_count": 1, "template": "rnn", "elapsed_seconds": 42.2, "pid": 71781}

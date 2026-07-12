@@ -1,12 +1,12 @@
 """Manually create a Nebius endpoint outside the running app.
 
-Reuses backend/nebius/worker_manager.py::endpoint_create_kwargs() for the
-settings lookup and backend/nebius/endpoints_client.py::create_endpoint()
-for the actual `nebius ai endpoint create` call — same code the app uses
-automatically when a user starts a run and no endpoint exists yet. This
-script does NOT touch the training_runs/worker_sessions DB tables; it's for
-one-off manual creation (e.g. right after pushing a new image), not for
-replacing the app's own worker-reuse tracking.
+Calls backend/nebius/worker_manager.py::create_new_worker() — the exact
+same function the running app uses automatically when a user starts a run
+and no endpoint exists yet. Unlike an earlier version of this script, this
+DOES write to the training_runs/worker_sessions DB tables (session_id
+"worker-cpu"/"worker-gpu", same as the app), so the running app can find
+and reuse an endpoint created this way instead of creating a duplicate.
+See docs/DESIGN_DECISIONS.md.
 
 Usage:
     uv run scripts/create_nebius_endpoint.py cpu
@@ -17,15 +17,18 @@ import argparse
 import asyncio
 import sys
 
+from backend import db
 from backend.nebius import endpoints_client
-from backend.nebius.worker_manager import endpoint_create_kwargs
+from backend.nebius.worker_manager import create_new_worker
+from backend.training.worker_status import session_id_for
 
 
 async def main(device_type: str) -> None:
-    kwargs = endpoint_create_kwargs(device_type)
-    print(f"Creating {device_type} endpoint: {kwargs}")
-    endpoint_id = await endpoints_client.create_endpoint(**kwargs)
-    print(f"Created endpoint_id={endpoint_id}")
+    await db.init_db()
+    session_id = session_id_for(device_type)
+    print(f"Creating {device_type} endpoint (session_id={session_id})...")
+    endpoint_id = await create_new_worker(session_id, device_type)
+    print(f"Created endpoint_id={endpoint_id}, recorded in worker_sessions as {session_id}")
 
 
 if __name__ == "__main__":

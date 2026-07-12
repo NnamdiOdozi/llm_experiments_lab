@@ -493,6 +493,95 @@ patterns across every major cloud registry.
 
 ---
 
+## 14. Backgrounding `_start_remote_run` Exposed a Latent `execution_backend` Bug
+
+**Context:** to let Stop cancel an in-flight provisioning run (§ Part F,
+2026-07-12), `start_training()`'s remote path was changed from `await
+_start_remote_run(...)` directly inside the HTTP request to
+`asyncio.create_task(...)`, so `/start` returns immediately with the
+`run_id` instead of blocking for up to ~6 minutes.
+
+**What broke:** `training_runs.execution_backend` defaults to `'local'` in
+the schema (`db.py`), and `_start_remote_run` only ever set it to
+`'nebius_endpoint'` near the *end* of provisioning — after mirroring the
+experiment onto the remote endpoint. Before backgrounding, this was
+invisible: the request blocked until that write happened, so nothing ever
+observed the DB in between. After backgrounding, `/start` returns
+immediately while `execution_backend` is still at its `'local'` default,
+and the frontend's normal status-polling loop can now see that
+intermediate state for the *entire* provisioning window — a user who
+picked CPU + Serverless would see the Experiments page show "local" until
+provisioning finished minutes later.
+
+**Fix:** pass `execution_backend=req.backend` into `create_training_run()`
+at row-creation time, so it's correct from the very first read instead of
+relying on a stale schema default plus a later correction.
+
+**General lesson:** backgrounding a previously-synchronous call doesn't
+just change timing — it can turn an intermediate DB/state value that used
+to be unobservable (because nothing could read it before the blocking call
+finished) into something a poller now sees directly. When making a
+blocking call async/backgrounded, audit every field that call used to set
+"eventually" and check whether something now reads it *before* that
+point — don't assume "it always ends up correct" is the same as "it's
+correct the whole time it's observable."
+
+---
+
+## 15. Chatbot Told a User Their Paused, Step-307 Run Was "Cancelled at Step 0"
+
+**Context:** a user reported the Lab Assistant giving a confidently wrong
+360° status assessment — "cancelled, step 0/1000, no metrics" — while they
+were actively prompting a **paused run at step 307**. Two separate, real
+bugs, found by tracing the actual grounding code rather than trusting the
+chatbot's own (also wrong) self-diagnosis, which invented an unverified
+"race condition in the status API" explanation.
+
+**Bug 1 — wrong run selected.** `backend/api/chatbot.py`'s
+`post_message()` grounds every turn in `list_runs_for_experiment(...)[0]`
+as "the current run." That function sorted `ORDER BY started_at DESC` —
+but `started_at` is nullable and only gets set once training actually
+begins, not at row creation. An experiment with an older, already-terminal
+run (whose `started_at` got set) and a newer, genuinely active run (whose
+`started_at` timing didn't line up the same way) could return the *older*
+run as `[0]`. `list_open_runs()` elsewhere in the same file already
+correctly used `ORDER BY training_runs.id DESC` — an `AUTOINCREMENT`
+primary key, always monotonic at creation time, never `NULL`. Fixed
+`list_runs_for_experiment` to match.
+
+**Bug 2 — lifecycle events buried by polling noise.** Even with the right
+run, the chatbot's only other window into "what actually happened
+recently" was `_get_log_tail()` — a fixed-size tail of *any* log category.
+In practice that tail is dominated by `lab.request` polling lines (e.g.
+`GET /api/nebius/workers/cpu` every few seconds) — a `PAUSE`/`STOP` event
+could scroll out of a 50-line tail within a couple of minutes even though
+it's the single most important fact about the run. Added
+`_get_recent_training_events(run_id, n)`, filtering specifically on the
+`lab.training` category + `run_id=<N>` — same pattern as the existing
+`_get_recent_errors`/`_get_prompt_history` category-filtered scans, so
+lifecycle events for the current run are guaranteed visible regardless of
+how much other traffic happened in between.
+
+**A precision gotcha hit while building the fix for Bug 2:**
+`_get_prompt_history`/`_get_last_audit_change` use an `"id=<N> "` marker
+with a trailing space as an implicit word-boundary check. Several
+`lab.training` messages (`STOP run_id=1204`, `PAUSE requested
+run_id=1204`) end right at the digits with *nothing* after — a
+trailing-space marker would have silently matched zero of exactly the
+lines that matter most. Fixed by matching the bare `run_id=<N>` substring
+and explicitly checking the next character isn't a digit (so `run_id=5`
+can't false-match inside a line about `run_id=50`), rather than relying on
+trailing content that isn't always there.
+
+**General lesson:** when a report says "the chatbot/system is confidently
+wrong," don't accept its own explanation for why — trace the actual data
+path it reads from (here: two independent gaps in *what the chatbot could
+see*, not a hallucination or a "race condition"). Both were found and
+fixed by reading the real query and the real log line formats, not by
+guessing at plausible-sounding causes.
+
+---
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

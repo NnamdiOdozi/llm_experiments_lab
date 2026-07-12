@@ -46,6 +46,71 @@ async def test_create_endpoint_parses_endpoint_id(monkeypatch):
     assert endpoint_id == "aiendpoint-abc123"
 
 
+async def test_create_endpoint_parses_id_from_human_readable_fallback(monkeypatch):
+    """Regression test for the 2026-07-12 GPU incident: --format json was
+    silently not honored, CLI printed its normal human-readable table
+    instead. Endpoint ID must still be recovered from the first line."""
+    human_readable_output = (
+        "Endpoint ID: aiendpoint-e00ygj8h9sqeverc8m\n"
+        "Endpoint created successfully.\n"
+        "Endpoint:\n"
+        "  ID:       aiendpoint-e00ygj8h9sqeverc8m\n"
+        "  Name:     llm-lab-gpu-trainer\n"
+        "  State:    RUNNING\n"
+    )
+
+    async def fake_run_cli(*args, **kwargs):
+        return human_readable_output
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    endpoint_id = await endpoints_client.create_endpoint(
+        name="llm-lab-gpu-trainer", image="cr.example/llm-lab-trainer-gpu:latest",
+        platform="gpu-l40s-a", preset="1gpu-8vcpu-32gb", container_port=8000,
+        subnet_id="vpcsubnet-e00yp4qcbmpde8x2nc",
+    )
+
+    assert endpoint_id == "aiendpoint-e00ygj8h9sqeverc8m"
+
+
+async def test_create_endpoint_raises_with_raw_output_when_truly_unparseable(monkeypatch):
+    async def fake_run_cli(*args, **kwargs):
+        return "some unexpected output with no endpoint ID anywhere"
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    with pytest.raises(endpoints_client.NebiusEndpointError, match="unexpected output"):
+        await endpoints_client.create_endpoint(
+            name="llm-lab-cpu-trainer", image="cr.example/llm-lab-trainer-cpu:latest",
+            platform="cpu-d3", preset="8vcpu-32gb", container_port=8000,
+            subnet_id="vpcsubnet-e00yp4qcbmpde8x2nc",
+        )
+
+
+async def test_find_running_endpoint_matches_by_name_and_state(monkeypatch):
+    async def fake_run_cli(*args, **kwargs):
+        return json.dumps({"items": [
+            {"metadata": {"id": "aiendpoint-stopped", "name": "llm-lab-cpu-trainer"}, "status": {"state": "STOPPED"}},
+            {"metadata": {"id": "aiendpoint-running", "name": "llm-lab-cpu-trainer"}, "status": {"state": "RUNNING"}},
+            {"metadata": {"id": "aiendpoint-other", "name": "llm-lab-gpu-trainer"}, "status": {"state": "RUNNING"}},
+        ]})
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    found = await endpoints_client.find_running_endpoint("llm-lab-cpu-trainer")
+
+    assert found["metadata"]["id"] == "aiendpoint-running"
+
+
+async def test_find_running_endpoint_returns_none_when_no_match(monkeypatch):
+    async def fake_run_cli(*args, **kwargs):
+        return json.dumps({"items": []})
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    assert await endpoints_client.find_running_endpoint("llm-lab-cpu-trainer") is None
+
+
 async def test_get_endpoint_parses_json(monkeypatch):
     async def fake_run_cli(*args):
         return json.dumps({"status": {"state": "RUNNING"}})
@@ -80,8 +145,9 @@ def test_extract_public_url_returns_none_when_absent():
 async def test_start_endpoint_calls_cli_with_id(monkeypatch):
     captured = {}
 
-    async def fake_run_cli(*args):
+    async def fake_run_cli(*args, **kwargs):
         captured["args"] = args
+        captured["kwargs"] = kwargs
         return ""
 
     monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
@@ -156,5 +222,27 @@ async def test_run_cli_raises_and_kills_process_on_timeout(monkeypatch):
 
     with pytest.raises(endpoints_client.NebiusEndpointError, match="timed out"):
         await endpoints_client._run_cli("ai", "endpoint", "start", "--id", "aiendpoint-1", timeout=0.05)
+
+    assert hanging.killed is True
+
+
+async def test_run_cli_kills_process_when_cancelled(monkeypatch):
+    """Part F regression guard: cancelling a Stop-during-provisioning
+    request must not leave the local `nebius` CLI subprocess orphaned."""
+    hanging = HangingProc(b"", b"", 0)
+
+    async def fake_exec(*args, **kwargs):
+        return hanging
+
+    monkeypatch.setattr(endpoints_client.asyncio, "create_subprocess_exec", fake_exec)
+
+    task = asyncio.ensure_future(
+        endpoints_client._run_cli("ai", "endpoint", "start", "--id", "aiendpoint-1")
+    )
+    await asyncio.sleep(0)  # let it reach the await inside _run_cli
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert hanging.killed is True

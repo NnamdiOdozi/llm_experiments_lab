@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
     chatbot_log_tail_lines: int = 50
     chatbot_error_tail_lines: int = 10
+    chatbot_training_event_tail_lines: int = 10
     chatbot_history_window_turns: int = 10
 
     # Remote training backend — endpoint-only after the 2026-07-11 pivot away
@@ -97,6 +98,17 @@ class Settings(BaseSettings):
     # Guards every single `nebius` CLI invocation — without this, a stuck CLI call
     # (seen live 2026-07-11: hung on stdin under uvicorn) blocks the request forever.
     nebius_cli_timeout_seconds: int = 60
+    # Starting an already-created (stopped) endpoint is a different
+    # operation from creating one from scratch — no image pull/provisioning
+    # needed, just resuming an existing container over VM — so it should be
+    # faster than the ~5min Nebius's own docs cite for creation. But 60s
+    # (nebius_cli_timeout_seconds) is confirmed too short: it timed out live
+    # 2026-07-12 and triggered the app's delete-outside-app self-heal path
+    # unnecessarily. No official Nebius number found for this specific case
+    # (checked docs.nebius.com/serverless/endpoints/manage) — this is a
+    # reasoned estimate, not a documented figure. Adjust once real timing
+    # data exists.
+    nebius_endpoint_start_timeout_seconds: int = 180
 
     @field_validator("nebius_subnet_id")
     @classmethod
