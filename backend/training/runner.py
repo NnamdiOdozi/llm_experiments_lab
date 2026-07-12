@@ -242,9 +242,17 @@ def stop_run(run_id: int) -> bool:
 
 
 def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200) -> str | None:
-    """Load checkpoint into API process, run inference, cleanup."""
+    """Load checkpoint into API process, run inference, cleanup.
+
+    Despite the name, this works for any run with a saved checkpoint, not
+    just a paused one — it never touches the training subprocess, only the
+    checkpoint file on disk. Every template saves a final checkpoint right
+    before marking a run COMPLETED (see train_worker.py), so a finished
+    run can be prompted exactly the same way a paused one already could.
+    See docs/DESIGN_DECISIONS.md.
+    """
     status = artifacts.read_status(run_id)
-    if status is None or status.get("status") != RunStatus.PAUSED:
+    if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
         return None
 
     rd = artifacts.run_dir(run_id)

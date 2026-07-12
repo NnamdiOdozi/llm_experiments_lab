@@ -314,7 +314,10 @@ export default function App() {
           </div>
           <ArchSchematic config={config} />
           {runId != null && (
-            <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
+            <PausePrompt
+              runId={runId}
+              canPrompt={runStatus?.status === "paused" || runStatus?.status === "completed"}
+            />
           )}
           <CodeView experimentId={experimentId} runId={runId} />
         </div>

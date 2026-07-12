@@ -190,6 +190,37 @@ def run_tests():
     r = httpx.post(f"{BASE}/training/{t_run_id}/stop")
     check("transformer stop", r.status_code == 200)
 
+    # ── Prompt after training completes (2026-07-12) ──
+    # prompt_paused_model() only allowed status==PAUSED before this fix —
+    # a checkpoint exists just as much for a COMPLETED run (every template
+    # saves one right before marking COMPLETED), it just couldn't be used.
+    # Tiny config so it actually reaches COMPLETED quickly instead of
+    # waiting out the 1000-iter preset default.
+    print("\n--- Prompt After Completion ---")
+    tiny_config = dict(exp_data["config"])
+    tiny_config["training"] = {**tiny_config["training"], "max_iters": 5, "eval_interval": 2, "eval_iters": 1}
+    r = httpx.post(f"{BASE}/experiments", json={"name": "Tiny completion test", "config": tiny_config})
+    tiny_exp_id = r.json()["id"]
+
+    r = httpx.post(f"{BASE}/training/start", json={"experiment_id": tiny_exp_id})
+    check("tiny start", r.status_code == 200)
+    tiny_run_id = r.json()["run_id"]
+
+    s = {}
+    for _ in range(30):  # up to 60s — CPU forward passes on a tiny model
+        time.sleep(2)
+        r = httpx.get(f"{BASE}/training/{tiny_run_id}/status")
+        s = r.json()
+        if s.get("status") == "completed":
+            break
+    check("tiny run completed", s.get("status") == "completed", s.get("status", "?"))
+
+    if s.get("status") == "completed":
+        r = httpx.post(f"{BASE}/training/{tiny_run_id}/prompt", json={"prompt": "The "}, timeout=30)
+        check("prompt after completion status", r.status_code == 200)
+        out = r.json()
+        check("prompt after completion has output", len(out.get("output", "")) > 0)
+
     # ── 404 / Error cases ──
     print("\n--- Error Cases ---")
     r = httpx.get(f"{BASE}/experiments/9999")

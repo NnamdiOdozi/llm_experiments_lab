@@ -110,13 +110,52 @@ async def test_ensure_worker_reuses_ready_worker_without_recreating(temp_db, mon
     async def fail_if_called(**kwargs):
         raise AssertionError("should not create a new endpoint when one is already READY")
 
+    async def fake_get_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-existing"
+        return {"status": {"state": "RUNNING"}}
+
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
 
     worker = await worker_manager.ensure_worker("cpu")
 
     assert worker["nebius_endpoint_id"] == "aiendpoint-existing"
     assert worker["endpoint_url"] == "https://existing.tunnel.nebius.cloud"
+
+
+async def test_ensure_worker_reprovisions_when_ready_row_points_at_deleted_endpoint(temp_db, monkeypatch):
+    """Regression test for the 2026-07-12 incident: the user deleted every
+    endpoint via the Nebius console. Nothing tells our DB that happened, so
+    the READY row was stale — the app kept reusing a dead endpoint's URL,
+    404ing on every single run until the DB was fixed by hand. Must verify
+    liveness before trusting READY, and re-provision if it's actually gone."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-deleted-manually", endpoint_url="https://gone.tunnel.nebius.cloud",
+    )
+
+    async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-deleted-manually":
+            raise endpoints_client.NebiusEndpointError("nebius ai endpoint get failed (exit 1): not found")
+        assert endpoint_id == "aiendpoint-fresh"
+        return {"status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]}}
+
+    async def fake_start_endpoint(endpoint_id):
+        raise endpoints_client.NebiusEndpointError("nebius ai endpoint start failed (exit 1): not found")
+
+    async def fake_create_endpoint(**kwargs):
+        return "aiendpoint-fresh"
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+    assert worker["endpoint_url"] == "https://fresh.tunnel.nebius.cloud"
 
 
 async def test_ensure_worker_skips_straight_to_create_when_shutting_down(temp_db, monkeypatch):
