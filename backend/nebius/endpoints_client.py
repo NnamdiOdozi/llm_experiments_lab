@@ -9,6 +9,7 @@ endpoints expose a public HTTPS URL the controller can proxy requests to.
 
 import asyncio
 import json
+import re
 
 from config.settings import settings
 
@@ -43,9 +44,32 @@ async def _run_cli(*args: str, timeout: float | None = None) -> str:
         proc.kill()
         await proc.wait()
         raise NebiusEndpointError(f"nebius {' '.join(args)} timed out")
+    except asyncio.CancelledError:
+        # A caller (e.g. a cancelled in-flight provisioning task, see
+        # backend/api/training.py's Cancel handling) cancelled the await —
+        # without this, the local `nebius` CLI subprocess would keep running
+        # orphaned on this machine even though nothing is waiting on it
+        # anymore. Doesn't stop whatever the CLI already submitted to
+        # Nebius's API server-side (not controllable from here, and not
+        # needed — see endpoint_create_kwargs' docstring on shared workers).
+        proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         raise NebiusEndpointError(
             f"nebius {' '.join(args)} failed (exit {proc.returncode}): {stderr.decode().strip()}"
+        )
+    if not stdout.strip():
+        # Seen live 2026-07-12 on a GPU `endpoint create`: exit code 0, empty
+        # stdout, endpoint created successfully server-side anyway (visible
+        # in the console) — whatever nebius printed about it went to stderr
+        # instead, and calling code (e.g. json.loads on empty stdout) would
+        # otherwise crash with an opaque JSONDecodeError that discards it.
+        raise NebiusEndpointError(
+            f"nebius {' '.join(args)} exited 0 but produced no stdout. "
+            f"stderr: {stderr.decode().strip() or '(empty)'}. "
+            "The command may have still succeeded server-side — check "
+            "`nebius ai endpoint list --format json`."
         )
     return stdout.decode()
 
@@ -74,7 +98,48 @@ async def create_endpoint(
         "--format", "json",
         timeout=settings.nebius_endpoint_ready_timeout_seconds,
     )
-    return json.loads(output)["metadata"]["id"]
+    try:
+        return json.loads(output)["metadata"]["id"]
+    except json.JSONDecodeError as exc:
+        # Seen live 2026-07-12 on a GPU create: exit 0, non-empty stdout,
+        # but not valid JSON (--format json silently not honored that run) —
+        # the CLI printed its normal human-readable table instead. The ID is
+        # right there as the first line ("Endpoint ID: <id>") — parse it out
+        # rather than fail on a resource that was actually created
+        # successfully. Falls back to raising (with the raw output included,
+        # not a blind JSONDecodeError) only if that line isn't found either.
+        match = re.search(r"^Endpoint ID:\s*(\S+)", output, re.MULTILINE)
+        if match:
+            return match.group(1)
+        raise NebiusEndpointError(
+            f"nebius ai endpoint create exited 0 but returned unparseable output: {output!r}. "
+            "The endpoint may still have been created server-side — check "
+            "`nebius ai endpoint list --format json`."
+        ) from exc
+
+
+async def list_endpoints() -> list[dict]:
+    output = await _run_cli("ai", "endpoint", "list", "--format", "json")
+    return json.loads(output).get("items", [])
+
+
+async def find_running_endpoint(name: str) -> dict | None:
+    """Live Nebius endpoint matching name and already RUNNING, or None.
+
+    Used to adopt an endpoint that exists server-side but isn't tracked in
+    our own DB (e.g. created via scripts/create_nebius_endpoint.py before it
+    wrote to worker_sessions, or any other out-of-band creation) instead of
+    blindly creating a duplicate — confirmed live 2026-07-12: a manually
+    created CPU endpoint the app didn't know about got duplicated this way.
+    Only RUNNING is checked — Nebius's transient starting/provisioning state
+    strings aren't confirmed, so anything else still falls through to
+    normal create behavior rather than risk adopting something not actually
+    usable yet.
+    """
+    for ep in await list_endpoints():
+        if ep.get("metadata", {}).get("name") == name and ep.get("status", {}).get("state") == "RUNNING":
+            return ep
+    return None
 
 
 async def get_endpoint(endpoint_id: str) -> dict:
@@ -99,7 +164,12 @@ async def get_logs(endpoint_id: str, tail: int = 200) -> str:
 
 
 async def start_endpoint(endpoint_id: str) -> None:
-    await _run_cli("ai", "endpoint", "start", "--id", endpoint_id)
+    # Distinct, longer timeout than the general nebius_cli_timeout_seconds —
+    # see nebius_endpoint_start_timeout_seconds in config/settings.py.
+    await _run_cli(
+        "ai", "endpoint", "start", "--id", endpoint_id,
+        timeout=settings.nebius_endpoint_start_timeout_seconds,
+    )
 
 
 async def stop_endpoint(endpoint_id: str) -> None:

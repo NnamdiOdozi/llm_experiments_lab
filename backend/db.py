@@ -200,8 +200,18 @@ async def get_training_run(run_id: int) -> dict | None:
 
 async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
     db = await get_db()
+    # ORDER BY id, not started_at — started_at is nullable and only gets set
+    # once training actually begins, not at row creation, so a run that
+    # hasn't started yet (or whose started_at otherwise doesn't line up with
+    # true creation order) can sort ahead of a genuinely newer run. id is an
+    # AUTOINCREMENT primary key, always monotonic at creation time, never
+    # NULL — the same pattern list_open_runs() already uses correctly.
+    # Found live 2026-07-12: the chatbot's "latest run" (runs[0] here) was a
+    # stale, already-cancelled earlier run instead of the actual paused run
+    # at step 307, misleading the chatbot's whole grounding. See
+    # docs/DESIGN_DECISIONS.md.
     cursor = await db.execute(
-        "SELECT * FROM training_runs WHERE experiment_id = ? ORDER BY started_at DESC",
+        "SELECT * FROM training_runs WHERE experiment_id = ? ORDER BY id DESC",
         (experiment_id,),
     )
     rows = await cursor.fetchall()

@@ -19,6 +19,37 @@ def test_format_loss_snapshot_with_no_run():
     assert "No training run" in snapshot
 
 
+def test_get_recent_training_events_matches_lines_with_no_trailing_content(monkeypatch, tmp_path):
+    """Several lab.training messages (STOP, PAUSE requested) end right after
+    the run_id digits with nothing after — a trailing-space marker would
+    miss them entirely."""
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-12 15:35:33 | INFO  | lab.training | PAUSE requested run_id=1204\n"
+        "2026-07-12 15:40:00 | INFO  | lab.training | RESUME run_id=1204 config_refreshed=True\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    events = context._get_recent_training_events(1204, 10)
+
+    assert len(events) == 2
+    assert "PAUSE requested run_id=1204" in events[0]
+    assert "RESUME run_id=1204" in events[1]
+
+
+def test_get_recent_training_events_does_not_false_match_prefix_run_id(monkeypatch, tmp_path):
+    """run_id=5 must not match a line about run_id=50."""
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-12 15:35:33 | INFO  | lab.training | STOP run_id=50\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    events = context._get_recent_training_events(5, 10)
+
+    assert events == []
+
+
 def test_get_recent_errors_filters_by_category(monkeypatch, tmp_path):
     log_file = tmp_path / "session.log"
     log_file.write_text(

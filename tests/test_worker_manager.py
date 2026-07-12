@@ -12,6 +12,18 @@ async def temp_db(tmp_path, monkeypatch):
     await db.init_db()
 
 
+@pytest.fixture(autouse=True)
+def no_live_endpoint_found_by_default(monkeypatch):
+    """create_new_worker() now checks for a live, already-RUNNING endpoint
+    before creating one — default every test to "none found" (matching
+    behavior before that check existed) so each test doesn't need its own
+    boilerplate mock for it. The one test that actually exercises adoption
+    overrides this itself."""
+    async def fake_find_running_endpoint(name):
+        return None
+    monkeypatch.setattr(endpoints_client, "find_running_endpoint", fake_find_running_endpoint)
+
+
 async def test_create_new_worker_uses_the_correct_image_per_device_type(temp_db, monkeypatch):
     """Regression guard for the CPU/GPU image split (2026-07-12) — a CPU
     worker must never accidentally get the CUDA-bearing GPU image, and
@@ -102,6 +114,97 @@ async def test_ensure_worker_reuses_ready_worker_without_recreating(temp_db, mon
 
     assert worker["nebius_endpoint_id"] == "aiendpoint-existing"
     assert worker["endpoint_url"] == "https://existing.tunnel.nebius.cloud"
+
+
+async def test_ensure_worker_skips_straight_to_create_when_shutting_down(temp_db, monkeypatch):
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.SHUTTING_DOWN, nebius_endpoint_id="aiendpoint-dying",
+    )
+
+    async def fail_if_called(endpoint_id):
+        raise AssertionError("should not attempt to start a worker that's shutting down")
+
+    async def fake_create_endpoint(**kwargs):
+        return "aiendpoint-fresh"
+
+    async def fake_get_endpoint(endpoint_id):
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+    assert worker["worker_status"] == WorkerStatus.READY
+
+
+async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicating(temp_db, monkeypatch):
+    """Regression test for the 2026-07-12 incident: a CPU endpoint created
+    out-of-band (e.g. via scripts/create_nebius_endpoint.py before it wrote
+    to the DB) was already RUNNING, but the app's DB had no row for it —
+    ensure_worker created a second, duplicate CPU endpoint. Must adopt the
+    live one by name instead."""
+    async def fake_find_running_endpoint(name):
+        assert name == "llm-lab-cpu-trainer"
+        return {"metadata": {"id": "aiendpoint-adopted"}}
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("should not create a duplicate when a live RUNNING endpoint already exists")
+
+    async def fake_get_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-adopted"
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "8vcpu-32gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://adopted.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "find_running_endpoint", fake_find_running_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["nebius_endpoint_id"] == "aiendpoint-adopted"
+    assert worker["worker_status"] == WorkerStatus.READY
+    assert worker["endpoint_url"] == "https://adopted.tunnel.nebius.cloud"
+
+
+async def test_ensure_worker_debounces_when_already_provisioning(temp_db, monkeypatch):
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.PROVISIONING, nebius_endpoint_id="aiendpoint-existing",
+    )
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("should not create or start a second worker while one is already mid-provision")
+
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
+
+    with pytest.raises(worker_manager.WorkerBusyError):
+        await worker_manager.ensure_worker("cpu")
+
+
+async def test_ensure_worker_debounces_when_already_starting(temp_db, monkeypatch):
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session(
+        "worker-gpu", worker_status=WorkerStatus.STARTING, nebius_endpoint_id="aiendpoint-existing",
+    )
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("should not create or start a second worker while one is already mid-start")
+
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
+
+    with pytest.raises(worker_manager.WorkerBusyError):
+        await worker_manager.ensure_worker("cuda")
 
 
 async def test_ensure_worker_starts_stopped_endpoint(temp_db, monkeypatch):

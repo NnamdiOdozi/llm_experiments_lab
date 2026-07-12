@@ -7,6 +7,8 @@ session). Local-mode behavior is covered implicitly by not passing
 backend="nebius_endpoint" — these tests only cover the remote branch.
 """
 
+import asyncio
+
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -89,6 +91,21 @@ async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkey
     ])
     monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
 
+    # _start_remote_run is backgrounded (see training.py), not awaited
+    # inside the request — capture the task at creation time (not via
+    # _provisioning_tasks, which the task's own done-callback empties as
+    # soon as it finishes, racy to read after the fact) so the test can
+    # deterministically wait for it before asserting the DB's final state.
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
     resp = await client.post(
         "/api/training/start",
         json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
@@ -96,6 +113,7 @@ async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkey
 
     assert resp.status_code == 200
     run_id = resp.json()["run_id"]
+    await created_tasks[0]
 
     db_run = await db.get_training_run(run_id)
     assert db_run["execution_backend"] == "nebius_endpoint"
@@ -115,12 +133,112 @@ async def test_start_training_marks_run_failed_when_worker_unavailable(temp_db, 
 
     monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
 
+    # Provisioning is backgrounded (see training.py) — /start itself always
+    # returns 200 with the run_id immediately now; a provisioning failure
+    # only shows up in the run's own DB status once the background task
+    # finishes, not as this request's HTTP status.
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
     resp = await client.post(
         "/api/training/start",
         json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
     )
 
-    assert resp.status_code == 502
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    await created_tasks[0]
+
+    db_run = await db.get_training_run(run_id)
+    assert db_run["status"] == "failed"
+
+
+async def test_stop_training_cancels_in_flight_provisioning(temp_db, client, monkeypatch):
+    """Part F: Stop must be able to interrupt provisioning itself, not just
+    an already-running remote run — before this, execution_backend wasn't
+    set until provisioning finished, so stop_training's _is_remote() check
+    was False the whole time and stop_run() (local-only) reported "not
+    found" for a still-provisioning remote run."""
+    exp_id = temp_db
+    worker_call_started = asyncio.Event()
+
+    async def fake_ensure_worker(device):
+        worker_call_started.set()
+        await asyncio.Event().wait()  # never resolves on its own — only via cancellation
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+
+    await asyncio.wait_for(worker_call_started.wait(), timeout=2)
+
+    stop_resp = await client.post(f"/api/training/{run_id}/stop")
+    assert stop_resp.status_code == 200
+
+    await asyncio.gather(created_tasks[0], return_exceptions=True)
+
+    db_run = await db.get_training_run(run_id)
+    assert db_run["status"] == "cancelled"
+
+
+async def test_execution_backend_is_correct_while_still_provisioning(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): execution_backend used to only get set
+    to 'nebius_endpoint' near the END of _start_remote_run (after mirroring
+    the experiment remotely) — invisible before Part F's backgrounding
+    change, since /start blocked until that write happened. Once /start
+    started returning immediately, the frontend could poll status during
+    the ~6min provisioning window and see the DB's 'local' schema default
+    instead — a serverless run showing "local" on the Experiments page.
+    execution_backend must be correct from the moment the row is created."""
+    exp_id = temp_db
+    worker_call_started = asyncio.Event()
+
+    async def fake_ensure_worker(device):
+        worker_call_started.set()
+        await asyncio.Event().wait()  # still "provisioning" — never resolves on its own
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+
+    await asyncio.wait_for(worker_call_started.wait(), timeout=2)
+
+    # Still mid-provisioning at this point — the whole point of the test.
+    db_run = await db.get_training_run(run_id)
+    assert db_run["execution_backend"] == "nebius_endpoint"
+
+    # Cleanup: cancel the still-running task so it doesn't leak into other tests.
+    task = training_module._provisioning_tasks.get(run_id)
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_start_training_defaults_to_local_when_backend_omitted(temp_db, client, monkeypatch):

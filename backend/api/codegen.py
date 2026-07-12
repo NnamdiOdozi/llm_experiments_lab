@@ -26,9 +26,6 @@ SHARED_FILES = {
     "runner.py": BACKEND_ROOT / "training" / "runner.py",
     "presets.py": PROJECT_ROOT / "config" / "presets.py",
     "settings.py": PROJECT_ROOT / "config" / "settings.py",
-    "export.py": BACKEND_ROOT / "export.py",
-    "main.py": BACKEND_ROOT / "main.py",
-    "db.py": BACKEND_ROOT / "db.py",
 }
 
 

@@ -113,6 +113,38 @@ def _get_log_tail(n: int) -> list[str]:
         return list(deque(f, maxlen=n))
 
 
+def _get_recent_training_events(run_id: int, n: int) -> list[str]:
+    """Last n lab.training lifecycle lines (LAUNCHED/PAUSE/RESUME/STOP/
+    CANCELLED) for this specific run — filtered explicitly rather than
+    relying on the generic tail (_get_log_tail), whose fixed line count is
+    dominated by frequent lab.request polling noise (e.g. GET
+    /api/nebius/workers/cpu every few seconds). Without this, a pause/stop
+    event could scroll out of the tail within a couple minutes even though
+    it's the single most important fact about the run's current state.
+    Found live 2026-07-12: the chatbot told a user their run was
+    "cancelled at step 0" while they were actively prompting a paused run
+    at step 307 — partly a wrong-run bug (see list_runs_for_experiment in
+    docs/DESIGN_DECISIONS.md), but this gap would have made it worse even
+    with the right run.
+
+    Unlike _get_prompt_history/_get_last_audit_change's "id=<N> " markers
+    (trailing space as an implicit boundary), several lab.training messages
+    end right after the run_id digits with nothing after (e.g. "STOP
+    run_id=1204") — a trailing-space marker would silently miss exactly
+    those. Matches on the bare "run_id=<N>" substring instead, with an
+    explicit check that the next character (if any) isn't a digit, so
+    run_id=5 can't false-match inside a line about run_id=50.
+    """
+    marker = f"run_id={run_id}"
+    matches = []
+    for line in _scan_log_lines("lab.training", marker):
+        end = line.find(marker) + len(marker)
+        if end < len(line) and line[end].isdigit():
+            continue
+        matches.append(line)
+    return matches[-n:]
+
+
 def _get_recent_errors(n: int) -> list[str]:
     """Last n lab.error lines, regardless of which experiment/run they
     belong to. Filtered explicitly rather than relying on the generic tail
@@ -172,6 +204,9 @@ def _build_volatile_snapshot(experiment_id: int, run: dict | None) -> str:
     if last_change:
         parts.append(f"Last change made: {last_change}")
     if run_id is not None:
+        events = _get_recent_training_events(run_id, settings.chatbot_training_event_tail_lines)
+        if events:
+            parts.append("Recent lifecycle events for this run:\n" + "\n".join(events))
         prompts = _get_prompt_history(run_id)
         if prompts:
             lines = [

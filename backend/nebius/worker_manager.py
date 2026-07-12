@@ -18,9 +18,15 @@ class WorkerProvisionError(RuntimeError):
     """Raised when an endpoint doesn't reach RUNNING within the poll timeout."""
 
 
+class WorkerBusyError(RuntimeError):
+    """Raised when a worker for this device is already mid-provision from a
+    different request — debounce against spawning multiple endpoints for
+    the same device type. See ensure_worker()."""
+
+
 def endpoint_create_kwargs(device_type: str) -> dict:
     """Single source of truth for "which settings back a cpu vs gpu
-    endpoint" — reused by _create_new_worker() (the running app's
+    endpoint" — reused by create_new_worker() (the running app's
     automatic path) and scripts/create_nebius_endpoint.py (manual/standalone
     creation), so the two can never drift out of sync with each other."""
     return dict(
@@ -33,7 +39,7 @@ def endpoint_create_kwargs(device_type: str) -> dict:
     )
 
 
-async def _create_new_worker(session_id: str, device_type: str) -> str:
+async def create_new_worker(session_id: str, device_type: str) -> str:
     """Create a fresh endpoint and point session_id at it.
 
     Idempotent w.r.t. the session_id row: called both for a brand-new
@@ -46,13 +52,28 @@ async def _create_new_worker(session_id: str, device_type: str) -> str:
     )
     if await db.get_worker_session(session_id) is None:
         await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
-    endpoint_id = await endpoints_client.create_endpoint(
-        **endpoint_create_kwargs(device_type),
-    )
+
+    kwargs = endpoint_create_kwargs(device_type)
+    existing = await endpoints_client.find_running_endpoint(kwargs["name"])
+    if existing is not None:
+        # A live endpoint with this name is already RUNNING but wasn't in
+        # our DB (e.g. created out-of-band) — adopt it instead of creating
+        # a duplicate. Left at PROVISIONING here regardless; ensure_worker's
+        # own polling loop confirms RUNNING and populates endpoint_url/
+        # actual_platform/actual_preset within one poll cycle (a few
+        # seconds), same as a freshly created endpoint — no need to
+        # duplicate that population logic here.
+        endpoint_id = existing["metadata"]["id"]
+        nebius_log.info(
+            "Adopted existing live endpoint instead of creating a duplicate — "
+            "session_id=%s endpoint_id=%s name=%s", session_id, endpoint_id, kwargs["name"],
+        )
+    else:
+        endpoint_id = await endpoints_client.create_endpoint(**kwargs)
+        nebius_log.info(
+            "Worker created — session_id=%s endpoint_id=%s device_type=%s", session_id, endpoint_id, device_type,
+        )
     await db.update_worker_session(session_id, worker_status=WorkerStatus.PROVISIONING, nebius_endpoint_id=endpoint_id)
-    nebius_log.info(
-        "Worker created — session_id=%s endpoint_id=%s device_type=%s", session_id, endpoint_id, device_type,
-    )
     return endpoint_id
 
 
@@ -69,8 +90,28 @@ async def ensure_worker(device: str) -> dict:
         )
         return await db.get_worker_session(session_id)
 
-    if session is None:
-        endpoint_id = await _create_new_worker(session_id, device_type)
+    if session is not None and session["worker_status"] in (WorkerStatus.PROVISIONING, WorkerStatus.STARTING):
+        # A different request already has this device's worker mid-flight —
+        # without this check, ensure_worker would fall through to the
+        # create/start branch below and could spawn a second endpoint for
+        # the same device type on top of one that's already coming up.
+        nebius_log.info(
+            "Worker busy, debounced — session_id=%s status=%s", session_id, session["worker_status"],
+        )
+        raise WorkerBusyError(
+            f"{device_type} worker is already being provisioned (status={session['worker_status']}) "
+            "— please wait for it to finish before starting another run."
+        )
+
+    if session is None or session["worker_status"] == WorkerStatus.SHUTTING_DOWN:
+        # A SHUTTING_DOWN worker can't be started back up — attempting
+        # start_endpoint() on it would just wait out its full timeout (up to
+        # 180s) before self-healing to a fresh create anyway. Skip straight
+        # to create instead of wasting that wait: a request shouldn't be
+        # slowed down by a worker that's mid-deletion, only genuinely
+        # blocked by one that's still becoming useful (PROVISIONING/STARTING
+        # above).
+        endpoint_id = await create_new_worker(session_id, device_type)
     else:
         endpoint_id = session["nebius_endpoint_id"]
         try:
@@ -86,7 +127,7 @@ async def ensure_worker(device: str) -> dict:
                 "outside the app — session_id=%s endpoint_id=%s error=%s. Creating a new one.",
                 session_id, endpoint_id, exc,
             )
-            endpoint_id = await _create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type)
 
     max_attempts = max(
         1, settings.nebius_endpoint_ready_timeout_seconds // settings.nebius_endpoint_poll_interval_seconds,
@@ -101,7 +142,7 @@ async def ensure_worker(device: str) -> dict:
                 "session_id=%s endpoint_id=%s error=%s. Creating a new one.",
                 session_id, endpoint_id, exc,
             )
-            endpoint_id = await _create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type)
             continue
         if endpoint.get("status", {}).get("state") == "RUNNING":
             url = endpoints_client.extract_public_url(endpoint)
