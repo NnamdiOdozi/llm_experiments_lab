@@ -12,10 +12,12 @@ from collections import deque
 from functools import lru_cache
 from pathlib import Path
 
+from backend.api.training import read_metrics_from_disk
 from backend.logging_config import get_log_path
 from config.settings import settings
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "training" / "templates"
+_README_PATH = Path(__file__).resolve().parent.parent.parent / "README.md"
 
 _SYSTEM_PROMPT = """You are the grounded lab assistant for the LLM Experiments Lab, a browser-based tool where learners train small transformer/RNN/MoE models from scratch and connect what they observe to LLM theory they've studied.
 
@@ -24,6 +26,14 @@ You are not a generic chatbot. Every message you receive includes the user's cur
 The UI has two ways to change things: the Config panel (hyperparameters, dataset, device) and the layer stack (architecture components). You cannot edit code or configs yourself — if the user wants to change something, point them to the right UI panel, don't describe a code edit.
 
 If a question is about part of the implementation that isn't included in your context (e.g. the training runner, pause/resume mechanics, the database layer), say plainly that you don't have visibility into that part of the code, rather than guessing. For general ML/LLM theory questions not tied to this specific run, answer from your own knowledge."""
+
+
+@lru_cache(maxsize=1)
+def _read_readme() -> str:
+    """Project README — static, cached like the template source read below."""
+    if not _README_PATH.exists():
+        return ""
+    return _README_PATH.read_text(encoding="utf-8")
 
 
 @lru_cache(maxsize=8)
@@ -103,6 +113,44 @@ def _get_log_tail(n: int) -> list[str]:
         return list(deque(f, maxlen=n))
 
 
+def _get_recent_errors(n: int) -> list[str]:
+    """Last n lab.error lines, regardless of which experiment/run they
+    belong to. Filtered explicitly rather than relying on the generic tail
+    (_get_log_tail) to happen to include them — a burst of request/training
+    logging can otherwise push real errors out of a plain tail before the
+    chatbot ever sees them."""
+    errors = _scan_log_lines("lab.error", "")
+    return errors[-n:]
+
+
+def _format_resource_usage(run_id: int | None) -> str | None:
+    """Summarizes the most recent CPU/GPU utilization sample written by
+    train_worker.py's psutil/nvidia-smi sampling (see
+    backend/training/train_worker.py::_sample_resource_usage). None if
+    there's no run yet or no usage fields have been sampled (e.g. a local
+    CPU run, or before the first metric row)."""
+    if run_id is None:
+        return None
+    metrics = read_metrics_from_disk(run_id)
+    if not metrics:
+        return None
+    latest = metrics[-1]
+    parts = []
+    if latest.get("cpu_percent") is not None:
+        parts.append(f"CPU {latest['cpu_percent']:.0f}%")
+    if latest.get("ram_used_mb") is not None and latest.get("ram_total_mb") is not None:
+        parts.append(f"RAM {latest['ram_used_mb']:.0f}/{latest['ram_total_mb']:.0f}MB")
+    if latest.get("gpu_utilization_pct") is not None:
+        parts.append(f"GPU {latest['gpu_utilization_pct']:.0f}%")
+    if latest.get("gpu_memory_used_mb") is not None and latest.get("gpu_memory_total_mb") is not None:
+        parts.append(f"GPU mem {latest['gpu_memory_used_mb']:.0f}/{latest['gpu_memory_total_mb']:.0f}MB")
+    if latest.get("gpu_temp_c") is not None:
+        parts.append(f"GPU temp {latest['gpu_temp_c']:.0f}C")
+    if not parts:
+        return None
+    return f"Current resource usage (step {latest.get('step')}): " + ", ".join(parts)
+
+
 def _build_session_context(experiment: dict, config: dict, template: str) -> str:
     source = _read_template_source(template)
     return (
@@ -115,12 +163,16 @@ def _build_session_context(experiment: dict, config: dict, template: str) -> str
 
 
 def _build_volatile_snapshot(experiment_id: int, run: dict | None) -> str:
+    run_id = run.get("id") if run is not None else None
     parts = [_format_loss_snapshot(run)]
+    usage = _format_resource_usage(run_id)
+    if usage:
+        parts.append(usage)
     last_change = _get_last_audit_change(experiment_id)
     if last_change:
         parts.append(f"Last change made: {last_change}")
-    if run is not None and run.get("id") is not None:
-        prompts = _get_prompt_history(run["id"])
+    if run_id is not None:
+        prompts = _get_prompt_history(run_id)
         if prompts:
             lines = [
                 f"At step {p.get('step')}, user prompted: {json.dumps(p.get('prompt'))} "
@@ -134,6 +186,12 @@ def _build_volatile_snapshot(experiment_id: int, run: dict | None) -> str:
     log_tail = _get_log_tail(settings.chatbot_log_tail_lines)
     if log_tail:
         parts.append("Recent log lines:\n" + "".join(log_tail))
+    recent_errors = _get_recent_errors(settings.chatbot_error_tail_lines)
+    if recent_errors:
+        parts.append(
+            "Recent application errors (may or may not be related to the "
+            "current question):\n" + "\n".join(recent_errors)
+        )
     return "\n\n".join(parts)
 
 
@@ -154,6 +212,9 @@ def assemble_messages(
     template = config.get("template", "transformer")
 
     messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    readme = _read_readme()
+    if readme:
+        messages.append({"role": "system", "content": f"Project README:\n{readme}"})
     messages.append({"role": "system", "content": _build_session_context(experiment, config, template)})
 
     for msg in history:

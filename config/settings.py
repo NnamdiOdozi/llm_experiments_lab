@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     # has extended-reasoning mode, which is the property this chatbot needs.
     token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
     chatbot_log_tail_lines: int = 50
+    chatbot_error_tail_lines: int = 10
     chatbot_history_window_turns: int = 10
 
     # Remote training backend — endpoint-only after the 2026-07-11 pivot away

@@ -295,7 +295,7 @@ async def run_status(run_id: int):
     raise HTTPException(404, "Run not found")
 
 
-def _read_metrics_from_disk(run_id: int) -> list[dict]:
+def read_metrics_from_disk(run_id: int) -> list[dict]:
     """Read metrics.jsonl from disk for runs no longer in memory."""
     metrics_file = settings.data_dir / "runs" / str(run_id) / "metrics.jsonl"
     if not metrics_file.exists():
@@ -322,7 +322,7 @@ async def get_metrics(run_id: int):
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote metrics fetch failed: {exc}")
     # Always read from disk (worker writes metrics.jsonl)
-    disk_metrics = _read_metrics_from_disk(run_id)
+    disk_metrics = read_metrics_from_disk(run_id)
     if disk_metrics:
         return disk_metrics
     # Check if run exists (active or in DB)
@@ -380,7 +380,7 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
                 break
 
             # Send new metrics from disk
-            current_metrics = _read_metrics_from_disk(run_id)
+            current_metrics = read_metrics_from_disk(run_id)
             if len(current_metrics) > last_sent:
                 for metric in current_metrics[last_sent:]:
                     await websocket.send_json({"type": "metric", "data": metric})

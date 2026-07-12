@@ -19,6 +19,44 @@ def test_format_loss_snapshot_with_no_run():
     assert "No training run" in snapshot
 
 
+def test_get_recent_errors_filters_by_category(monkeypatch, tmp_path):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-12 09:00:00 | INFO  | lab.request | GET /api/experiments\n"
+        "2026-07-12 09:00:01 | ERROR | lab.error | Something broke: run_id=5\n"
+        "2026-07-12 09:00:02 | INFO  | lab.training | Run 5 started\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    errors = context._get_recent_errors(10)
+
+    assert len(errors) == 1
+    assert "Something broke" in errors[0]
+
+
+def test_format_resource_usage_with_no_run_id():
+    assert context._format_resource_usage(None) is None
+
+
+def test_format_resource_usage_summarizes_latest_sample(monkeypatch):
+    monkeypatch.setattr(
+        context,
+        "read_metrics_from_disk",
+        lambda run_id: [
+            {"step": 1, "cpu_percent": 10.0},
+            {"step": 2, "cpu_percent": 42.0, "gpu_utilization_pct": 87.0, "gpu_temp_c": 65.0},
+        ],
+    )
+
+    summary = context._format_resource_usage(run_id=1)
+
+    assert summary is not None
+    assert "step 2" in summary
+    assert "CPU 42%" in summary
+    assert "GPU 87%" in summary
+    assert "GPU temp 65C" in summary
+
+
 def test_format_loss_snapshot_with_run():
     run = {
         "status": "running",
@@ -103,9 +141,11 @@ def test_assemble_messages_structure(monkeypatch, tmp_path):
     assert messages[0]["role"] == "system"
     assert "grounded lab assistant" in messages[0]["content"]
     assert messages[1]["role"] == "system"
-    assert "RotaryPositionalEncoding" in messages[1]["content"]
-    assert messages[2] == {"role": "user", "content": "earlier question"}
-    assert messages[3] == {"role": "assistant", "content": "earlier answer"}
+    assert "Project README" in messages[1]["content"]
+    assert messages[2]["role"] == "system"
+    assert "RotaryPositionalEncoding" in messages[2]["content"]
+    assert messages[3] == {"role": "user", "content": "earlier question"}
+    assert messages[4] == {"role": "assistant", "content": "earlier answer"}
     last = messages[-1]
     assert last["role"] == "user"
     assert "What does this loss mean?" in last["content"]

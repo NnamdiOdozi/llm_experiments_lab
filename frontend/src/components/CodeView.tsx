@@ -38,8 +38,11 @@ export default function CodeView({ experimentId, runId, device }: Props) {
             {f}
           </button>
         ))}
-        <button onClick={() => setActiveFile(WORKER_TAB)} style={tabStyle(activeFile === WORKER_TAB)}>
-          Worker
+        <button
+          onClick={() => setActiveFile(WORKER_TAB)}
+          style={{ ...tabStyle(activeFile === WORKER_TAB), marginLeft: 16, paddingLeft: 12, borderLeft: "1px solid var(--border)" }}
+        >
+          Serverless
         </button>
       </div>
       {activeFile === WORKER_TAB ? (
