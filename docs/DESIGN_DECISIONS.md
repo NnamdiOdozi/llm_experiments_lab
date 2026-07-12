@@ -831,6 +831,30 @@ second one:
   backend truncation — cutting a response off at N characters would chop
   it mid-sentence, which is worse than an occasionally-long answer.
 
+## §21: Prompting a model after training completes, not just while paused
+
+**Problem:** `prompt_paused_model()` (`backend/training/runner.py`) only
+worked for `status == PAUSED`. A completed run's model couldn't be
+prompted at all, even though a checkpoint exists for it too.
+
+**Why the fix was small:** the function never touches the training
+subprocess — it loads the checkpoint file from disk, builds a fresh model,
+runs inference, and exits. It only ever needed the checkpoint to exist,
+not any particular run status. Every template already saves a final
+checkpoint right before marking a run `COMPLETED` (`train_worker.py`), so
+the guard was stricter than the underlying capability required. Widened
+to `status in (PAUSED, COMPLETED)`. Frontend: `PausePrompt.tsx`'s `paused`
+prop renamed to `canPrompt`, now true for either status.
+
+**The one exception to "nothing here needs an image rebuild":** unlike
+every other fix from 2026-07-12, this one lives in
+`backend/training/runner.py`, which *is* baked into the CPU/GPU trainer
+Docker images (`COPY backend ./backend`) and *is* exercised there — a
+remote endpoint's own `/api/training/{run_id}/prompt` route calls this
+exact function locally on itself. Local runs get the fix on server
+restart; Nebius serverless runs need the trainer images rebuilt and
+repushed before prompting a completed remote run will work.
+
 ---
 
 ## File Layout

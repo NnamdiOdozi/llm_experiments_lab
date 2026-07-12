@@ -100,11 +100,30 @@ async def ensure_worker(device: str) -> dict:
     session = await db.get_worker_session(session_id)
 
     if session is not None and session["worker_status"] == WorkerStatus.READY:
-        await db.touch_worker_session(session_id)
-        nebius_log.info(
-            "Worker reused — session_id=%s endpoint_id=%s", session_id, session["nebius_endpoint_id"],
+        # Verify liveness before trusting the DB — a manual deletion via the
+        # Nebius console (or any other out-of-band action) never updates our
+        # DB, so a stale READY row can point at an endpoint that's actually
+        # gone. Confirmed live 2026-07-12: after the user deleted every
+        # endpoint via the console, the app kept reusing the dead URL and
+        # 404ing on every single run until the DB was manually fixed. If
+        # it's really gone, fall through to the same start/create logic
+        # below instead of returning stale info. See
+        # docs/DESIGN_DECISIONS.md.
+        try:
+            live = await endpoints_client.get_endpoint(session["nebius_endpoint_id"])
+        except endpoints_client.NebiusEndpointError:
+            live = None
+        if live is not None and live.get("status", {}).get("state") == "RUNNING":
+            await db.touch_worker_session(session_id)
+            nebius_log.info(
+                "Worker reused — session_id=%s endpoint_id=%s", session_id, session["nebius_endpoint_id"],
+            )
+            return await db.get_worker_session(session_id)
+        nebius_log.warning(
+            "Worker marked READY in DB but endpoint is gone or not running — "
+            "session_id=%s endpoint_id=%s. Re-provisioning.",
+            session_id, session["nebius_endpoint_id"],
         )
-        return await db.get_worker_session(session_id)
 
     if session is not None and session["worker_status"] in (WorkerStatus.PROVISIONING, WorkerStatus.STARTING):
         # A different request already has this device's worker mid-flight —

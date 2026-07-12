@@ -65,7 +65,7 @@ export default function WorkerPanel({ runId }: Props) {
   ];
 
   return (
-    <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 12 }}>
+    <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 24 }}>
       {eventLines.length ? eventLines.join("\n") : "No metrics yet — start a run to see step-by-step progress here."}
     </pre>
   );

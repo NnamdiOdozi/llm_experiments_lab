@@ -3,20 +3,22 @@ import { promptModel } from "../hooks/useApi";
 
 interface Props {
   runId: number;
-  paused: boolean;
+  // A checkpoint exists for a paused run just as much as a completed one —
+  // prompt_paused_model() (backend/training/runner.py) works for either.
+  canPrompt: boolean;
 }
 
-export default function PausePrompt({ runId, paused }: Props) {
+export default function PausePrompt({ runId, canPrompt }: Props) {
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
 
-  if (!paused) {
+  if (!canPrompt) {
     return (
       <div className="panel" style={{ opacity: 0.5 }}>
         <h3>Prompt Model</h3>
         <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          Pause training to prompt the model and see its current output quality.
+          Pause or finish training to prompt the model and see its output quality.
         </p>
       </div>
     );
@@ -36,7 +38,7 @@ export default function PausePrompt({ runId, paused }: Props) {
 
   return (
     <div className="panel">
-      <h3>Prompt Paused Model</h3>
+      <h3>Prompt Model</h3>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <input
           value={prompt}
