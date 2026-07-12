@@ -51,19 +51,36 @@ def _read_template_source(template: str) -> str:
     return "\n\n".join(parts)
 
 
+def _downsample_series(history: list[dict], max_points: int) -> list[dict]:
+    """Evenly-spaced sample across the whole list, not the tail end — so a
+    "how did the run go" question can still be answered once a run has more
+    than max_points steps. Always includes the first and last point (start
+    and current state are the two most useful for a summary). See
+    docs/DESIGN_DECISIONS.md."""
+    if len(history) <= max_points:
+        return history
+    stride = len(history) / max_points
+    indices = sorted({round(i * stride) for i in range(max_points)})
+    indices[-1] = len(history) - 1
+    return [history[i] for i in indices]
+
+
 def _format_loss_snapshot(run: dict | None) -> str:
-    """Recent loss trend for the current run. Reads train_loss_history only —
-    each metric row written by train_worker.py includes both train_loss and
-    val_loss together (see backend/training/train_worker.py), so a second
-    read of val_loss_history would be redundant."""
+    """Loss trend for the current run, sampled across its full length. Reads
+    train_loss_history only — each metric row written by train_worker.py
+    includes both train_loss and val_loss together (see
+    backend/training/train_worker.py), so a second read of val_loss_history
+    would be redundant."""
     if run is None:
         return "No training run has been started for this experiment yet."
     train_history = json.loads(run.get("train_loss_history") or "[]")
-    recent = train_history[-20:]
+    sampled = _downsample_series(train_history, settings.chatbot_loss_history_points)
     return "\n".join([
         f"Run status: {run.get('status')}",
         f"Step: {run.get('current_step', 0)} / {run.get('total_steps', 0)}",
-        f"Recent metrics (last {len(recent)} points): {json.dumps(recent)}",
+        f"Loss trend across the full run "
+        f"({len(sampled)} of {len(train_history)} points, evenly sampled "
+        f"start-to-now): {json.dumps(sampled)}",
     ])
 
 

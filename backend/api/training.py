@@ -49,6 +49,10 @@ class PromptRequest(BaseModel):
     max_new_tokens: int = 200
 
 
+class UpdateRunNotesRequest(BaseModel):
+    notes_md: str
+
+
 def _count_active_runs(device_filter: str | None = None) -> int:
     """Count runs with live worker processes."""
     count = 0
@@ -79,6 +83,25 @@ async def _proxy(db_run: dict, method: str, path: str, json_body: dict | None = 
         resp = await client.request(method, f"{endpoint_url}{remote_path}", json=json_body)
     resp.raise_for_status()
     return resp.json()
+
+
+async def _touch_worker_for_run(db_run: dict) -> None:
+    """Reset the idle clock for whichever worker backs this run's device.
+
+    Called after explicit user actions on a remote run (pause/resume/
+    prompt) succeed — deliberately NOT wired into every _proxy() call,
+    since passive status/metrics polling also goes through routes that use
+    _proxy() and happens automatically on a timer regardless of whether
+    anyone's actually engaged; touching on that too would make idle-timeout
+    effectively never fire as long as a browser tab is left open. Confirmed
+    live 2026-07-12: a user prompting a paused model for ~10 minutes (real,
+    active engagement with the worker) saw an idle-timeout warning banner
+    despite never being idle, because prompt_model() never touched
+    last_activity_at at all — only worker acquisition and the manual
+    "Continue session" heartbeat did. See docs/DESIGN_DECISIONS.md.
+    """
+    session_id = session_id_for(device_type_for(db_run["device"]))
+    await db.touch_worker_session(session_id)
 
 
 async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
@@ -134,7 +157,7 @@ async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
             return
 
         await db.update_training_run(
-            run_id, execution_backend="nebius_endpoint",
+            run_id, status=RunStatus.RUNNING, execution_backend="nebius_endpoint",
             remote_endpoint_id=worker["nebius_endpoint_id"], remote_run_id=remote_run_id,
         )
         await db.touch_worker_session(worker["session_id"])
@@ -224,8 +247,36 @@ async def list_open_runs():
     """Every non-terminal run across all experiments — feeds the Experiments
     page so a stuck run can be found and stopped even outside its own
     session's browser state.
+
+    For remote runs, overlays live status/step from the remote endpoint —
+    _start_remote_run never updates the local status column past QUEUED
+    after handoff (only execution_backend/remote_endpoint_id/remote_run_id
+    are set there), so the local row alone is permanently stale for any
+    remote run once it starts actually training. Found live 2026-07-12: a
+    successfully-running remote run showed QUEUED/step 0 forever in this
+    list. db.list_open_runs()'s terminal-status filter also only sees the
+    stale local status, so a remote run that's genuinely completed/failed
+    would otherwise never drop out of this list either — filtered again
+    here after the live overlay. Graceful per-run degradation: a proxy
+    failure logs and keeps the stale local value rather than breaking the
+    whole list. See docs/DESIGN_DECISIONS.md.
     """
-    return await db.list_open_runs()
+    runs = await db.list_open_runs()
+    for run in runs:
+        if not _is_remote(run):
+            continue
+        try:
+            live = await _proxy(run, "GET", "/api/training/{run_id}/status")
+        except (httpx.HTTPError, HTTPException) as exc:
+            training_log.warning(
+                "Open Runs: live status fetch failed, showing stale local value — run_id=%d: %s",
+                run["id"], exc,
+            )
+            continue
+        run["status"] = live.get("status", run["status"])
+        run["current_step"] = live.get("current_step", run["current_step"])
+        run["total_steps"] = live.get("total_steps", run["total_steps"])
+    return [r for r in runs if r["status"] not in TERMINAL_STATUSES]
 
 
 @router.post("/{run_id}/pause")
@@ -236,6 +287,7 @@ async def pause_training(run_id: int):
             await _proxy(db_run, "POST", "/api/training/{run_id}/pause")
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote pause failed: {exc}")
+        await _touch_worker_for_run(db_run)
         training_log.info("PAUSE requested (remote) run_id=%d", run_id)
         return {"run_id": run_id, "status": "pausing"}
     if not pause_run(run_id):
@@ -255,6 +307,7 @@ async def resume_training(run_id: int):
             await _proxy(db_run, "POST", "/api/training/{run_id}/resume")
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote resume failed: {exc}")
+        await _touch_worker_for_run(db_run)
         training_log.info("RESUME (remote) run_id=%d", run_id)
         return {"run_id": run_id, "status": RunStatus.RESUMING}
     # Fetch latest config from DB so edits made while paused
@@ -310,6 +363,7 @@ async def prompt_model(run_id: int, req: PromptRequest):
             )
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote prompt failed: {exc}")
+        await _touch_worker_for_run(db_run)
         output = result.get("output")
         prompt_log.info(
             "run_id=%d (remote) payload=%s", run_id,
@@ -331,6 +385,24 @@ async def prompt_model(run_id: int, req: PromptRequest):
     return {"run_id": run_id, "prompt": req.prompt, "output": result}
 
 
+@router.get("/{run_id}/notes")
+async def get_run_notes(run_id: int):
+    run = await db.get_training_run(run_id)
+    if run is None:
+        raise HTTPException(404, "Run not found")
+    return {"notes_md": run.get("notes_md") or ""}
+
+
+@router.patch("/{run_id}/notes")
+async def update_run_notes(run_id: int, req: UpdateRunNotesRequest):
+    run = await db.get_training_run(run_id)
+    if run is None:
+        raise HTTPException(404, "Run not found")
+    await db.update_training_run(run_id, notes_md=req.notes_md)
+    training_log.info("Notes updated: run_id=%d len=%d", run_id, len(req.notes_md))
+    return {"ok": True}
+
+
 @router.get("/{run_id}/status")
 async def run_status(run_id: int):
     db_run = await db.get_training_run(run_id)
@@ -345,6 +417,24 @@ async def run_status(run_id: int):
         # controller's perspective this run is remote. Override, don't trust
         # whatever the proxied response says. See docs/DESIGN_DECISIONS.md §10.
         result["execution_backend"] = "nebius_endpoint"
+        live_status = result.get("status")
+        if live_status is not None and live_status != db_run["status"]:
+            # Keep the local row in sync with whatever's actually happening
+            # remotely — see §16/§17, the local status column otherwise
+            # never advances past its creation value except via explicit
+            # local pause/resume/prompt actions. Not special-cased to
+            # "completed" — paused, cancelled, failed all matter equally.
+            await db.update_training_run(
+                run_id, status=live_status,
+                current_step=result.get("current_step", db_run["current_step"]),
+                total_steps=result.get("total_steps", db_run["total_steps"]),
+            )
+            if live_status in TERMINAL_STATUSES and db_run["status"] not in TERMINAL_STATUSES:
+                # The run just finished (completed/failed/cancelled) on its
+                # own, without an explicit local stop/pause action to have
+                # already touched the clock — that's still a legitimate
+                # "something real just happened here" signal.
+                await _touch_worker_for_run(db_run)
         return result
     # Try in-memory first (live run), then fall back to DB (after restart)
     status = get_run_status(run_id)

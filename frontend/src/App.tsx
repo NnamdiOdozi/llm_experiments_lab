@@ -13,6 +13,7 @@ import ExperimentNotes from "./components/ExperimentNotes";
 import ChatPanel from "./components/ChatPanel";
 import WorkerIdleBanner from "./components/WorkerIdleBanner";
 import OpenRunsPage from "./components/OpenRunsPage";
+import { useActivityHeartbeat } from "./hooks/useActivityHeartbeat";
 import {
   startTraining,
   pauseTraining,
@@ -62,6 +63,10 @@ export default function App() {
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Same condition as WorkerIdleBanner's visibility below — a remote
+  // worker's idle clock is only relevant while actually using one.
+  useActivityHeartbeat(device, runStatus?.execution_backend !== "local");
 
   function handleConfigChange(cfg: ExperimentConfig) {
     setConfig(cfg);
@@ -273,7 +278,7 @@ export default function App() {
             controlError={controlError}
           />
           <ExportBar experimentId={experimentId} />
-          <ExperimentNotes experimentId={experimentId} />
+          <ExperimentNotes runId={runId} />
         </div>
 
         {/* Main area */}
@@ -293,7 +298,7 @@ export default function App() {
           {runId != null && (
             <PausePrompt runId={runId} paused={runStatus?.status === "paused"} />
           )}
-          <CodeView experimentId={experimentId} runId={runId} device={device} />
+          <CodeView experimentId={experimentId} runId={runId} />
         </div>
 
         {/* Right pane: Lab Assistant, sticky, runs top-to-bottom of the viewport */}
