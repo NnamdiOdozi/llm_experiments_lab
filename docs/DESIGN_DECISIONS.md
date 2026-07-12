@@ -317,6 +317,68 @@ effectively dead as a runtime switch — nothing reads it to decide a run's
 backend anymore. Kept for now as a documented historical field / possible
 future default-seeding use; safe to remove if that never materializes.
 
+## 12. `Dockerfile.trainer-cpu`'s torch Swap — Four Chained Bugs Found by Actually Building It
+
+**Context:** `Dockerfile.trainer-cpu` swaps torch from the CUDA wheel
+(installed by `uv sync` against `pyproject.toml`'s pinned cu130 index) to
+the CPU-only wheel. All four issues below were found by actually running
+`docker build` / `docker run` against the real Dockerfile (2026-07-12),
+not by reasoning about it — each one was silent (no error, or a confusing
+unrelated-looking error) until specifically checked for.
+
+**a) `--reinstall-package` needs `--no-deps`.** `uv pip install
+--index-url <cpu-index> --reinstall-package torch torch` without
+`--no-deps` silently re-resolved and changed *other*, unrelated packages'
+versions too (in an isolated test: `urllib3`/`charset-normalizer` shifted
+when only `requests` was named for reinstall). Fix: always pair
+`--reinstall-package <name>` with `--no-deps` when the intent is "swap
+only this one package." Verified with `--no-deps` that every other
+package's version is provably untouched.
+
+**b) The read-back version string carries a local-build suffix.** The
+Dockerfile reads back the exact torch version `uv sync` installed (`uv pip
+show torch`) so the CPU and GPU images can never drift onto different
+torch versions of each other. But uv reports it as `2.12.1+cu130` — that
+`+cu130` is a PEP 440 local version identifier specific to the cu130
+index. Pinning `torch==2.12.1+cu130` against the *CPU* index is
+unsatisfiable (confirmed via a real failed `docker build`, not a guess).
+Fix: `cut -d'+' -f1` to strip the suffix before reuse.
+
+**c) `uv run` (used as `CMD`) silently reverts the swap on every
+container start.** `uv run` always reconciles the venv against `uv.lock`
+before running anything. `uv.lock` still resolves torch to the cu130
+build, so on every cold start it detected "drift" from the CPU swap and
+reinstalled cu130 torch back over it — confirmed by running the container
+and checking `torch.__version__`, which came back `2.12.1+cu130` after a
+plain `uv run python -c "import torch"`. This would have cost ~1 minute
+per cold start too, which matters a lot for an idle-timeout endpoint that
+stops and restarts often. Fix: `CMD ["uv", "run", "--no-sync", ...]` —
+runs against the venv exactly as baked, skips the reconcile check. Applied
+to both Dockerfiles for consistency, though only load-bearing on the CPU
+one.
+
+**d) Orphaned CUDA packages + uv's own wheel cache bloat the image even
+after the swap.** `uv sync` installs the *full* cu130 dependency tree
+first (nvidia-cudnn, nvidia-cufft, nvidia-cusolver, nvidia-nccl, triton,
+...) before the `--no-deps` swap touches torch alone — those siblings are
+left installed and unused. Separately, uv caches every downloaded wheel
+under `/root/.cache/uv`, and that cache persists inside the Docker layer
+regardless of what gets uninstalled afterward. Measured on a real image:
+5.81GB total, of which the installed venv was only 882MB and the wheel
+cache alone was 5.3GB. Fix: explicitly uninstall the orphaned
+`nvidia-*`/`triton` packages after the torch swap, and set
+`ENV UV_NO_CACHE=1` before `uv sync` (standard uv-in-Docker practice) so
+the cache never lands in a layer at all. Final verified size: 1.09GB.
+
+**General lesson:** none of these four would have been caught by reading
+the Dockerfile — each needed an actual `docker build` + `docker run` to
+surface (a resolver error, a runtime version check, a `du -sh` on the
+running container). Don't trust a package manager's "reinstall just this
+one thing" flag, a version string, a `CMD`'s idempotency, or a "the swap
+worked" build log to mean what they imply — verify narrow-scope operations
+are actually narrow, and check the artifact you actually shipped, before
+relying on it somewhere as consequential as a production image build.
+
 ---
 
 ## File Layout

@@ -17,6 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
+# See Dockerfile.trainer-cpu: uv's wheel download cache persists inside a
+# Docker layer even after packages are uninstalled. Not load-bearing here
+# (nothing gets uninstalled in this image), but the full cu130 wheel set
+# would otherwise be cached twice for no reason — once as installed
+# packages, once as cache. See docs/DESIGN_DECISIONS.md.
+ENV UV_NO_CACHE=1
+
 COPY pyproject.toml uv.lock ./
 # pyproject.toml's torch source already points at the cu130 (CUDA) wheel
 # index for Linux/Windows — no swap needed here, unlike the CPU image.
@@ -33,4 +40,10 @@ ENV GPU_YIELD_ENABLED=false
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-sync: run against the venv exactly as baked, skip uv's
+# reconcile-against-lock check on every container start. Not load-bearing
+# here (no package swap happens in this image, so there's nothing to
+# revert) but kept consistent with Dockerfile.trainer-cpu, where it fixes a
+# real bug — see docs/DESIGN_DECISIONS.md. Also shaves the resync check off
+# every cold start, which matters for an idle-timeout endpoint.
+CMD ["uv", "run", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
