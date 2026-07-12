@@ -1,0 +1,39 @@
+[project]
+name = "llm-experiments-lab-trainer-gpu"
+version = "0.1.0"
+description = "Dependencies for the GPU trainer image — torch resolves from the CUDA cu130 wheel index."
+requires-python = ">=3.11"
+# Keep this list in sync with the root pyproject.toml and docker/cpu/pyproject.toml
+# by hand — three separate project files was a deliberate choice over uv's
+# extras/conflicts mechanism, to avoid needing --extra flags on every local
+# uv command. See docs/DESIGN_DECISIONS.md §12.
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "aiosqlite>=0.20.0",
+    "pydantic-settings>=2.5.0",
+    "torch>=2.2.0",
+    "numpy>=1.24.0",
+    "nbformat>=5.10.0",
+    "websockets>=13.0",
+    "httpx>=0.27.0",
+    "openai>=1.50.0",
+    "psutil>=7.2.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend", "config"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
