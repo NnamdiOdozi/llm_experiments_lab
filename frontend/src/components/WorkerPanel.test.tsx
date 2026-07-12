@@ -16,7 +16,7 @@ describe("WorkerPanel", () => {
 
     render(<WorkerPanel runId={null} device="cpu" />);
 
-    await waitFor(() => expect(screen.getByText(/no events yet/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/no metrics yet/i)).toBeInTheDocument());
   });
 
   it("shows step/loss event lines from metrics", async () => {
@@ -69,7 +69,7 @@ describe("WorkerPanel", () => {
     });
 
     render(<WorkerPanel runId={null} device="cpu" />);
-    fireEvent.click(screen.getByRole("button", { name: /raw logs/i }));
+    fireEvent.click(screen.getByRole("button", { name: /serverless logs/i }));
 
     await waitFor(() => expect(screen.getByText(/running locally/i)).toBeInTheDocument());
   });
@@ -82,7 +82,7 @@ describe("WorkerPanel", () => {
     vi.spyOn(api, "getWorkerLogs").mockResolvedValue({ logs: "INFO Uvicorn running\n" });
 
     render(<WorkerPanel runId={null} device="cpu" />);
-    fireEvent.click(screen.getByRole("button", { name: /raw logs/i }));
+    fireEvent.click(screen.getByRole("button", { name: /serverless logs/i }));
 
     await waitFor(() => expect(screen.getByText(/Uvicorn running/)).toBeInTheDocument());
   });

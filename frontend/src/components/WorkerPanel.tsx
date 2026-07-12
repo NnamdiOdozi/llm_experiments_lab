@@ -7,7 +7,7 @@ interface Props {
   device: string;
 }
 
-type SubTab = "events" | "logs";
+type SubTab = "metrics" | "logs";
 
 const EVENTS_POLL_MS = 3000;
 const LOGS_POLL_MS = 10000;
@@ -35,7 +35,7 @@ function formatUsage(m: MetricRow): string {
 }
 
 export default function WorkerPanel({ runId, device }: Props) {
-  const [subTab, setSubTab] = useState<SubTab>("events");
+  const [subTab, setSubTab] = useState<SubTab>("metrics");
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [backendMode, setBackendMode] = useState<string | null>(null);
@@ -100,16 +100,16 @@ export default function WorkerPanel({ runId, device }: Props) {
   return (
     <div>
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        <button style={tabButtonStyle(subTab === "events")} onClick={() => setSubTab("events")}>
-          Events
+        <button style={tabButtonStyle(subTab === "metrics")} onClick={() => setSubTab("metrics")}>
+          Serverless Metrics
         </button>
         <button style={tabButtonStyle(subTab === "logs")} onClick={() => setSubTab("logs")}>
-          Raw Logs
+          Serverless Logs
         </button>
       </div>
-      {subTab === "events" ? (
+      {subTab === "metrics" ? (
         <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 12 }}>
-          {eventLines.length ? eventLines.join("\n") : "No events yet — start a run to see step-by-step progress here."}
+          {eventLines.length ? eventLines.join("\n") : "No metrics yet — start a run to see step-by-step progress here."}
         </pre>
       ) : backendMode !== "nebius_endpoint" ? (
         <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
