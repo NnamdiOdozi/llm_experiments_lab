@@ -4,49 +4,17 @@ WORKDIR /app
 
 RUN pip install uv
 
-# uv caches every downloaded wheel under /root/.cache/uv by default. In a
-# Docker layer that cache is just as permanent as an installed package —
-# confirmed via a real build: uninstalling the orphaned cu130 nvidia
-# wheels below dropped the installed venv to 882MB but left the image at
-# 5.81GB because the 5.3GB wheel cache was still sitting in the same
-# layer. UV_NO_CACHE disables the cache entirely for this build (standard
-# uv-in-Docker practice) — costs nothing here since this image is only
-# ever built once per push, not iterated on locally. See
-# docs/DESIGN_DECISIONS.md.
+# docker/cpu/pyproject.toml is a separate, self-contained uv project whose
+# torch source is pinned unconditionally to the CPU wheel index — unlike
+# the root pyproject.toml (used for local dev), it never resolves or
+# downloads anything from the cu130 index in the first place. This
+# replaced an earlier approach that synced the CUDA-pinned root lockfile
+# and then swapped/stripped torch afterward — that produced a 5.81GB image
+# because the full cu130 dependency tree got installed (and cached) before
+# being partially undone. See docs/DESIGN_DECISIONS.md §12.
 ENV UV_NO_CACHE=1
-
-COPY pyproject.toml uv.lock ./
-# pyproject.toml pins torch to the CUDA (cu130) wheel index for the GPU
-# image — this image needs the much smaller CPU-only wheel instead. Sync
-# everything else from the locked resolution, then swap just torch.
-#
-# --no-deps is load-bearing here, not decoration: verified locally (see
-# 2026-07-12 session) that --reinstall-package without it can silently
-# re-resolve and change *other* packages' versions too (e.g. urllib3,
-# charset-normalizer shifted in testing) — --no-deps guarantees only torch
-# itself is touched. The exact installed version is read back from the
-# cu130 install rather than hardcoded, so the CPU and GPU images can never
-# drift onto different torch versions of each other.
-#
-# uv reports the version with its PEP 440 local suffix, e.g. "2.12.1+cu130".
-# That suffix is a cu130-index-only build tag — the CPU index has no such
-# build, so pinning "torch==2.12.1+cu130" against the CPU index is
-# unsatisfiable (confirmed via a real docker build failure, not a guess).
-# Strip everything from "+" onward before reusing the version.
-#
-# `uv sync` resolves torch from uv.lock BEFORE the swap below runs, which
-# means the full cu130 dependency tree (nvidia-cudnn, nvidia-cufft,
-# nvidia-cusolver, nvidia-nccl, triton, ...) gets installed first and is
-# left orphaned after --no-deps swaps out torch itself — confirmed via a
-# real build (5.58GB layer). Explicitly uninstall those leftovers so the
-# CPU image doesn't carry GPU-sized weight for nothing. See
-# docs/DESIGN_DECISIONS.md.
-RUN uv sync --no-dev \
-    && TORCH_VERSION=$(uv pip show torch --python .venv | grep '^Version:' | awk '{print $2}' | cut -d'+' -f1) \
-    && uv pip install --python .venv --index-url https://download.pytorch.org/whl/cpu \
-       --no-deps --reinstall-package torch "torch==${TORCH_VERSION}" \
-    && (uv pip list --python .venv --format=freeze | grep -E '^(nvidia-|triton==)' | cut -d= -f1 \
-       | xargs -r uv pip uninstall --python .venv)
+COPY docker/cpu/pyproject.toml docker/cpu/uv.lock ./
+RUN uv sync --no-dev
 
 COPY backend ./backend
 COPY config ./config
@@ -59,11 +27,10 @@ ENV GPU_YIELD_ENABLED=false
 
 EXPOSE 8000
 
-# --no-sync is load-bearing: without it, `uv run` reconciles the venv
-# against uv.lock on EVERY container start. uv.lock still resolves torch to
-# the cu130 build, so it would silently revert the CPU swap above back to
-# the CUDA wheel on every cold start (confirmed via a real container run:
-# ~1 min reinstall, torch ended up back at "2.12.1+cu130"). --no-sync runs
-# uvicorn against the venv exactly as baked into the image. See
-# docs/DESIGN_DECISIONS.md.
+# --no-sync: run against the venv exactly as baked, skip uv's
+# reconcile-against-lock check on every container start. Not load-bearing
+# anymore (docker/cpu/uv.lock already matches what's installed, so there's
+# nothing to revert), but kept as a defensive habit — it also shaves the
+# resync check off every cold start, which matters for an idle-timeout
+# endpoint. See docs/DESIGN_DECISIONS.md.
 CMD ["uv", "run", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

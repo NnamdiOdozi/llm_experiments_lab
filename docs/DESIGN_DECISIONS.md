@@ -365,10 +365,65 @@ left installed and unused. Separately, uv caches every downloaded wheel
 under `/root/.cache/uv`, and that cache persists inside the Docker layer
 regardless of what gets uninstalled afterward. Measured on a real image:
 5.81GB total, of which the installed venv was only 882MB and the wheel
-cache alone was 5.3GB. Fix: explicitly uninstall the orphaned
+cache alone was 5.3GB. Fix at the time: explicitly uninstall the orphaned
 `nvidia-*`/`triton` packages after the torch swap, and set
-`ENV UV_NO_CACHE=1` before `uv sync` (standard uv-in-Docker practice) so
-the cache never lands in a layer at all. Final verified size: 1.09GB.
+`ENV UV_NO_CACHE=1` before `uv sync`, so the cache never lands in a layer
+at all. Got the image down to 1.09GB — **but this whole a/b/c/d chain was
+still the wrong shape.** See the update below.
+
+**Update (2026-07-12, same day): the swap-after-sync approach was
+superseded entirely.** All four fixes above patched symptoms of one root
+cause: `pyproject.toml`'s `[tool.uv.sources]` pins torch to the cu130
+index for *any* Linux (`sys_platform == 'linux' or sys_platform ==
+'win32'`), so a CPU build's `uv sync` always resolved and downloaded the
+full CUDA dependency tree before anything could be swapped out — a
+build-then-diet approach, not a CPU-only build. Even a genuinely 1.09GB
+final image was still burning real time and bandwidth downloading ~5GB of
+wheels it never kept, on every rebuild.
+
+**Real fix:** three separate, self-contained uv projects instead of one
+shared lockfile with post-hoc patching:
+- root `pyproject.toml`/`uv.lock` — unchanged, local dev (still resolves
+  torch from cu130, exactly as before this session started).
+- `docker/cpu/pyproject.toml` + its own `uv.lock` — torch pinned
+  unconditionally to `https://download.pytorch.org/whl/cpu`, no markers,
+  no extras. `uv sync` for this project never touches the cu130 index —
+  confirmed via a real `docker build --no-cache`: zero `cu130`/`nvidia-`/
+  `triton` mentions anywhere in the build log.
+- `docker/gpu/pyproject.toml` + its own `uv.lock` — torch pinned to cu130,
+  same resolution as before, just isolated into its own project.
+
+Both trainer Dockerfiles now `COPY docker/{cpu,gpu}/pyproject.toml
+docker/{cpu,gpu}/uv.lock ./` instead of the root files. `Dockerfile.
+trainer-cpu`'s entire swap/strip/uninstall block (a/b/c/d above) is gone —
+replaced by a plain `RUN uv sync --no-dev`. `--no-sync` stays in both
+Dockerfiles' `CMD` as a defensive habit (no longer fixing an active bug,
+since each image's own lockfile now matches what's installed, but it still
+skips the reconcile-against-lock check on every cold start).
+
+**Tradeoff accepted knowingly:** the three `pyproject.toml` files
+duplicate the non-torch dependency list (fastapi, uvicorn, numpy, ...) by
+hand — normally a DRY violation this project avoids, but chosen
+deliberately over uv's `[project.optional-dependencies]` +
+`[tool.uv.conflicts]` mechanism (which can express this with one shared
+lockfile) because that approach requires remembering to pass `--extra
+cpu`/`--extra gpu` on every local `uv sync`/`uv run`, and a bare `uv sync`
+without the right extra would silently uninstall torch from whichever venv
+it's run against. Three independent project directories mean the correct
+dependency set is just "whichever directory you're in" — no flag to
+forget, and the root project (local dev) is completely untouched by any of
+this, so there's zero risk to the existing local GPU dev venv. Keep the
+three dependency lists in sync by hand when adding/changing a non-torch
+package.
+
+**General lesson (reinforced):** the a/b/c/d fixes were each individually
+correct and each verified against a real build — but verifying that a
+patch works is not the same as verifying the *architecture* is right.
+"The final image is small and torch is +cpu" was true and still masked
+"the build downloads 5GB of CUDA it doesn't need." When a fix requires
+multiple layered patches to route around one shared piece of state (here,
+one lockfile pinned for the wrong target), that's a signal to check
+whether the shared state itself should be split, not patched further.
 
 **General lesson:** none of these four would have been caught by reading
 the Dockerfile — each needed an actual `docker build` + `docker run` to
