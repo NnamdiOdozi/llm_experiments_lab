@@ -1,1 +1,1 @@
-{"run_id": 128, "status": "running", "current_step": 403, "total_steps": 1000, "metrics_count": 20, "template": "transformer", "elapsed_seconds": 1772.7, "pid": 1964407}
+{"run_id": 128, "status": "completed", "current_step": 1000, "total_steps": 1000, "metrics_count": 50, "template": "transformer", "elapsed_seconds": 4369.7, "pid": 1964407}

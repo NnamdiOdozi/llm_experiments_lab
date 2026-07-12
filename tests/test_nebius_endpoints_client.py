@@ -32,7 +32,7 @@ class HangingProc(FakeProc):
 
 
 async def test_create_endpoint_parses_endpoint_id(monkeypatch):
-    async def fake_run_cli(*args):
+    async def fake_run_cli(*args, **kwargs):
         return json.dumps({"metadata": {"id": "aiendpoint-abc123"}})
 
     monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)

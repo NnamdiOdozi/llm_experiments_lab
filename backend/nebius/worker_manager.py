@@ -18,6 +18,21 @@ class WorkerProvisionError(RuntimeError):
     """Raised when an endpoint doesn't reach RUNNING within the poll timeout."""
 
 
+def endpoint_create_kwargs(device_type: str) -> dict:
+    """Single source of truth for "which settings back a cpu vs gpu
+    endpoint" — reused by _create_new_worker() (the running app's
+    automatic path) and scripts/create_nebius_endpoint.py (manual/standalone
+    creation), so the two can never drift out of sync with each other."""
+    return dict(
+        name=settings.nebius_gpu_endpoint_name if device_type == "gpu" else settings.nebius_cpu_endpoint_name,
+        image=settings.nebius_gpu_trainer_image if device_type == "gpu" else settings.nebius_cpu_trainer_image,
+        platform=settings.nebius_gpu_platform if device_type == "gpu" else settings.nebius_cpu_platform,
+        preset=settings.nebius_gpu_preset if device_type == "gpu" else settings.nebius_cpu_preset,
+        container_port=settings.nebius_endpoint_container_port,
+        subnet_id=settings.nebius_subnet_id,
+    )
+
+
 async def _create_new_worker(session_id: str, device_type: str) -> str:
     """Create a fresh endpoint and point session_id at it.
 
@@ -32,12 +47,7 @@ async def _create_new_worker(session_id: str, device_type: str) -> str:
     if await db.get_worker_session(session_id) is None:
         await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
     endpoint_id = await endpoints_client.create_endpoint(
-        name=settings.nebius_gpu_endpoint_name if device_type == "gpu" else settings.nebius_cpu_endpoint_name,
-        image=settings.nebius_gpu_trainer_image if device_type == "gpu" else settings.nebius_cpu_trainer_image,
-        platform=settings.nebius_gpu_platform if device_type == "gpu" else settings.nebius_cpu_platform,
-        preset=settings.nebius_gpu_preset if device_type == "gpu" else settings.nebius_cpu_preset,
-        container_port=settings.nebius_endpoint_container_port,
-        subnet_id=settings.nebius_subnet_id,
+        **endpoint_create_kwargs(device_type),
     )
     await db.update_worker_session(session_id, worker_status=WorkerStatus.PROVISIONING, nebius_endpoint_id=endpoint_id)
     nebius_log.info(
