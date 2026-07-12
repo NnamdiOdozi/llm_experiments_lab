@@ -1,24 +1,12 @@
 import { useEffect, useState } from "react";
-import { fetchMetrics, fetchRunStatus, getWorkerLogs, getWorkerStatus } from "../hooks/useApi";
+import { fetchMetrics, fetchRunStatus } from "../hooks/useApi";
 import { MetricRow, RunStatus } from "../types";
 
 interface Props {
   runId: number | null;
-  device: string;
 }
-
-type SubTab = "metrics" | "logs";
 
 const EVENTS_POLL_MS = 3000;
-const LOGS_POLL_MS = 10000;
-
-function tabButtonStyle(active: boolean) {
-  return {
-    fontSize: 12,
-    background: active ? "var(--accent-dim)" : undefined,
-    color: active ? "#fff" : undefined,
-  };
-}
 
 function formatUsage(m: MetricRow): string {
   const parts: string[] = [];
@@ -34,12 +22,14 @@ function formatUsage(m: MetricRow): string {
   return parts.length ? " " + parts.join(" ") : "";
 }
 
-export default function WorkerPanel({ runId, device }: Props) {
-  const [subTab, setSubTab] = useState<SubTab>("metrics");
+// Single flat view — was previously two sub-tabs (Metrics / raw container
+// Logs). Collapsed 2026-07-12 per user feedback: the raw-logs sub-tab was
+// consistently empty for CPU runs and added nothing the step-by-step
+// events below don't already cover (which already include loss + resource
+// usage inline). See docs/DESIGN_DECISIONS.md.
+export default function WorkerPanel({ runId }: Props) {
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
-  const [backendMode, setBackendMode] = useState<string | null>(null);
-  const [rawLogs, setRawLogs] = useState("");
 
   useEffect(() => {
     if (runId == null) {
@@ -67,29 +57,6 @@ export default function WorkerPanel({ runId, device }: Props) {
     };
   }, [runId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      try {
-        const s = await getWorkerStatus(device);
-        if (cancelled) return;
-        setBackendMode(s.backend_mode);
-        if (s.backend_mode === "nebius_endpoint") {
-          const { logs } = await getWorkerLogs(device);
-          if (!cancelled) setRawLogs(logs);
-        }
-      } catch {
-        // best-effort
-      }
-    }
-    poll();
-    const id = setInterval(poll, LOGS_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [device]);
-
   const eventLines = [
     ...(status ? [`STATUS ${status.status} step=${status.current_step}/${status.total_steps}`] : []),
     ...metrics.map(
@@ -98,28 +65,8 @@ export default function WorkerPanel({ runId, device }: Props) {
   ];
 
   return (
-    <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        <button style={tabButtonStyle(subTab === "metrics")} onClick={() => setSubTab("metrics")}>
-          Serverless Metrics
-        </button>
-        <button style={tabButtonStyle(subTab === "logs")} onClick={() => setSubTab("logs")}>
-          Serverless Logs
-        </button>
-      </div>
-      {subTab === "metrics" ? (
-        <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 12 }}>
-          {eventLines.length ? eventLines.join("\n") : "No metrics yet — start a run to see step-by-step progress here."}
-        </pre>
-      ) : backendMode !== "nebius_endpoint" ? (
-        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          N/A — running locally, check the server console for logs.
-        </p>
-      ) : (
-        <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 12, whiteSpace: "pre-wrap" }}>
-          {rawLogs || "No logs yet."}
-        </pre>
-      )}
-    </div>
+    <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 12 }}>
+      {eventLines.length ? eventLines.join("\n") : "No metrics yet — start a run to see step-by-step progress here."}
+    </pre>
   );
 }

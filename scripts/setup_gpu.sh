@@ -18,7 +18,6 @@ RUN_ENV_SETUP=0
 
 set -euo pipefail
 
-GIT_BRANCH=nebius-serverless-experiments
 #: "${REPO_URL:?ERROR: REPO_URL must be set. Example: REPO_URL=https://github.com/user/repo.git}"
 REPO_URL="${REPO_URL:-https://github.com/NnamdiOdozi/llm_experiments_lab.git}"
 GIT_BRANCH="${GIT_BRANCH:-main}"

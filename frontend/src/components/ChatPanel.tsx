@@ -8,6 +8,7 @@ interface Props {
 export default function ChatPanel({ experimentId }: Props) {
   const { messages, sendMessage, loading, error, unavailable } = useChatStream(experimentId);
   const [input, setInput] = useState("");
+  const [copiedId, setCopiedId] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -20,6 +21,12 @@ export default function ChatPanel({ experimentId }: Props) {
     if (!input.trim() || loading) return;
     sendMessage(input);
     setInput("");
+  }
+
+  async function handleCopy(id: number, content: string) {
+    await navigator.clipboard.writeText(content);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId((current) => (current === id ? null : current)), 1500);
   }
 
   if (unavailable) {
@@ -62,7 +69,33 @@ export default function ChatPanel({ experimentId }: Props) {
               whiteSpace: "pre-wrap",
             }}
           >
-            {m.content}
+            <div>{m.content}</div>
+            {m.role === "assistant" && (
+              <button
+                onClick={() => handleCopy(m.id, m.content)}
+                title="Copy response"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-dim)",
+                  cursor: "pointer",
+                  padding: "4px 0 0",
+                  display: "block",
+                  lineHeight: 0,
+                }}
+              >
+                {copiedId === m.id ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="9" y="9" width="11" height="11" rx="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
         ))}
         <div ref={bottomRef} />

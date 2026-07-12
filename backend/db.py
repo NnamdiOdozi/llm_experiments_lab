@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS training_runs (
     execution_backend TEXT DEFAULT 'local',
     remote_endpoint_id TEXT,
     remote_run_id INTEGER,
+    notes_md TEXT,
     FOREIGN KEY (experiment_id) REFERENCES experiments(id)
 );
 
@@ -98,6 +99,7 @@ _MIGRATIONS = [
     ("execution_backend", "TEXT DEFAULT 'local'"),
     ("remote_endpoint_id", "TEXT"),
     ("remote_run_id", "INTEGER"),
+    ("notes_md", "TEXT"),
 ]
 
 # worker_sessions columns added after initial schema

@@ -582,6 +582,150 @@ guessing at plausible-sounding causes.
 
 ---
 
+## 16. Open Runs Showed a Successfully-Running Remote Run as Permanently QUEUED
+
+**Context:** found while investigating §15 — a user reported the Open Runs
+page showing run #139 as `QUEUED`/step 0 while it was actually training
+successfully. Confirmed by querying the row directly: `execution_backend`,
+`remote_endpoint_id`, and `remote_run_id` were all correctly set (proof
+`_start_remote_run` completed successfully), but `status` was still
+`queued` — its value from row creation, never touched again.
+
+**Root cause:** `_start_remote_run`'s final DB write only ever set
+`execution_backend`/`remote_endpoint_id`/`remote_run_id` — never `status`.
+For a remote run, the *live* status genuinely lives on the remote
+endpoint's own DB from that point on; the local row was never meant to be
+kept in sync with it turn-by-turn. `run_status()` (what the Experiment
+page polls) already knew this and proxies to the remote endpoint for live
+status when `_is_remote(db_run)`. `list_open_runs()` didn't — it read the
+local `status` column directly, which for any remote run past handoff was
+permanently frozen. A second consequence of the same gap:
+`db.list_open_runs()`'s own terminal-status filter also only sees that
+stale local value, so a remote run that's genuinely `completed`/`failed`
+would never have dropped out of the Open Runs list either.
+
+**Fix, two parts:**
+1. `list_open_runs()` (the route) now proxies to each remote run's own
+   endpoint for live `status`/`current_step`/`total_steps` before
+   returning the list — same `_proxy()` helper `run_status()` already
+   uses. Falls back to the stale local value on a proxy failure (logged,
+   not raised) rather than breaking the whole list over one unreachable
+   endpoint. Re-filters on the *live* status afterward, so a
+   genuinely-terminal remote run correctly disappears from the list too.
+2. `_start_remote_run` now also sets `status=RunStatus.RUNNING` in that
+   same final write — a reasonable baseline for any other code path that
+   might read the local row directly without proxying, even though it
+   won't itself track later remote transitions (e.g. a later remote
+   pause). The live overlay in (1) is what makes Open Runs itself
+   correct; this is a complementary "don't leave a misleading local
+   value lying around" fix, not a full sync mechanism.
+
+**General lesson:** when one field only gets updated by a narrow code
+path (here: local `status`, only advanced by the local subprocess runner
+or by proxied writes triggered through specific routes), a *different*
+consumer of that same table can silently see a stale value forever if it
+reads the column directly instead of going through whatever keeps it
+fresh. Grep for every reader of a column before trusting that "it gets
+updated somewhere" means "it gets updated everywhere that reads it."
+
+---
+
+## 17. Idle-Timeout Clock Never Reset by Actual User Engagement (Pause/Resume/Prompt)
+
+**Context:** a user saw an idle-timeout warning banner ("stops in ~3 min")
+on a CPU worker despite having been actively engaged the whole time —
+training for ~9 minutes, then pausing and prompting the paused model for
+up to ~10 more minutes. They correctly suspected the idle clock wasn't
+using the right signal, and separately asked whether the backend and
+frontend might be comparing timestamps across different timezones (BST
+vs UTC) — a reasonable, worth-checking hypothesis that turned out **not**
+to be the cause: `idle_monitor.py::seconds_since()` already explicitly
+treats the stored value as UTC and compares against UTC `now()`, and the
+frontend (`WorkerIdleBanner.tsx`) does pure `idle_timeout_seconds -
+seconds_idle` number arithmetic with no date parsing at all — both
+checked directly, neither had a timezone bug. (One dead end worth noting
+honestly: an earlier manual check in this same investigation compared a
+UTC DB timestamp against a local-BST `date` command output without
+converting, wrongly concluding the worker had been idle for over an hour —
+caught and corrected before it went anywhere, but a good example of
+exactly the mistake being investigated, made by the investigator.)
+
+**Real root cause:** `db.touch_worker_session()` (resets
+`last_activity_at`) was only ever called from three places: worker
+acquisition/reuse (`ensure_worker`), once at the end of a successful
+`_start_remote_run`, and the manual "Continue session" heartbeat button.
+`pause_training`/`resume_training`/`prompt_model`'s remote branches all
+proxy real, active work to the endpoint (prompting a paused model
+literally runs an inference forward pass there) but never touched the
+clock. A run that's paused-and-prompted for long enough looks
+indistinguishable from a worker nobody has touched since it started.
+
+**Fix:** added `_touch_worker_for_run(db_run)`, called after
+pause/resume/prompt's remote proxy calls succeed. Deliberately **not**
+added inside `_proxy()` itself, which would also cover passive
+`/status`/`/metrics` polling (happens automatically on a timer regardless
+of whether anyone's actually engaged) — touching on that too would make
+idle-timeout effectively never fire as long as a browser tab is left
+open, defeating its purpose entirely. The distinction that matters is
+explicit user action vs. automatic background polling, not "did a request
+happen."
+
+**Follow-up, same day — broadened per explicit user request:**
+
+1. `run_status()`'s remote branch now syncs the local row's `status`/
+   `current_step`/`total_steps` to the live-fetched value on *any*
+   detected transition, not just a special-cased "completed" check —
+   paused, cancelled, and failed all matter equally, not just successful
+   completion. Touches the worker specifically when the transition is
+   *into* a terminal state (`completed`/`failed`/`cancelled`) that wasn't
+   already terminal locally — "the run just finished on its own" is a
+   legitimate activity signal even without an explicit local action.
+2. Added `frontend/src/hooks/useActivityHeartbeat.ts` — a throttled
+   (max once per 60s) global listener on scroll/mousemove/keydown/click,
+   calling the existing heartbeat endpoint (the one "Continue session"
+   already used). This was an explicit, deliberate choice by the user
+   over my own recommendation: I flagged that passive mouse/scroll
+   activity is a weak signal for a *cost-control* timeout specifically
+   (unlike a security session-timeout) — a tab left open with incidental
+   scrolling could never idle out, and this app already has a purpose-built
+   mechanism for exactly that ambiguous case (the explicit
+   "Continue session" click). The user considered that tradeoff and chose
+   to include scroll/mouse tracking anyway, prioritizing convenience over
+   guaranteed timeout enforcement. Recorded here so the tradeoff isn't
+   rediscovered as a surprise later — it was a conscious choice, not an
+   oversight.
+
+**General lesson:** "idle" needs a definition, and it's easy to
+implement a definition that's too narrow (only counts session start) or
+too broad (counts a polling timer). Both are equally wrong for different
+reasons. When adding an activity-tracking signal, ask what specifically
+should and shouldn't count *before* picking where to wire it in — not
+just "does this request touch the resource."
+
+## §18: Notes moved from experiment-scoped to run-scoped
+
+**Problem:** notes lived on `experiments`, not `training_runs`. A note
+written about one run (e.g. "loss spiked around step 200, probably the LR
+warmup") stays attached to the experiment forever, even after the config
+changes and a new run starts. The note is now misleading — it describes a
+run that no longer matches the current config — but nothing ever clears
+it.
+
+**Fix:** `notes_md` added to `training_runs` (schema + migration in
+`backend/db.py`), new `GET`/`PATCH /api/training/{run_id}/notes` routes
+(`backend/api/training.py`), reusing the existing generic
+`db.get_training_run`/`db.update_training_run` — no new db.py functions
+needed. `ExperimentNotes.tsx` now takes `runId` instead of `experimentId`;
+textarea is disabled with a placeholder when `runId == null` (no run
+started yet). The "wipe on new run" behavior needed no explicit code: since
+notes are a column on the per-run row and that column defaults to `''`,
+every new `training_runs` row starts blank automatically — there's no
+copy-forward step to get wrong. The old experiment-level `notes_md`
+column/route in `backend/api/experiments.py` was left in place, unused by
+the frontend now, rather than deleted — not worth the churn for a POC.
+
+---
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

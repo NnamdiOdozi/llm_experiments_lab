@@ -6,12 +6,11 @@ import WorkerPanel from "./WorkerPanel";
 interface Props {
   experimentId: number;
   runId: number | null;
-  device: string;
 }
 
 const WORKER_TAB = "__worker__";
 
-export default function CodeView({ experimentId, runId, device }: Props) {
+export default function CodeView({ experimentId, runId }: Props) {
   const [code, setCode] = useState<CodeFiles | null>(null);
   const [activeFile, setActiveFile] = useState("model.py");
 
@@ -42,11 +41,11 @@ export default function CodeView({ experimentId, runId, device }: Props) {
           onClick={() => setActiveFile(WORKER_TAB)}
           style={{ ...tabStyle(activeFile === WORKER_TAB), marginLeft: 16, paddingLeft: 12, borderLeft: "1px solid var(--border)" }}
         >
-          Serverless Logs
+          Serverless Metrics
         </button>
       </div>
       {activeFile === WORKER_TAB ? (
-        <WorkerPanel runId={runId} device={device} />
+        <WorkerPanel runId={runId} />
       ) : (
         <pre>{content}</pre>
       )}

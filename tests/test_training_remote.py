@@ -119,6 +119,10 @@ async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkey
     assert db_run["execution_backend"] == "nebius_endpoint"
     assert db_run["remote_endpoint_id"] == "aiendpoint-abc123"
     assert db_run["remote_run_id"] == 7
+    # Regression guard (2026-07-12): _start_remote_run used to leave the
+    # local status column frozen at its QUEUED creation default forever
+    # after a successful handoff — see docs/DESIGN_DECISIONS.md.
+    assert db_run["status"] == "running"
 
     # Second call (training/start) must target the remote experiment id, not the local one
     assert fake_client.calls[1][1] == "https://cpu.tunnel.nebius.cloud/api/training/start"
@@ -295,6 +299,39 @@ async def test_pause_training_proxies_to_remote_run(temp_db, client, monkeypatch
     assert fake_client.calls[0] == ("POST", "https://cpu.tunnel.nebius.cloud/api/training/7/pause", None)
 
 
+async def test_pause_resume_and_prompt_touch_the_worker_idle_clock(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): a user prompting a paused remote model
+    for ~10 minutes (genuinely active engagement) saw an idle-timeout
+    warning banner, because pause/resume/prompt never touched
+    last_activity_at at all — only worker acquisition and the manual
+    "Continue session" heartbeat did."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud",
+        last_activity_at="2020-01-01 00:00:00",
+    )
+
+    for path, response in [
+        ("pause", FakeResponse({"run_id": 7, "status": "pausing"})),
+        ("resume", FakeResponse({"run_id": 7, "status": "resuming"})),
+        ("prompt", FakeResponse({"run_id": 7, "output": "hello"})),
+    ]:
+        await db.update_worker_session("worker-cpu", last_activity_at="2020-01-01 00:00:00")
+        fake_client = FakeAsyncClient([response])
+        monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+        body = {"prompt": "hi", "max_new_tokens": 10} if path == "prompt" else None
+        resp = await client.post(f"/api/training/{run_id}/{path}", json=body)
+
+        assert resp.status_code == 200, f"{path} failed: {resp.text}"
+        session = await db.get_worker_session("worker-cpu")
+        assert session["last_activity_at"] != "2020-01-01 00:00:00", f"{path} did not touch the idle clock"
+
+
 async def test_get_status_translates_remote_run_id_back_to_local(temp_db, client, monkeypatch):
     run_id = await db.create_training_run(
         temp_db, "cpu", execution_backend="nebius_endpoint",
@@ -320,3 +357,104 @@ async def test_get_status_translates_remote_run_id_back_to_local(temp_db, client
     assert body["status"] == "running"
     assert body["current_step"] == 20
     assert body["execution_backend"] == "nebius_endpoint"
+
+
+async def test_get_status_syncs_local_row_and_touches_worker_on_terminal_transition(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): local status only ever advanced via
+    explicit local pause/resume/prompt actions — a run that finishes
+    (completed/failed/cancelled) on the remote side on its own, without any
+    of those, left the local row stale and never touched the idle clock.
+    Not special-cased to "completed" — paused/cancelled/failed all matter."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", status="running", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud",
+        last_activity_at="2020-01-01 00:00:00",
+    )
+
+    fake_client = FakeAsyncClient([
+        FakeResponse({"run_id": 7, "status": "completed", "current_step": 1000, "total_steps": 1000}),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get(f"/api/training/{run_id}/status")
+
+    assert resp.status_code == 200
+    db_run = await db.get_training_run(run_id)
+    assert db_run["status"] == "completed"
+    assert db_run["current_step"] == 1000
+    session = await db.get_worker_session("worker-cpu")
+    assert session["last_activity_at"] != "2020-01-01 00:00:00"
+
+
+async def test_list_open_runs_overlays_live_status_for_remote_run(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): _start_remote_run never updates local
+    status past its QUEUED creation default after handoff — a genuinely
+    running remote run showed QUEUED/step 0 forever in Open Runs. Must
+    overlay live status/step from the remote endpoint for display."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    # Local row frozen at its creation default, as _start_remote_run leaves
+    # it pre-fix (this test targets list_open_runs' own overlay, not the
+    # separate _start_remote_run status=RUNNING fix).
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([
+        FakeResponse({"run_id": 7, "status": "running", "current_step": 370, "total_steps": 1000}),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get("/api/training/open")
+
+    assert resp.status_code == 200
+    runs = {r["id"]: r for r in resp.json()}
+    assert runs[run_id]["status"] == "running"
+    assert runs[run_id]["current_step"] == 370
+    assert runs[run_id]["total_steps"] == 1000
+
+
+async def test_list_open_runs_falls_back_to_local_status_when_proxy_fails(temp_db, client, monkeypatch):
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([FakeResponse({}, status_code=502)])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get("/api/training/open")
+
+    assert resp.status_code == 200
+    runs = {r["id"]: r for r in resp.json()}
+    assert runs[run_id]["status"] == "queued"  # stale local value, not a crash
+
+
+async def test_list_open_runs_excludes_remote_run_that_is_actually_terminal_live(temp_db, client, monkeypatch):
+    """The local status column being non-terminal doesn't mean the run
+    actually still is — db.list_open_runs()'s own terminal-status filter
+    only sees that stale local value, so a remote run that's genuinely
+    completed must be filtered out here too, after the live overlay."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([
+        FakeResponse({"run_id": 7, "status": "completed", "current_step": 1000, "total_steps": 1000}),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get("/api/training/open")
+
+    assert resp.status_code == 200
+    assert run_id not in {r["id"] for r in resp.json()}

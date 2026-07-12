@@ -1,27 +1,34 @@
 import { useState, useEffect, useRef } from "react";
-import { updateNotes, fetchExperiment } from "../hooks/useApi";
+import { updateRunNotes, fetchRunNotes } from "../hooks/useApi";
 
 interface Props {
-  experimentId: number;
+  runId: number | null;
 }
 
-export default function ExperimentNotes({ experimentId }: Props) {
+export default function ExperimentNotes({ runId }: Props) {
   const [notes, setNotes] = useState("");
   const [saved, setSaved] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    fetchExperiment(experimentId).then((exp) => {
-      setNotes(exp.notes_md || "");
+    if (runId == null) {
+      setNotes("");
+      setSaved(true);
+      return;
+    }
+    fetchRunNotes(runId).then((res) => {
+      setNotes(res.notes_md || "");
+      setSaved(true);
     });
-  }, [experimentId]);
+  }, [runId]);
 
   function handleChange(value: string) {
+    if (runId == null) return;
     setNotes(value);
     setSaved(false);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
-      await updateNotes(experimentId, value);
+      await updateRunNotes(runId, value);
       setSaved(true);
     }, 1000);
   }
@@ -37,7 +44,8 @@ export default function ExperimentNotes({ experimentId }: Props) {
       <textarea
         value={notes}
         onChange={(e) => handleChange(e.target.value)}
-        placeholder="Add experiment notes here..."
+        disabled={runId == null}
+        placeholder={runId == null ? "Start a run to add notes..." : "Add notes for this run..."}
         style={{
           width: "100%",
           minHeight: 100,

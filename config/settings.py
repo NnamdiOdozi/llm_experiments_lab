@@ -53,7 +53,14 @@ class Settings(BaseSettings):
     token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
     chatbot_log_tail_lines: int = 50
     chatbot_error_tail_lines: int = 10
-    chatbot_training_event_tail_lines: int = 10
+    # Lifecycle events (LAUNCHED/PAUSE/RESUME/STOP/CANCELLED) are naturally
+    # sparse per run — this is a safety ceiling against a pathological
+    # flapping run, not a real-world cap. See docs/DESIGN_DECISIONS.md.
+    chatbot_training_event_tail_lines: int = 200
+    # Loss/val history points kept in the chatbot's context, evenly sampled
+    # across the whole run (not the most recent N) so "how did the run go"
+    # can be answered after step 20. See _downsample_series in context.py.
+    chatbot_loss_history_points: int = 25
     chatbot_history_window_turns: int = 10
 
     # Remote training backend — endpoint-only after the 2026-07-11 pivot away
@@ -85,7 +92,7 @@ class Settings(BaseSettings):
     nebius_gpu_trainer_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-trainer-gpu:latest"
     nebius_subnet_id: str = "vpcsubnet-your-subnet-id-here"
     nebius_cpu_platform: str = "cpu-d3"
-    nebius_cpu_preset: str = "8vcpu-32gb"  # unverified at this size, see comment above
+    nebius_cpu_preset: str = "16vcpu-64gb"  # unverified at this size, see comment above
     nebius_gpu_platform: str = "gpu-l40s-a"       # unverified
     nebius_gpu_preset: str = "1gpu-8vcpu-32gb"    # unverified
     nebius_cpu_endpoint_name: str = "llm-lab-cpu-trainer"
