@@ -66,6 +66,31 @@ async def test_post_message_streams_and_persists(temp_db, client, monkeypatch):
     assert messages[1]["role"] == "assistant"
     assert messages[1]["content"] == "Hello there"
     assert messages[1]["total_tokens"] == 52
+    # The client needs the real DB row id to PATCH feedback against later —
+    # sent back in the done event since the client only has a local
+    # placeholder id at that point.
+    assert f'"message_id": {messages[1]["id"]}' in resp.text
+
+
+async def test_set_feedback_updates_message(temp_db, client):
+    message_id = await db.add_chat_message(temp_db, "assistant", "Some answer")
+
+    resp = await client.patch(f"/api/chatbot/messages/{message_id}/feedback", json={"feedback": "up"})
+
+    assert resp.status_code == 200
+    messages = await db.get_chat_messages(temp_db)
+    assert messages[0]["feedback"] == "up"
+
+
+async def test_set_feedback_404_for_unknown_message(temp_db, client):
+    resp = await client.patch("/api/chatbot/messages/999999/feedback", json={"feedback": "down"})
+    assert resp.status_code == 404
+
+
+async def test_set_feedback_rejects_invalid_value(temp_db, client):
+    message_id = await db.add_chat_message(temp_db, "assistant", "Some answer")
+    resp = await client.patch(f"/api/chatbot/messages/{message_id}/feedback", json={"feedback": "sideways"})
+    assert resp.status_code == 422
 
 
 async def test_post_message_history_excludes_message_being_sent(temp_db, client, monkeypatch):

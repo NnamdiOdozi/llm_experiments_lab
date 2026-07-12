@@ -112,6 +112,13 @@ export function updateNotes(experimentId: number, notes_md: string) {
   });
 }
 
+export function setChatMessageFeedback(messageId: number, feedback: "up" | "down" | null) {
+  return api<{ ok: boolean }>(`/chatbot/messages/${messageId}/feedback`, {
+    method: "PATCH",
+    body: JSON.stringify({ feedback }),
+  });
+}
+
 export function fetchRunNotes(runId: number) {
   return api<{ notes_md: string }>(`/training/${runId}/notes`);
 }

@@ -2,6 +2,7 @@
 
 import json
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -20,12 +21,26 @@ class ChatMessageRequest(BaseModel):
     message: str
 
 
+class FeedbackRequest(BaseModel):
+    # None clears feedback (e.g. clicking an already-selected thumb again)
+    feedback: Literal["up", "down"] | None = None
+
+
 @router.get("/{experiment_id}/messages")
 async def get_messages(experiment_id: int):
     exp = await db.get_experiment(experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
     return await db.get_chat_messages(experiment_id)
+
+
+@router.patch("/messages/{message_id}/feedback")
+async def set_feedback(message_id: int, req: FeedbackRequest):
+    updated = await db.set_chat_message_feedback(message_id, req.feedback)
+    if not updated:
+        raise HTTPException(404, "Message not found")
+    chatbot_log.info("Feedback set: message_id=%d feedback=%s", message_id, req.feedback)
+    return {"ok": True}
 
 
 @router.post("/{experiment_id}/message")
@@ -70,7 +85,7 @@ async def post_message(experiment_id: int, req: ChatMessageRequest):
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         assistant_text = "".join(full_text)
-        await db.add_chat_message(
+        message_id = await db.add_chat_message(
             experiment_id,
             "assistant",
             assistant_text,
@@ -79,6 +94,10 @@ async def post_message(experiment_id: int, req: ChatMessageRequest):
             total_tokens=(usage_info or {}).get("total_tokens"),
             latency_ms=latency_ms,
         )
-        yield f"event: done\ndata: {json.dumps({'usage': usage_info})}\n\n"
+        # The client only has a local placeholder id for this message until
+        # now (assigned before the real DB row existed) — send the real one
+        # back so feedback (thumbs up/down) can PATCH the actual row instead
+        # of 404ing against an id that was never persisted.
+        yield f"event: done\ndata: {json.dumps({'usage': usage_info, 'message_id': message_id})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

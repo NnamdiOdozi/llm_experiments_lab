@@ -108,14 +108,17 @@ class Settings(BaseSettings):
     # Starting an already-created (stopped) endpoint is a different
     # operation from creating one from scratch — no image pull/provisioning
     # needed, just resuming an existing container over VM — so it should be
-    # faster than the ~5min Nebius's own docs cite for creation. But 60s
-    # (nebius_cli_timeout_seconds) is confirmed too short: it timed out live
-    # 2026-07-12 and triggered the app's delete-outside-app self-heal path
-    # unnecessarily. No official Nebius number found for this specific case
-    # (checked docs.nebius.com/serverless/endpoints/manage) — this is a
-    # reasoned estimate, not a documented figure. Adjust once real timing
-    # data exists.
-    nebius_endpoint_start_timeout_seconds: int = 180
+    # faster than the ~5min Nebius's own docs cite for creation. But 180s
+    # was also confirmed too short live 2026-07-12: a start command timed
+    # out while the endpoint was still successfully coming up on Nebius's
+    # side, and the app abandoned it and created a duplicate. Bumped to
+    # 300s for headroom. No official Nebius number found for this specific
+    # case (checked docs.nebius.com/serverless/endpoints/manage) — this is
+    # a reasoned estimate, not a documented figure. Adjust once real timing
+    # data exists. Paired with worker_manager.py::ensure_worker() now
+    # checking live status on timeout before assuming deleted, so an
+    # under-estimate here is no longer as costly as it used to be.
+    nebius_endpoint_start_timeout_seconds: int = 300
 
     @field_validator("nebius_subnet_id")
     @classmethod

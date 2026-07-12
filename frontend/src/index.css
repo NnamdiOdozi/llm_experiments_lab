@@ -91,3 +91,13 @@ pre {
 .tag-completed { background: #14532d; color: var(--green); }
 .tag-failed { background: #450a0a; color: var(--red); }
 .tag-queued { background: #1e1b4b; color: #a78bfa; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+.typing-dots span {
+  animation: typing-bounce 1.2s infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }

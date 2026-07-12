@@ -109,5 +109,6 @@ export interface ChatMessage {
   completion_tokens: number | null;
   total_tokens: number | null;
   latency_ms: number | null;
+  feedback?: "up" | "down" | null;
   created_at: string;
 }

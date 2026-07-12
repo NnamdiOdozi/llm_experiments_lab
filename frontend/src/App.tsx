@@ -225,6 +225,24 @@ export default function App() {
           </button>
         </div>
       )}
+      {/* A remote run sits at "queued" for as long as the endpoint takes to
+          come up (cold GPU restarts can take several minutes) — this is
+          expected, not a failure, but looks identical to a real outage if
+          left unexplained. See docs/DESIGN_DECISIONS.md. */}
+      {runStatus?.status === "queued" && runStatus?.execution_backend !== "local" && (
+        <div style={{
+          background: "var(--accent-dim)",
+          color: "#fff",
+          padding: "8px 16px",
+          borderRadius: 6,
+          marginBottom: 12,
+          fontSize: 13,
+        }}>
+          Waiting for the serverless {device === "cuda" ? "GPU" : "CPU"} endpoint to start —
+          this can take a few minutes (up to ~5 for a cold GPU restart). Training starts
+          automatically once it's ready, no action needed.
+        </div>
+      )}
       {/* Hide when the current run is definitively local — a remote worker's
           idle status is irrelevant noise if you're not using it right now.
           See docs/DESIGN_DECISIONS.md §10. */}

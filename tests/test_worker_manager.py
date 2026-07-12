@@ -14,14 +14,17 @@ async def temp_db(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_live_endpoint_found_by_default(monkeypatch):
-    """create_new_worker() now checks for a live, already-RUNNING endpoint
-    before creating one — default every test to "none found" (matching
-    behavior before that check existed) so each test doesn't need its own
-    boilerplate mock for it. The one test that actually exercises adoption
-    overrides this itself."""
+    """create_new_worker() now checks for a live RUNNING endpoint and a
+    STOPPED one before creating fresh — default every test to "neither
+    found" (matching behavior before those checks existed) so each test
+    doesn't need its own boilerplate mock for them. Tests that actually
+    exercise adoption/restart override these themselves."""
     async def fake_find_running_endpoint(name):
         return None
+    async def fake_find_endpoint(name, state):
+        return None
     monkeypatch.setattr(endpoints_client, "find_running_endpoint", fake_find_running_endpoint)
+    monkeypatch.setattr(endpoints_client, "find_endpoint", fake_find_endpoint)
 
 
 async def test_create_new_worker_uses_the_correct_image_per_device_type(temp_db, monkeypatch):
@@ -175,6 +178,45 @@ async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicatin
     assert worker["endpoint_url"] == "https://adopted.tunnel.nebius.cloud"
 
 
+async def test_create_new_worker_restarts_stopped_endpoint_instead_of_creating(temp_db, monkeypatch):
+    """A stopped endpoint the app's DB doesn't know about (e.g. the local
+    worker_sessions row was lost, or it was created out-of-band) should be
+    restarted, not abandoned in favor of a brand new one — this was the
+    2026-07-12 GPU incident: a stopped endpoint sat idle while a second one
+    got created for the same device type."""
+    async def fake_find_endpoint(name, state):
+        assert name == "llm-lab-gpu-trainer"
+        assert state == "STOPPED"
+        return {"metadata": {"id": "aiendpoint-restarted"}}
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("should not create a new endpoint when a stopped one already exists")
+
+    started = {}
+
+    async def fake_start_endpoint(endpoint_id):
+        started["id"] = endpoint_id
+
+    async def fake_get_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-restarted"
+        return {
+            "spec": {"platform": "gpu-h100-1", "preset": "16vcpu-200gb-1gpu"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://restarted.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "find_endpoint", fake_find_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    worker = await worker_manager.ensure_worker("cuda")
+
+    assert started["id"] == "aiendpoint-restarted"
+    assert worker["nebius_endpoint_id"] == "aiendpoint-restarted"
+    assert worker["worker_status"] == WorkerStatus.READY
+    assert worker["endpoint_url"] == "https://restarted.tunnel.nebius.cloud"
+
+
 async def test_ensure_worker_debounces_when_already_provisioning(temp_db, monkeypatch):
     await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
     await db.update_worker_session(
@@ -252,6 +294,10 @@ async def test_ensure_worker_creates_new_endpoint_when_existing_one_was_deleted(
         return "aiendpoint-fresh"
 
     async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-deleted":
+            # Confirms genuinely gone (not just a slow start) before the
+            # self-heal-to-create path is allowed to fire.
+            raise endpoints_client.NebiusEndpointError("nebius ai endpoint get failed (exit 1): not found")
         assert endpoint_id == "aiendpoint-fresh"
         return {"status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]}}
 
@@ -264,6 +310,38 @@ async def test_ensure_worker_creates_new_endpoint_when_existing_one_was_deleted(
     assert worker["worker_status"] == WorkerStatus.READY
     assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
     assert worker["endpoint_url"] == "https://fresh.tunnel.nebius.cloud"
+
+
+async def test_ensure_worker_keeps_waiting_when_start_times_out_but_endpoint_still_exists(temp_db, monkeypatch):
+    """Regression test for the 2026-07-12 GPU incident: a start command
+    timing out does NOT mean the endpoint was deleted — a real GPU cold
+    start can outlast the client-side wait. Must check live status before
+    assuming deletion, and keep waiting on the same endpoint instead of
+    abandoning it and creating a wasteful duplicate."""
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session(
+        "worker-gpu", worker_status=WorkerStatus.STOPPED, nebius_endpoint_id="aiendpoint-slow",
+    )
+
+    async def fake_start_endpoint(endpoint_id):
+        raise endpoints_client.NebiusEndpointError("nebius ai endpoint start --id aiendpoint-slow timed out")
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("should not create a duplicate when the endpoint is just slow, not deleted")
+
+    async def fake_get_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-slow"
+        return {"status": {"state": "RUNNING", "public_endpoints": ["https://slow.tunnel.nebius.cloud"]}}
+
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    worker = await worker_manager.ensure_worker("cuda")
+
+    assert worker["nebius_endpoint_id"] == "aiendpoint-slow"
+    assert worker["worker_status"] == WorkerStatus.READY
+    assert worker["endpoint_url"] == "https://slow.tunnel.nebius.cloud"
 
 
 async def test_ensure_worker_creates_new_endpoint_when_it_disappears_mid_poll(temp_db, monkeypatch):

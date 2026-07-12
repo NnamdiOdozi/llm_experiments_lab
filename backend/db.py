@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     completion_tokens INTEGER,
     total_tokens INTEGER,
     latency_ms INTEGER,
+    feedback TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -108,6 +109,11 @@ _WORKER_SESSION_MIGRATIONS = [
     ("actual_preset", "TEXT"),
 ]
 
+# chat_messages columns added after initial schema
+_CHAT_MESSAGE_MIGRATIONS = [
+    ("feedback", "TEXT"),
+]
+
 
 async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DB_PATH)
@@ -129,6 +135,11 @@ async def init_db():
     for col_name, col_type in _WORKER_SESSION_MIGRATIONS:
         try:
             await db.execute(f"ALTER TABLE worker_sessions ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass  # Column already exists
+    for col_name, col_type in _CHAT_MESSAGE_MIGRATIONS:
+        try:
+            await db.execute(f"ALTER TABLE chat_messages ADD COLUMN {col_name} {col_type}")
         except Exception:
             pass  # Column already exists
     await db.commit()
@@ -284,6 +295,19 @@ async def get_chat_messages(experiment_id: int, limit: int | None = None) -> lis
         rows = list(reversed(await cursor.fetchall()))
     await db.close()
     return [dict(r) for r in rows]
+
+
+async def set_chat_message_feedback(message_id: int, feedback: str | None) -> bool:
+    """Sets or clears (feedback=None) thumbs up/down on one chat message.
+    Returns False if no row with that id exists."""
+    db = await get_db()
+    cursor = await db.execute(
+        "UPDATE chat_messages SET feedback = ? WHERE id = ?", (feedback, message_id),
+    )
+    await db.commit()
+    updated = cursor.rowcount > 0
+    await db.close()
+    return updated
 
 
 # ── Worker sessions (Track B remote job workers) ──
