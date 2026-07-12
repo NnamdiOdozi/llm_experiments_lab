@@ -18,8 +18,10 @@ RUN_ENV_SETUP=0
 
 set -euo pipefail
 
+GIT_BRANCH=nebius-serverless-experiments
 #: "${REPO_URL:?ERROR: REPO_URL must be set. Example: REPO_URL=https://github.com/user/repo.git}"
 REPO_URL="${REPO_URL:-https://github.com/NnamdiOdozi/llm_experiments_lab.git}"
+GIT_BRANCH="${GIT_BRANCH:-main}"
 PROJECT_DIR="${PROJECT_DIR:-$HOME/llm_experiments_lab}"
 REMOTE_ENV_FILE="/tmp/$(basename "$PROJECT_DIR").env"
 RUN_ENV_SETUP="${RUN_ENV_SETUP:-1}"
@@ -83,13 +85,24 @@ sudo apt-get install -y \
   build-essential \
   python3-dev \
   tmux \
-  htop
+  htop \
+  unzip
 
 echo "=== Install direnv ==="
 mkdir -p "$HOME/.local/bin"
 export bin_path="$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v direnv >/dev/null 2>&1; then
   curl -sfL https://direnv.net/install.sh | bash
+fi
+# The PATH export above only applies to this script's own process. Without
+# also persisting it into .bashrc, a *different* shell (fresh SSH login, or
+# `source ~/.bashrc` in an already-open one) won't have ~/.local/bin on
+# PATH, and the direnv hook eval'd just below would fail with
+# "direnv: command not found" even though it's actually installed.
+if ! grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+  echo "PATH export added to ~/.bashrc"
 fi
 if ! grep -q 'direnv hook bash' "$HOME/.bashrc" 2>/dev/null; then
   echo 'eval "$(direnv hook bash)"' >> "$HOME/.bashrc"
@@ -116,7 +129,9 @@ if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
   aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile nebius
   echo "AWS credentials written to nebius profile"
 fi
-echo "AWS_PROFILE=nebius" >> "$HOME/.bashrc"
+if ! grep -q '^AWS_PROFILE=nebius$' "$HOME/.bashrc" 2>/dev/null; then
+  echo "AWS_PROFILE=nebius" >> "$HOME/.bashrc"
+fi
 echo "AWS endpoint set to $AWS_ENDPOINT_URL ($AWS_REGION), profile=nebius"
 
 echo "=== Install Node.js 22 and Claude Code ==="
@@ -152,9 +167,11 @@ uv --version
 echo "=== Install Python 3.12 via uv ==="
 uv python install 3.12
 
-echo "=== Clone or pull repo ==="
+echo "=== Clone or pull repo (branch: $GIT_BRANCH) ==="
 if [ -d "$PROJECT_DIR/.git" ]; then
   cd "$PROJECT_DIR"
+  git fetch origin
+  git checkout "$GIT_BRANCH" 2>/dev/null || git checkout -t "origin/$GIT_BRANCH"
   git pull
 elif [ -d "$PROJECT_DIR" ]; then
   echo "Directory exists without .git — cloning into it"
@@ -162,10 +179,10 @@ elif [ -d "$PROJECT_DIR" ]; then
   git init
   git remote add origin "$REPO_URL"
   git fetch origin
-  git checkout -t origin/main
+  git checkout -t "origin/$GIT_BRANCH"
 else
   mkdir -p "$(dirname "$PROJECT_DIR")"
-  git clone "$REPO_URL" "$PROJECT_DIR"
+  git clone -b "$GIT_BRANCH" "$REPO_URL" "$PROJECT_DIR"
   cd "$PROJECT_DIR"
 fi
 

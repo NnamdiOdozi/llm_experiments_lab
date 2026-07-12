@@ -17,6 +17,10 @@
 
 set -euo pipefail
 
+# uv/direnv install to ~/.local/bin (see scripts/setup_gpu.sh); a fresh SSH
+# session that hasn't sourced ~/.bashrc since won't have it on PATH yet.
+export PATH="$HOME/.local/bin:$PATH"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="llm-lab-trainer-cpu"
 TAG="${1:-$(git -C "$REPO_ROOT" rev-parse --short HEAD)}"

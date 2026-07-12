@@ -1,0 +1,6 @@
+{
+  "template": "transformer",
+  "run_id": 1,
+  "experiment_id": 1,
+  "device": "cpu"
+}
