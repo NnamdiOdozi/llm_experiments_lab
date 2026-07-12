@@ -57,7 +57,16 @@ export function useChatStream(experimentId: number) {
       setUnavailable(false);
 
       const userMsg = localMessage(experimentId, "user", text);
-      setMessages((prev) => [...prev, userMsg]);
+      // Added immediately, not after the response arrives — this empty
+      // placeholder is what ChatPanel renders the typing indicator for, so
+      // it needs to exist for the whole request, not just once streaming
+      // starts (that gap can itself be a second or more).
+      const assistantMsg = localMessage(experimentId, "assistant", "");
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+      function removePlaceholder() {
+        setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
+      }
 
       try {
         const res = await fetch(`${BASE}/${experimentId}/message`, {
@@ -68,15 +77,15 @@ export function useChatStream(experimentId: number) {
 
         if (res.status === 503) {
           setUnavailable(true);
+          removePlaceholder();
           setLoading(false);
           return;
         }
         if (!res.ok || !res.body) {
+          removePlaceholder();
           throw new Error(`${res.status} ${res.statusText}`);
         }
 
-        const assistantMsg = localMessage(experimentId, "assistant", "");
-        setMessages((prev) => [...prev, assistantMsg]);
         let assistantText = "";
 
         const reader = res.body.getReader();
@@ -105,7 +114,16 @@ export function useChatStream(experimentId: number) {
             if (event === "error") {
               setError(parsed.error ?? "Chat stream failed");
             } else if (event === "done") {
-              // usage stats (parsed.usage) available here if ever surfaced in the UI
+              // Swap the local placeholder id for the real DB row id now
+              // that the message is actually persisted — needed so
+              // feedback (thumbs up/down) PATCHes a row that exists
+              // instead of 404ing against an id the server never assigned.
+              if (parsed.message_id != null) {
+                const realId = parsed.message_id;
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === assistantMsg.id ? { ...m, id: realId } : m))
+                );
+              }
             } else {
               assistantText += parsed.delta ?? "";
               const finalText = assistantText;

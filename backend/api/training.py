@@ -407,6 +407,16 @@ async def update_run_notes(run_id: int, req: UpdateRunNotesRequest):
 async def run_status(run_id: int):
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
+        if db_run.get("remote_run_id") is None:
+            # _start_remote_run hasn't finished mirroring this run to the
+            # endpoint yet — provisioning can take several minutes. Proxying
+            # now would build a URL with a None remote_run_id and 404/502,
+            # which the frontend can't tell apart from a genuine outage.
+            # The local row is still legitimately QUEUED at this point, so
+            # just serve that instead of failing. See docs/DESIGN_DECISIONS.md.
+            local_status = await db.get_run_status_from_db(run_id)
+            if local_status is not None:
+                return local_status
         try:
             result = await _proxy(db_run, "GET", "/api/training/{run_id}/status")
         except httpx.HTTPError as exc:
@@ -468,10 +478,34 @@ def read_metrics_from_disk(run_id: int) -> list[dict]:
 async def get_metrics(run_id: int):
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
+        if db_run.get("remote_run_id") is None:
+            # Same reasoning as run_status() — nothing to proxy to yet while
+            # _start_remote_run is still mirroring the run, and there
+            # genuinely are no metrics for a run that hasn't started. See
+            # docs/DESIGN_DECISIONS.md. Without this, the frontend's poll
+            # loop calls this right after a successful status call and its
+            # failure alone was enough to trip the disconnect banner, even
+            # though status was already correctly reporting "queued".
+            return []
         try:
-            return await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
+            metrics = await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote metrics fetch failed: {exc}")
+        if metrics:
+            # Mirrors what train_worker.py::write_metric() does for local
+            # runs — without this, train_loss_history on the local row stays
+            # '[]' forever for a remote run (nothing else ever writes it),
+            # so the chatbot's loss-trend snapshot (context.py) always sees
+            # no data no matter how far training has actually progressed.
+            # Piggybacks on this route rather than adding a separate proxy
+            # call, since the frontend already polls it every ~2s anyway.
+            # See docs/DESIGN_DECISIONS.md.
+            await db.update_training_run(
+                run_id,
+                train_loss_history=json.dumps([m for m in metrics if "train_loss" in m]),
+                val_loss_history=json.dumps([m for m in metrics if "val_loss" in m]),
+            )
+        return metrics
     # Always read from disk (worker writes metrics.jsonl)
     disk_metrics = read_metrics_from_disk(run_id)
     if disk_metrics:

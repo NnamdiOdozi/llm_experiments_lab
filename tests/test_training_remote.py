@@ -8,6 +8,7 @@ backend="nebius_endpoint" — these tests only cover the remote branch.
 """
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -388,6 +389,88 @@ async def test_get_status_syncs_local_row_and_touches_worker_on_terminal_transit
     assert db_run["current_step"] == 1000
     session = await db.get_worker_session("worker-cpu")
     assert session["last_activity_at"] != "2020-01-01 00:00:00"
+
+
+async def test_get_status_serves_local_queued_status_while_still_provisioning(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): while _start_remote_run is still
+    mirroring the run to the endpoint (can take several minutes),
+    remote_run_id is None — proxying anyway builds a URL with "None" in it
+    and fails every single poll, which the frontend can't distinguish from
+    a genuine outage ("backend disconnected" for a run that's simply still
+    starting up). Must serve the local QUEUED status instead, and must not
+    touch the proxy client at all."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123",
+    )
+
+    def fail_if_called(timeout=30):
+        raise AssertionError("should not proxy while remote_run_id is still None")
+
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", fail_if_called)
+
+    resp = await client.get(f"/api/training/{run_id}/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == run_id
+    assert body["status"] == "queued"
+    assert body["execution_backend"] == "nebius_endpoint"
+
+
+async def test_get_metrics_returns_empty_list_while_still_provisioning(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): fetchMetrics is called right after
+    fetchRunStatus on every frontend poll — a 502 here alone was enough to
+    trip the "backend disconnected" banner even after run_status() was
+    fixed to report "queued" correctly, since the frontend treats either
+    call failing as a disconnect. Must not proxy while remote_run_id is
+    still None, and must not touch the network at all."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123",
+    )
+
+    def fail_if_called(timeout=30):
+        raise AssertionError("should not proxy while remote_run_id is still None")
+
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", fail_if_called)
+
+    resp = await client.get(f"/api/training/{run_id}/metrics")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_get_metrics_syncs_loss_history_to_local_row_for_remote_run(temp_db, client, monkeypatch):
+    """Regression test (2026-07-12): train_loss_history on the local row
+    never got written for a remote run — nothing else writes it, so the
+    chatbot's loss-trend snapshot always saw '[]' no matter how far a
+    Nebius run had actually progressed. get_metrics() must mirror the
+    proxied metrics into the local row, same shape write_metric() uses for
+    local runs."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session("worker-gpu", endpoint_url="https://gpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([
+        FakeResponse([
+            {"step": 20, "train_loss": 1.8, "val_loss": 1.9},
+            {"step": 40, "train_loss": 1.5, "val_loss": 1.6},
+        ]),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get(f"/api/training/{run_id}/metrics")
+
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+    db_run = await db.get_training_run(run_id)
+    train_history = json.loads(db_run["train_loss_history"])
+    assert len(train_history) == 2
+    assert train_history[-1]["train_loss"] == 1.5
 
 
 async def test_list_open_runs_overlays_live_status_for_remote_run(temp_db, client, monkeypatch):

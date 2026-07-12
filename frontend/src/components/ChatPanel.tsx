@@ -1,14 +1,26 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, CSSProperties } from "react";
 import { useChatStream } from "../hooks/useChatStream";
+import { setChatMessageFeedback } from "../hooks/useApi";
+import { ChatMessage } from "../types";
 
 interface Props {
   experimentId: number;
 }
 
+const iconButtonStyle: CSSProperties = {
+  background: "none",
+  border: "none",
+  color: "var(--text-dim)",
+  cursor: "pointer",
+  padding: 0,
+  lineHeight: 0,
+};
+
 export default function ChatPanel({ experimentId }: Props) {
   const { messages, sendMessage, loading, error, unavailable } = useChatStream(experimentId);
   const [input, setInput] = useState("");
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [feedbackOverrides, setFeedbackOverrides] = useState<Record<number, "up" | "down" | null>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,6 +39,20 @@ export default function ChatPanel({ experimentId }: Props) {
     await navigator.clipboard.writeText(content);
     setCopiedId(id);
     setTimeout(() => setCopiedId((current) => (current === id ? null : current)), 1500);
+  }
+
+  function currentFeedback(m: ChatMessage): "up" | "down" | null {
+    return feedbackOverrides[m.id] !== undefined ? feedbackOverrides[m.id] : m.feedback ?? null;
+  }
+
+  async function handleFeedback(m: ChatMessage, value: "up" | "down") {
+    const next = currentFeedback(m) === value ? null : value;
+    setFeedbackOverrides((prev) => ({ ...prev, [m.id]: next }));
+    try {
+      await setChatMessageFeedback(m.id, next);
+    } catch {
+      // Best-effort — a failed feedback PATCH isn't worth surfacing an error for
+    }
   }
 
   if (unavailable) {
@@ -69,32 +95,60 @@ export default function ChatPanel({ experimentId }: Props) {
               whiteSpace: "pre-wrap",
             }}
           >
-            <div>{m.content}</div>
-            {m.role === "assistant" && (
-              <button
-                onClick={() => handleCopy(m.id, m.content)}
-                title="Copy response"
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-dim)",
-                  cursor: "pointer",
-                  padding: "4px 0 0",
-                  display: "block",
-                  lineHeight: 0,
-                }}
-              >
-                {copiedId === m.id ? (
+            {m.role === "assistant" && m.content === "" ? (
+              <div className="typing-dots" style={{ display: "flex", gap: 3, padding: "4px 2px" }}>
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text-dim)" }} />
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text-dim)" }} />
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text-dim)" }} />
+              </div>
+            ) : (
+              <div>{m.content}</div>
+            )}
+            {m.role === "assistant" && m.content !== "" && (
+              <div style={{ display: "flex", gap: 10, paddingTop: 4 }}>
+                <button
+                  onClick={() => handleCopy(m.id, m.content)}
+                  title="Copy response"
+                  style={iconButtonStyle}
+                >
+                  {copiedId === m.id ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="9" y="9" width="11" height="11" rx="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={() => handleFeedback(m, "up")}
+                  title="Good response"
+                  style={{
+                    ...iconButtonStyle,
+                    color: currentFeedback(m) === "up" ? "var(--green)" : "var(--text-dim)",
+                  }}
+                >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <polyline points="20 6 9 17 4 12" />
+                    <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z" />
+                    <path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
                   </svg>
-                ) : (
+                </button>
+                <button
+                  onClick={() => handleFeedback(m, "down")}
+                  title="Bad response"
+                  style={{
+                    ...iconButtonStyle,
+                    color: currentFeedback(m) === "down" ? "var(--red)" : "var(--text-dim)",
+                  }}
+                >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="9" y="9" width="11" height="11" rx="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z" />
+                    <path d="M17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3" />
                   </svg>
-                )}
-              </button>
+                </button>
+              </div>
             )}
           </div>
         ))}
@@ -127,7 +181,7 @@ export default function ChatPanel({ experimentId }: Props) {
           }}
         />
         <button className="btn-primary" onClick={handleSubmit} disabled={loading}>
-          {loading ? "..." : "Send"}
+          Send
         </button>
       </div>
     </div>

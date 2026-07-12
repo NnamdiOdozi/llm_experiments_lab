@@ -724,6 +724,113 @@ copy-forward step to get wrong. The old experiment-level `notes_md`
 column/route in `backend/api/experiments.py` was left in place, unused by
 the frontend now, rather than deleted — not worth the churn for a POC.
 
+## §19: Four fixes from a real GPU incident (2026-07-12)
+
+A live GPU run surfaced several compounding gaps at once — a stopped
+endpoint got abandoned instead of restarted, the frontend showed
+"disconnected" for four minutes of totally normal provisioning, the
+chatbot reported an empty loss trend for a run that actually completed,
+and the chatbot fabricated "I'm checking with the engineering team" when
+asked about it. Fixed independently, documented together since they were
+found together:
+
+1. **Stopped endpoint abandoned instead of restarted.** `create_new_worker()`
+   (`backend/nebius/worker_manager.py`) only ever checked for a live
+   RUNNING endpoint to adopt (`find_running_endpoint`) — never a STOPPED
+   one it could cheaply restart. Generalized
+   `endpoints_client.find_running_endpoint` into `find_endpoint(name,
+   state)`, and `create_new_worker` now checks RUNNING → STOPPED (restart
+   via `start_endpoint`) → create fresh, in that order. Lives in the shared
+   kernel, so both CPU and GPU get it, and both the running app and
+   `scripts/create_nebius_endpoint.py` benefit.
+2. **"Disconnected" banner during totally normal provisioning.** `_proxy()`
+   builds the remote request path from `db_run["remote_run_id"]`, which
+   stays `None` until `_start_remote_run`'s background task finishes
+   mirroring the run — which can take several minutes for a cold GPU.
+   Every poll during that window built a URL with `None` in it and failed,
+   indistinguishable from a real outage. Fix: `run_status()` now checks
+   `remote_run_id is None` first and serves the local (already `QUEUED`)
+   status instead of proxying — no new status value needed, and no
+   frontend changes, since `QUEUED` was already a normal status the UI
+   handles.
+3. **Chatbot always saw `train_loss_history: []` for remote runs.**
+   Confirmed via a real transcript: a completed GPU run's loss trend was
+   empty even though training genuinely finished. Root cause:
+   `train_loss_history` is written in exactly one place —
+   `train_worker.py::write_metric()` — which only ever runs inside the
+   *local* training loop. A remote run's metrics live only on the
+   Nebius container's own disk; nothing copied them back. Fix:
+   `get_metrics()` (`backend/api/training.py`) now mirrors proxied remote
+   metrics into the local row's `train_loss_history`/`val_loss_history`
+   columns on every poll, piggybacking on the request the frontend already
+   fires every ~2s rather than adding a new one.
+4. **Chatbot fabricated follow-up action.** The same transcript included
+   "I'm checking with the engineering team about fixes" — invented; the
+   chatbot has no such capability and no such process exists. It also
+   guessed the bug lived in `backend/training/runner.py` (wrong file)
+   despite its own system prompt saying to admit lack of visibility rather
+   than guess. Added an explicit line to `_SYSTEM_PROMPT`
+   (`backend/chatbot/context.py`) forbidding claims of taking action
+   outside the conversation.
+
+**Follow-up, same day:** fix #2 above only patched `run_status()` —
+`get_metrics()` has the exact same `remote_run_id is None` proxy bug, and
+the frontend's poll loop (`App.tsx::pollStatus`) calls both endpoints back
+to back, treating *either* one failing as a disconnect. So the red
+"backend disconnected" banner kept appearing during totally normal
+provisioning even after status correctly reported `queued` — the two
+signals were contradicting each other on screen. Applied the identical
+short-circuit to `get_metrics()` (return `[]` while `remote_run_id` is
+`None` — there genuinely are no metrics yet). Also added a dedicated blue
+"waiting for the serverless endpoint to start, up to ~5 min for a cold
+GPU" banner shown specifically when `status === "queued"` on a remote run,
+so a legitimately-slow cold start reads as "this is expected, hang on"
+instead of looking identical to a real outage.
+
+**Second follow-up, same day — the actual root cause of fix #1's remaining
+gap:** deep log forensics (grepping every session log for one specific run)
+showed `ensure_worker()`'s own `start_endpoint()` call timing out at 180s
+while the GPU endpoint was still genuinely, successfully starting up on
+Nebius's side. The code assumed a start timeout meant "deleted outside the
+app" and abandoned the endpoint, creating a wasteful duplicate — the run
+that triggered this was left `failed` even though the endpoint it was
+waiting on came up fine on its own shortly after. Two changes:
+`nebius_endpoint_start_timeout_seconds` raised from 180s to 300s
+(`config/settings.py`), and — more importantly —
+`ensure_worker()` (`backend/nebius/worker_manager.py`) now calls
+`get_endpoint()` on a start timeout *before* assuming deletion: if the
+endpoint still exists in any state, it keeps waiting on it; only falls
+back to creating fresh if `get_endpoint` itself confirms the endpoint is
+genuinely gone. A client-side timeout is a fact about *our* patience, not
+about whether the remote resource still exists — conflating the two was
+the actual bug, not just the timeout being too short.
+
+## §20: Lab Assistant UX — typing indicator, feedback, response length
+
+Three small requested changes, one real bug found while building the
+second one:
+
+- **Typing indicator**: the assistant message bubble is added to state with
+  empty content the moment streaming starts (`useChatStream.ts`), before
+  any delta arrives. `ChatPanel.tsx` renders three CSS-animated dots
+  (`.typing-dots` in `index.css`) whenever an assistant message's content
+  is still `""`, and swaps to the real text automatically once the first
+  token lands — no extra state needed, the emptiness itself is the signal.
+- **Thumbs up/down**: new `feedback` column on `chat_messages`
+  (`backend/db.py`), `PATCH /api/chatbot/messages/{message_id}/feedback`.
+  Building this surfaced a real bug: assistant messages get a client-side
+  negative placeholder id the instant streaming starts
+  (`useChatStream.ts::localMessage`), and that id was never reconciled
+  with the real DB row id once `add_chat_message()` persisted it —
+  harmless for the copy button (never left the browser) but would have
+  made every feedback PATCH 404 against an id the server never assigned.
+  Fixed by having the `done` SSE event include the real `message_id`,
+  which the client swaps in for the placeholder.
+- **Response length**: `_SYSTEM_PROMPT` (`backend/chatbot/context.py`) now
+  asks for ~300 words. Deliberately a soft prompt instruction, not a
+  backend truncation — cutting a response off at N characters would chop
+  it mid-sentence, which is worse than an occasionally-long answer.
+
 ---
 
 ## File Layout

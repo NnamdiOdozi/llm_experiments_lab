@@ -69,7 +69,7 @@ describe("ChatPanel", () => {
   it("disables the send button while loading", () => {
     mockHook({ loading: true });
     render(<ChatPanel experimentId={1} />);
-    expect(screen.getByRole("button", { name: /\.\.\./ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
   });
 
   it("submits on Enter but not on Shift+Enter", () => {

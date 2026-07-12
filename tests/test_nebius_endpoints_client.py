@@ -111,6 +111,20 @@ async def test_find_running_endpoint_returns_none_when_no_match(monkeypatch):
     assert await endpoints_client.find_running_endpoint("llm-lab-cpu-trainer") is None
 
 
+async def test_find_endpoint_matches_by_name_and_arbitrary_state(monkeypatch):
+    async def fake_run_cli(*args, **kwargs):
+        return json.dumps({"items": [
+            {"metadata": {"id": "aiendpoint-stopped", "name": "llm-lab-cpu-trainer"}, "status": {"state": "STOPPED"}},
+            {"metadata": {"id": "aiendpoint-running", "name": "llm-lab-cpu-trainer"}, "status": {"state": "RUNNING"}},
+        ]})
+
+    monkeypatch.setattr(endpoints_client, "_run_cli", fake_run_cli)
+
+    found = await endpoints_client.find_endpoint("llm-lab-cpu-trainer", "STOPPED")
+
+    assert found["metadata"]["id"] == "aiendpoint-stopped"
+
+
 async def test_get_endpoint_parses_json(monkeypatch):
     async def fake_run_cli(*args):
         return json.dumps({"status": {"state": "RUNNING"}})

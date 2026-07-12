@@ -40,7 +40,8 @@ def endpoint_create_kwargs(device_type: str) -> dict:
 
 
 async def create_new_worker(session_id: str, device_type: str) -> str:
-    """Create a fresh endpoint and point session_id at it.
+    """Get session_id a usable endpoint — adopts a live one, restarts a
+    stopped one, or creates fresh, in that preference order.
 
     Idempotent w.r.t. the session_id row: called both for a brand-new
     session (no row yet) and for recovery when an existing session's
@@ -54,8 +55,9 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
         await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
 
     kwargs = endpoint_create_kwargs(device_type)
-    existing = await endpoints_client.find_running_endpoint(kwargs["name"])
-    if existing is not None:
+    running = await endpoints_client.find_running_endpoint(kwargs["name"])
+    stopped = None if running is not None else await endpoints_client.find_endpoint(kwargs["name"], "STOPPED")
+    if running is not None:
         # A live endpoint with this name is already RUNNING but wasn't in
         # our DB (e.g. created out-of-band) — adopt it instead of creating
         # a duplicate. Left at PROVISIONING here regardless; ensure_worker's
@@ -63,9 +65,23 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
         # actual_platform/actual_preset within one poll cycle (a few
         # seconds), same as a freshly created endpoint — no need to
         # duplicate that population logic here.
-        endpoint_id = existing["metadata"]["id"]
+        endpoint_id = running["metadata"]["id"]
         nebius_log.info(
             "Adopted existing live endpoint instead of creating a duplicate — "
+            "session_id=%s endpoint_id=%s name=%s", session_id, endpoint_id, kwargs["name"],
+        )
+    elif stopped is not None:
+        # A stopped endpoint with this name is just as good as a running one
+        # — restart it rather than abandoning it and paying for a fresh
+        # create. Only issues the start command here; ensure_worker's own
+        # polling loop (below in that function) already waits for RUNNING
+        # and populates endpoint_url regardless of how we got to
+        # PROVISIONING, so no separate wait logic is needed here. See
+        # docs/DESIGN_DECISIONS.md.
+        endpoint_id = stopped["metadata"]["id"]
+        await endpoints_client.start_endpoint(endpoint_id)
+        nebius_log.info(
+            "Restarted stopped endpoint instead of creating a new one — "
             "session_id=%s endpoint_id=%s name=%s", session_id, endpoint_id, kwargs["name"],
         )
     else:
@@ -106,7 +122,7 @@ async def ensure_worker(device: str) -> dict:
     if session is None or session["worker_status"] == WorkerStatus.SHUTTING_DOWN:
         # A SHUTTING_DOWN worker can't be started back up — attempting
         # start_endpoint() on it would just wait out its full timeout (up to
-        # 180s) before self-healing to a fresh create anyway. Skip straight
+        # 300s) before self-healing to a fresh create anyway. Skip straight
         # to create instead of wasting that wait: a request shouldn't be
         # slowed down by a worker that's mid-deletion, only genuinely
         # blocked by one that's still becoming useful (PROVISIONING/STARTING
@@ -119,15 +135,31 @@ async def ensure_worker(device: str) -> dict:
             await db.update_worker_session(session_id, worker_status=WorkerStatus.STARTING)
             nebius_log.info("Worker starting — session_id=%s endpoint_id=%s", session_id, endpoint_id)
         except endpoints_client.NebiusEndpointError as exc:
-            # Endpoint was likely deleted outside the app (console, another
-            # process, etc.) — our DB row is stale. Self-heal by creating a
-            # fresh one rather than failing the request. See 2026-07-11 session.
-            nebius_log.warning(
-                "Existing endpoint could not be started, assuming it was deleted "
-                "outside the app — session_id=%s endpoint_id=%s error=%s. Creating a new one.",
-                session_id, endpoint_id, exc,
-            )
-            endpoint_id = await create_new_worker(session_id, device_type)
+            # A start-command timeout does NOT mean the endpoint is gone —
+            # confirmed live 2026-07-12: a real GPU cold start outlasted our
+            # own client-side wait, the app assumed "deleted outside the
+            # app" and abandoned a perfectly good endpoint that went on to
+            # finish starting successfully on Nebius's side, creating a
+            # wasteful duplicate. Check live status before giving up: only
+            # self-heal to a fresh create if the endpoint is genuinely gone
+            # (get_endpoint itself fails), not merely slow. See
+            # docs/DESIGN_DECISIONS.md.
+            try:
+                await endpoints_client.get_endpoint(endpoint_id)
+                nebius_log.warning(
+                    "Start command timed out but endpoint still exists — treating as "
+                    "slow, not deleted, and continuing to wait on it — "
+                    "session_id=%s endpoint_id=%s error=%s", session_id, endpoint_id, exc,
+                )
+                await db.update_worker_session(session_id, worker_status=WorkerStatus.STARTING)
+            except endpoints_client.NebiusEndpointError:
+                nebius_log.warning(
+                    "Existing endpoint could not be started and no longer exists — "
+                    "assuming it was deleted outside the app — session_id=%s "
+                    "endpoint_id=%s error=%s. Creating a new one.",
+                    session_id, endpoint_id, exc,
+                )
+                endpoint_id = await create_new_worker(session_id, device_type)
 
     max_attempts = max(
         1, settings.nebius_endpoint_ready_timeout_seconds // settings.nebius_endpoint_poll_interval_seconds,

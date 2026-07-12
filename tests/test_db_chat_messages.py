@@ -46,3 +46,22 @@ async def test_get_chat_messages_respects_limit_and_order(temp_db):
 async def test_get_chat_messages_empty_for_unknown_experiment(temp_db):
     messages = await db.get_chat_messages(999999)
     assert messages == []
+
+
+async def test_set_chat_message_feedback_sets_and_clears(temp_db):
+    exp_id = temp_db
+    message_id = await db.add_chat_message(exp_id, "assistant", "Some answer")
+
+    updated = await db.set_chat_message_feedback(message_id, "up")
+    assert updated is True
+    messages = await db.get_chat_messages(exp_id)
+    assert messages[0]["feedback"] == "up"
+
+    await db.set_chat_message_feedback(message_id, None)
+    messages = await db.get_chat_messages(exp_id)
+    assert messages[0]["feedback"] is None
+
+
+async def test_set_chat_message_feedback_returns_false_for_unknown_message(temp_db):
+    updated = await db.set_chat_message_feedback(999999, "down")
+    assert updated is False

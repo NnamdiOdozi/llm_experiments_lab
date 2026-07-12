@@ -123,6 +123,18 @@ async def list_endpoints() -> list[dict]:
     return json.loads(output).get("items", [])
 
 
+async def find_endpoint(name: str, state: str) -> dict | None:
+    """Live Nebius endpoint matching name and the given lifecycle state, or
+    None. Only exact state matches — Nebius's transient starting/
+    provisioning state strings aren't confirmed, so anything not asked for
+    explicitly falls through to normal create/restart behavior rather than
+    risk adopting something not actually usable yet."""
+    for ep in await list_endpoints():
+        if ep.get("metadata", {}).get("name") == name and ep.get("status", {}).get("state") == state:
+            return ep
+    return None
+
+
 async def find_running_endpoint(name: str) -> dict | None:
     """Live Nebius endpoint matching name and already RUNNING, or None.
 
@@ -131,15 +143,8 @@ async def find_running_endpoint(name: str) -> dict | None:
     wrote to worker_sessions, or any other out-of-band creation) instead of
     blindly creating a duplicate — confirmed live 2026-07-12: a manually
     created CPU endpoint the app didn't know about got duplicated this way.
-    Only RUNNING is checked — Nebius's transient starting/provisioning state
-    strings aren't confirmed, so anything else still falls through to
-    normal create behavior rather than risk adopting something not actually
-    usable yet.
     """
-    for ep in await list_endpoints():
-        if ep.get("metadata", {}).get("name") == name and ep.get("status", {}).get("state") == "RUNNING":
-            return ep
-    return None
+    return await find_endpoint(name, "RUNNING")
 
 
 async def get_endpoint(endpoint_id: str) -> dict:
