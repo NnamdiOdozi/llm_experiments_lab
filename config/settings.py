@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -96,6 +97,23 @@ class Settings(BaseSettings):
     # Guards every single `nebius` CLI invocation — without this, a stuck CLI call
     # (seen live 2026-07-11: hung on stdin under uvicorn) blocks the request forever.
     nebius_cli_timeout_seconds: int = 60
+
+    @field_validator("nebius_subnet_id")
+    @classmethod
+    def _validate_subnet_id(cls, v: str) -> str:
+        # Fails fast at settings-load time instead of ~5 minutes into a
+        # build/push, deep inside a `nebius ai endpoint create` API error.
+        # Caught live 2026-07-12: NEBIUS_SUBNET_ID in .env held a subnet's
+        # NAME ("default-subnet-...") instead of its ID ("vpcsubnet-...") —
+        # `nebius vpc subnet list`'s metadata.id is the value that belongs
+        # here, not metadata.name.
+        if not v.startswith("vpcsubnet-"):
+            raise ValueError(
+                f"nebius_subnet_id must start with 'vpcsubnet-' (got {v!r}) — "
+                "this looks like a subnet NAME, not its ID. Check NEBIUS_SUBNET_ID "
+                "in .env against `nebius vpc subnet list`'s metadata.id field."
+            )
+        return v
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

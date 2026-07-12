@@ -436,6 +436,63 @@ relying on it somewhere as consequential as a production image build.
 
 ---
 
+## 13. VM-Attached Service Accounts Need No Nebius Profile — and Docker Registry Auth Splits Root/User
+
+**Found live on a fresh GPU VM (2026-07-12), diagnosing a `docker push`
+failure step by step rather than guessing:**
+
+**a) `nebius profile create` is the wrong tool for a VM-attached service
+account.** The VM was created with `--service-account-id` pointing at
+`mlflow-sa` (see other Nebius projects' `nebius_provision.sh` for that
+flag), which is Nebius's actual mechanism for "VM-attached SA" — not
+something `setup_gpu.sh` originally accounted for at all (it never
+installed the `nebius` CLI in the first place). Running `nebius profile
+create` interactively offered two paths — federation (browser OAuth,
+which fails outright on a headless VM: it opens `http://127.0.0.1:<port>`,
+unreachable from a local browser) or a manual service-account key file
+(which was never generated for `mlflow-sa` and isn't needed). Confirmed via
+Nebius's own docs (their in-console assistant, citing
+"How to work with the Nebius AI Cloud CLI on a Compute virtual machine")
+that an attached SA's token is read automatically from
+`/mnt/cloud-metadata/token` — `nebius iam whoami` works immediately with
+**no profile created at all**.
+
+**b) `nebius registry configure-helper` splits across root/user in a way
+that isn't obvious from the error message.** It does two things: installs
+a `docker-credential-nebius` binary into `/usr/local/bin` (needs root to
+write), and updates `~/.docker/config.json` to reference that helper
+(inherently per-user — this is Docker's own config design, not a Nebius
+quirk, and the same split exists with AWS ECR's/GCP's credential helpers).
+Running the whole command under `sudo` to satisfy the binary write
+silently wrote the config to `/root/.docker/config.json` instead of the
+real user's — Nebius's own quickstart explicitly warns against this
+("Do not run Docker commands as root. The credential helper is configured
+for your user account, so root may not be able to access the
+credentials."), but it's easy to miss until `docker push` fails for a
+completely different-looking reason afterward.
+
+**Fix:** `setup_gpu.sh` now (1) calls the existing
+`scripts/install_nebius_cli.sh` after the repo clone (it already no-ops
+gracefully when the manual-key env vars are absent — exactly the
+VM-attached-SA case), (2) runs `sudo nebius registry configure-helper`
+once for the root-only binary write, then (3) copies the resulting
+`/root/.docker/config.json` into `$HOME/.docker/config.json` and fixes
+ownership to the real user, rather than trying to avoid `sudo` entirely or
+running docker itself as root.
+
+**General lesson:** a permission error on one specific file
+(`/usr/local/bin/docker-credential-nebius: permission denied`) looks like
+it wants a blanket `sudo` on the whole command — but the fix that actually
+works is scoping `sudo` to just the part of the operation that needs it
+(the binary write) and keeping everything else (the docker daemon group
+membership, the docker config file, actual `docker build`/`push` calls)
+on the regular user. Mixing root and non-root across steps of one workflow
+is what caused the confusion here, not the underlying design of either
+Docker's or Nebius's credential mechanism — both are standard, shared
+patterns across every major cloud registry.
+
+---
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

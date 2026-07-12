@@ -88,6 +88,32 @@ sudo apt-get install -y \
   htop \
   unzip
 
+echo "=== Install Docker ==="
+if ! command -v docker >/dev/null 2>&1; then
+  curl -fsSL https://get.docker.com | sudo sh
+fi
+# Docker's installer doesn't add the invoking user to the docker group —
+# without this, `docker build`/`docker push` fail with a permission error
+# (not "command not found"). Group membership only applies to *new* shell
+# sessions, so this can't take effect in the current one — see the echo
+# below. Confirmed as a real, previously-hit issue on a different Nebius VM;
+# see nebius-academy-ddp/LESSONS_LEARNED.md from an earlier project.
+if ! groups "$USER" | grep -q '\bdocker\b'; then
+  sudo usermod -aG docker "$USER"
+  echo "Added $USER to the docker group — log out and back in (or run 'newgrp docker') before using docker in this session."
+fi
+echo "Docker: $(docker --version 2>&1 || echo 'not installed')"
+
+echo "=== Nebius registry auth (needed for docker push) ==="
+if ! command -v nebius >/dev/null 2>&1; then
+  curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+  export PATH="$HOME/.nebius/bin:$PATH"
+fi
+sudo nebius registry configure-helper
+mkdir -p "$HOME/.docker"
+sudo cp /root/.docker/config.json "$HOME/.docker/config.json"
+sudo chown "$USER:$USER" "$HOME/.docker/config.json"
+
 echo "=== Install direnv ==="
 mkdir -p "$HOME/.local/bin"
 export bin_path="$HOME/.local/bin"

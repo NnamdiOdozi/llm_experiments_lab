@@ -54,6 +54,15 @@ async def create_endpoint(
     name: str, image: str, platform: str, preset: str, container_port: int, subnet_id: str,
 ) -> str:
     """Create an endpoint hosting the backend image. Returns the endpoint_id."""
+    # `endpoint create` itself can take several minutes to return (observed
+    # live 2026-07-12: still short of returning past 60s while the endpoint
+    # was already visible and "starting" in the Nebius console) — the
+    # default nebius_cli_timeout_seconds (60s, sized for quick calls like
+    # get/start/stop) killed the subprocess before it returned, even though
+    # the resource had already been created server-side. Reuses
+    # nebius_endpoint_ready_timeout_seconds (6min) rather than inventing a
+    # separate setting, since that's already this project's "how long CPU
+    # endpoint startup can take" constant.
     output = await _run_cli(
         "ai", "endpoint", "create",
         "--name", name,
@@ -63,6 +72,7 @@ async def create_endpoint(
         "--preset", preset,
         "--subnet-id", subnet_id,
         "--format", "json",
+        timeout=settings.nebius_endpoint_ready_timeout_seconds,
     )
     return json.loads(output)["metadata"]["id"]
 
