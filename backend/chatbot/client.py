@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 
+from backend.chatbot.tools import TOOL_SCHEMAS, execute_tool_call
 from backend.logging_config import chatbot_log, error_log
 from config.settings import settings
 
@@ -25,7 +26,9 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def stream_completion(messages: list[dict]) -> AsyncIterator[tuple[str, dict | None]]:
+async def stream_completion(
+    messages: list[dict], tool_context: dict | None = None
+) -> AsyncIterator[tuple[str, dict | None]]:
     """Stream a chat completion from Token Factory.
 
     Yields (text_delta, usage) pairs. usage is None on every chunk except
@@ -37,9 +40,50 @@ async def stream_completion(messages: list[dict]) -> AsyncIterator[tuple[str, di
         "Token Factory request: model=%s messages=%d", settings.token_factory_model, len(messages)
     )
     try:
+        stream_messages = list(messages)
+        if tool_context is not None:
+            first = await client.chat.completions.create(
+                model=settings.token_factory_model,
+                messages=stream_messages,
+                tools=TOOL_SCHEMAS,
+                tool_choice="auto",
+                stream=False,
+            )
+            first_choice = first.choices[0]
+            first_message = first_choice.message
+            tool_calls = getattr(first_message, "tool_calls", None) or []
+            if tool_calls:
+                if hasattr(first_message, "model_dump"):
+                    stream_messages.append(first_message.model_dump(exclude_none=True))
+                else:
+                    stream_messages.append(first_message)
+                for call in tool_calls:
+                    result = execute_tool_call(
+                        call.function.name,
+                        call.function.arguments,
+                        allowed_run_ids=tool_context.get("run_ids", []),
+                        template=tool_context.get("template", "transformer"),
+                    )
+                    stream_messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": result}
+                    )
+                chatbot_log.info("Executed %d chatbot tool call(s)", len(tool_calls))
+            else:
+                usage = getattr(first, "usage", None)
+                content = first_message.content or ""
+                if content:
+                    yield content, None
+                if usage is not None:
+                    yield "", {
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens,
+                    }
+                return
+
         stream = await client.chat.completions.create(
             model=settings.token_factory_model,
-            messages=messages,
+            messages=stream_messages,
             stream=True,
             stream_options={"include_usage": True},
         )
