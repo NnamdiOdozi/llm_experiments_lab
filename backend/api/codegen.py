@@ -1,13 +1,16 @@
 """Code view + export endpoints."""
 
+import io
 import json
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 from backend import db
 from backend.export import build_script, build_notebook
+from config.settings import settings
 
 router = APIRouter(prefix="/api/code", tags=["code"])
 
@@ -79,4 +82,32 @@ async def export_notebook(experiment_id: int):
         notebook_json,
         media_type="application/x-ipynb+json",
         headers={"Content-Disposition": f"attachment; filename=experiment_{experiment_id}.ipynb"},
+    )
+
+
+@router.get("/{experiment_id}/export.zip")
+async def export_bundle(experiment_id: int, run_id: int | None = None):
+    """Download full export bundle: script, notebook, config, notes, and
+    (if run_id given) the run's metrics — see docs §6.2 export bundle spec.
+    """
+    exp = await db.get_experiment(experiment_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+    config = json.loads(exp["config_json"])
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("export.py", build_script(config))
+        zf.writestr("export.ipynb", build_notebook(config))
+        zf.writestr("config.json", json.dumps(config, indent=2))
+        zf.writestr("notes.md", exp.get("notes_md") or "")
+        if run_id is not None:
+            metrics_file = settings.data_dir / "runs" / str(run_id) / "metrics.jsonl"
+            if metrics_file.exists():
+                zf.writestr("metrics.jsonl", metrics_file.read_text())
+
+    return Response(
+        buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=experiment_{experiment_id}.zip"},
     )

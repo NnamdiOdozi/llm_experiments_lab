@@ -1,34 +1,38 @@
 import { useState, useEffect, useRef } from "react";
-import { updateRunNotes, fetchRunNotes } from "../hooks/useApi";
+import { updateNotes, fetchExperiment } from "../hooks/useApi";
 
 interface Props {
-  runId: number | null;
+  experimentId: number | null;
 }
 
-export default function ExperimentNotes({ runId }: Props) {
+// Notes accumulate at the experiment level across all its runs — e.g.
+// "run 1: loss too noisy, run 2: lowered LR, much better" (see
+// docs/LLM_Experiments_Lab_Project_Discussion(2).md §6.1.1). A prior
+// version of this component was run-scoped; reverted 2026-07-13.
+export default function ExperimentNotes({ experimentId }: Props) {
   const [notes, setNotes] = useState("");
   const [saved, setSaved] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (runId == null) {
+    if (experimentId == null) {
       setNotes("");
       setSaved(true);
       return;
     }
-    fetchRunNotes(runId).then((res) => {
+    fetchExperiment(experimentId).then((res) => {
       setNotes(res.notes_md || "");
       setSaved(true);
     });
-  }, [runId]);
+  }, [experimentId]);
 
   function handleChange(value: string) {
-    if (runId == null) return;
+    if (experimentId == null) return;
     setNotes(value);
     setSaved(false);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
-      await updateRunNotes(runId, value);
+      await updateNotes(experimentId, value);
       setSaved(true);
     }, 1000);
   }
@@ -44,8 +48,8 @@ export default function ExperimentNotes({ runId }: Props) {
       <textarea
         value={notes}
         onChange={(e) => handleChange(e.target.value)}
-        disabled={runId == null}
-        placeholder={runId == null ? "Start a run to add notes..." : "Add notes for this run..."}
+        disabled={experimentId == null}
+        placeholder={experimentId == null ? "Select an experiment to add notes..." : "Add notes for this experiment..."}
         style={{
           width: "100%",
           minHeight: 100,

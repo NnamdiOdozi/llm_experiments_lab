@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS training_runs (
     execution_backend TEXT DEFAULT 'local',
     remote_endpoint_id TEXT,
     remote_run_id INTEGER,
-    notes_md TEXT,
+    notes_md TEXT,  -- deprecated 2026-07-13: notes reverted to experiment-level (experiments.notes_md). Column kept, unused — see DESIGN_DECISIONS.md.
     FOREIGN KEY (experiment_id) REFERENCES experiments(id)
 );
 

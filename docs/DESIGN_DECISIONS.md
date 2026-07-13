@@ -857,6 +857,43 @@ repushed before prompting a completed remote run will work.
 
 ---
 
+## §22: Notes scoping reverted to experiment-level; diff-from-baseline; export bundle
+
+**Notes revert:** §18 (2026-07-12) moved Notes from experiment-scoped to
+run-scoped. Re-reading `docs/LLM_Experiments_Lab_Project_Discussion(2).md`
+§6.1.1 on 2026-07-13 showed that was a mistake — the doc is explicit that
+notes accumulate **at the experiment level** across multiple runs of the
+same config ("run 1: loss too noisy, run 2: lowered LR, much better").
+Reverted: `ExperimentNotes.tsx` now keys off `experimentId` again, using
+`experiments.notes_md` via the pre-existing `PATCH /experiments/{id}/notes`
+route. The `training_runs.notes_md` column and its now-removed
+`GET/PATCH /training/{run_id}/notes` routes are left in place in the DB
+schema (SQLite column drops require a table rebuild — not worth it for a
+POC) but are dead going forward. **Don't reintroduce run-scoped notes** —
+re-read §6.1.1 first if this comes up again.
+
+**Diff-from-baseline:** every experiment is created via `PresetPicker` →
+`POST /experiments/from-preset/{key}` — there is no UI path that creates a
+"custom" experiment without a preset, so `preset_key` is always resolvable.
+`App.tsx` resolves the originating preset's `model`/`training` values on
+experiment load and passes them to `ConfigPanel` as `baseline`. Only shown
+as shadow text (`baseline: X`) when the current value differs from it —
+deliberately not shown for every field, to keep the panel quiet when
+nothing's changed. `inference` section excluded from the diff: it has its
+own `INFERENCE_DEFAULTS` fallback for pre-inference-config experiments, so
+a baseline diff there would be misleading noise, not signal.
+
+**Export bundle:** existing `export.py`/`export.ipynb` single-file
+downloads kept as-is (no regression). Added `GET
+/code/{experiment_id}/export.zip?run_id=<optional>` which reuses the same
+`build_script()`/`build_notebook()` functions and additionally bundles
+`config.json`, `notes.md`, and (if `run_id` given and the file exists)
+`metrics.jsonl` copied raw from `data/runs/{run_id}/metrics.jsonl`. Zip
+chosen over five separate download buttons per the doc's own described
+export bundle (§6.2) and to avoid popup-blocker/multi-download friction.
+
+---
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

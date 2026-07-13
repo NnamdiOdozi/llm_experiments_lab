@@ -119,17 +119,6 @@ export function setChatMessageFeedback(messageId: number, feedback: "up" | "down
   });
 }
 
-export function fetchRunNotes(runId: number) {
-  return api<{ notes_md: string }>(`/training/${runId}/notes`);
-}
-
-export function updateRunNotes(runId: number, notes_md: string) {
-  return api<{ ok: boolean }>(`/training/${runId}/notes`, {
-    method: "PATCH",
-    body: JSON.stringify({ notes_md }),
-  });
-}
-
 export function fetchCode(experimentId: number) {
   return api<import("../types").CodeFiles>(`/code/${experimentId}`);
 }

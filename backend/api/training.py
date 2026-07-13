@@ -49,10 +49,6 @@ class PromptRequest(BaseModel):
     max_new_tokens: int = 200
 
 
-class UpdateRunNotesRequest(BaseModel):
-    notes_md: str
-
-
 def _count_active_runs(device_filter: str | None = None) -> int:
     """Count runs with live worker processes."""
     count = 0
@@ -385,22 +381,6 @@ async def prompt_model(run_id: int, req: PromptRequest):
     return {"run_id": run_id, "prompt": req.prompt, "output": result}
 
 
-@router.get("/{run_id}/notes")
-async def get_run_notes(run_id: int):
-    run = await db.get_training_run(run_id)
-    if run is None:
-        raise HTTPException(404, "Run not found")
-    return {"notes_md": run.get("notes_md") or ""}
-
-
-@router.patch("/{run_id}/notes")
-async def update_run_notes(run_id: int, req: UpdateRunNotesRequest):
-    run = await db.get_training_run(run_id)
-    if run is None:
-        raise HTTPException(404, "Run not found")
-    await db.update_training_run(run_id, notes_md=req.notes_md)
-    training_log.info("Notes updated: run_id=%d len=%d", run_id, len(req.notes_md))
-    return {"ok": True}
 
 
 @router.get("/{run_id}/status")
