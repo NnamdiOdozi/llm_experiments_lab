@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, CSSProperties } from "react";
 import { ExperimentConfig, MetricRow, RunStatus, ArchitectureNode, DiagnosticSnapshot } from "./types";
 import PresetPicker from "./components/PresetPicker";
 import ExperimentBrowser from "./components/ExperimentBrowser";
@@ -50,7 +50,32 @@ function loadSession(): { experimentId: number; runId: number | null; config: Ex
   return null;
 }
 
-type RightPaneTab = "assistant" | "inspector" | "events";
+// "events" reserved (hidden, see §34/§37); dynamic "data-<id>" tabs opened
+// by double-clicking a vector, see DataTab below. Widened to string so
+// dynamic ids type-check without enumerating every possible id.
+type RightPaneTab = string;
+
+const positionTableCellStyle: CSSProperties = {
+  border: "1px solid var(--border)",
+  padding: "4px 6px",
+  textAlign: "left",
+  whiteSpace: "nowrap",
+};
+
+interface DataTab {
+  id: string;
+  title: string;
+  // Raw values, not a preformatted string — rendered as an index/value
+  // dataframe (one row per element), per direct user reference 2026-07-15
+  // ("should look like a single column in a data frame... indexes running
+  // down"). See docs/DESIGN_DECISIONS.md.
+  content: number[];
+  // Tab to return to on close — whichever tab was active when this data
+  // tab was opened (almost always "inspector"). Previously hardcoded to
+  // "assistant", which was jarring since these are always opened from
+  // Inspector. See docs/DESIGN_DECISIONS.md.
+  returnTo: RightPaneTab;
+}
 
 export default function App() {
   const saved = useRef(loadSession());
@@ -72,6 +97,23 @@ export default function App() {
 
   // Inspector/diagnostic state
   const [rightPaneTab, setRightPaneTab] = useState<RightPaneTab>("assistant");
+  // Double-clicking a vector cell opens one of these — a new, closeable tab
+  // with the full vector as static, selectable/copyable text (Colab/VS
+  // Code variable-inspector pattern, per direct user reference 2026-07-15).
+  // Each double-click opens a separate tab rather than reusing one, per
+  // explicit choice — closeable via the × so they don't have to accumulate
+  // if unwanted. See docs/DESIGN_DECISIONS.md.
+  const [dataTabs, setDataTabs] = useState<DataTab[]>([]);
+  function openDataTab(title: string, content: number[]) {
+    const id = `data-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setDataTabs((prev) => [...prev, { id, title, content, returnTo: rightPaneTab }]);
+    setRightPaneTab(id);
+  }
+  function closeDataTab(id: string) {
+    const tab = dataTabs.find((t) => t.id === id);
+    setDataTabs((prev) => prev.filter((t) => t.id !== id));
+    setRightPaneTab((current) => (current === id ? tab?.returnTo ?? "assistant" : current));
+  }
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<ArchitectureNode | null>(null);
   const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<DiagnosticSnapshot | null>(null);
@@ -83,12 +125,46 @@ export default function App() {
   // already says which block you mean. See docs/DESIGN_DECISIONS.md.
   const [attentionHead, setAttentionHead] = useState<number | null>(null);
   const [showQKVDetail, setShowQKVDetail] = useState(false);
+  // Shifts the attention heatmap/qkv_detail window earlier in the sequence
+  // — 0 (default) shows the most recent DIAGNOSTIC_POSITION_WINDOW
+  // positions. Real user report, 2026-07-13: the heatmap "gets very busy
+  // very quickly" as a session grows, since it previously rendered the
+  // *entire* T x T matrix with no cap at all. See docs/DESIGN_DECISIONS.md.
+  const [attentionWindowOffset, setAttentionWindowOffset] = useState(0);
   const attentionBlockMatch = selectedNodeId?.match(/^block\.(\d+)\.attention$/);
   const attentionBlock = attentionBlockMatch ? parseInt(attentionBlockMatch[1], 10) : null;
   // Set/cleared by PausePrompt as its diagnostic session starts/ends — used
   // below to auto-refresh attention when Head/Block changes, without
   // requiring a full > click. See docs/DESIGN_DECISIONS.md.
   const [diagnosticSessionId, setDiagnosticSessionId] = useState<string | null>(null);
+
+  // Real bug found 2026-07-13: none of this Inspector/diagnostic selection
+  // state was reset when a new run started. Starting run A, then
+  // immediately starting run B without reloading, left run A's
+  // diagnosticSessionId/attentionBlock/attentionHead alive — the peek
+  // effect below then fired immediately against run B using a diagnostic
+  // session that was never created for it, right as run B's remote worker
+  // was still cold-starting. Confirmed via server log
+  // (data/logs/session_2026-07-13_20-40-25.log, 21:32-21:40): a stale
+  // diag-b71f2501 session id was reused for both run 158 and run 159's
+  // peek calls, both 502ing during the ~7.5min cold start. See
+  // docs/DESIGN_DECISIONS.md.
+  useEffect(() => {
+    setSelectedNodeId(null);
+    setSelectedNode(null);
+    setAttentionHead(null);
+    setShowQKVDetail(false);
+    setAttentionWindowOffset(0);
+    setDiagnosticSessionId(null);
+    setDiagnosticSnapshot(null);
+  }, [runId]);
+
+  // Reset the window back to "most recent" whenever a different attention
+  // node is selected — a stale offset from a previously-viewed block/head
+  // would otherwise silently carry over and show the wrong slice.
+  useEffect(() => {
+    setAttentionWindowOffset(0);
+  }, [selectedNodeId]);
 
   // Real bug report, 2026-07-14: changing Head (or clicking a different
   // block's attention node) only updated local selection — the Inspector
@@ -106,6 +182,7 @@ export default function App() {
       attention_layer: attentionBlock,
       attention_head: attentionHead,
       qkv_detail: showQKVDetail || undefined,
+      attention_window_offset: attentionWindowOffset,
     })
       .then((snapshot) => {
         if (!cancelled) setDiagnosticSnapshot(snapshot);
@@ -117,7 +194,7 @@ export default function App() {
         if (!cancelled) setDiagnosticLoading(false);
       });
     return () => { cancelled = true; };
-  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail]);
+  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset]);
 
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -435,6 +512,7 @@ export default function App() {
               attentionBlock={attentionBlock}
               attentionHead={attentionHead}
               showQKVDetail={showQKVDetail}
+              attentionWindowOffset={attentionWindowOffset}
               // Same config.inference.max_new_tokens the ConfigPanel already
               // shows and Generate already uses (server-side, via
               // prompt_paused_model's inference_cfg.get(...)) — >> was
@@ -470,7 +548,7 @@ export default function App() {
                 section), which read as confusing/broken rather than deferred.
                 Re-enable by adding "events" back here once it has real
                 content. See docs/DESIGN_DECISIONS.md. */}
-            {(["assistant", "inspector"] as RightPaneTab[]).map((tab) => (
+            {["assistant", "inspector"].map((tab) => (
               <button
                 key={tab}
                 onClick={() => setRightPaneTab(tab)}
@@ -490,6 +568,34 @@ export default function App() {
                 {tab}
               </button>
             ))}
+            {dataTabs.map((t) => (
+              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <button
+                  onClick={() => setRightPaneTab(t.id)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: rightPaneTab === t.id ? "var(--accent)" : "var(--text-dim)",
+                    cursor: "pointer",
+                    padding: "12px 0",
+                    fontSize: 12,
+                    fontWeight: rightPaneTab === t.id ? 600 : 400,
+                    borderBottom: rightPaneTab === t.id ? "2px solid var(--accent)" : "none",
+                    transition: "all 0.15s",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {t.title}
+                </button>
+                <button
+                  onClick={() => closeDataTab(t.id)}
+                  title="Close"
+                  style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 12, padding: "0 4px" }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
 
           {/* Tab content */}
@@ -497,6 +603,7 @@ export default function App() {
             {rightPaneTab === "assistant" && <ChatPanel experimentId={experimentId} />}
             {rightPaneTab === "inspector" && (
               <Inspector
+                runId={runId}
                 selectedNode={selectedNode}
                 selectedNodeId={selectedNodeId}
                 diagnosticSnapshot={diagnosticSnapshot}
@@ -506,7 +613,10 @@ export default function App() {
                 onAttentionHeadChange={setAttentionHead}
                 showQKVDetail={showQKVDetail}
                 onShowQKVDetailChange={setShowQKVDetail}
+                attentionWindowOffset={attentionWindowOffset}
+                onAttentionWindowOffsetChange={setAttentionWindowOffset}
                 numHeads={typeof config?.model?.n_head === "number" ? config.model.n_head : null}
+                onOpenDataTab={openDataTab}
               />
             )}
             {/* {rightPaneTab === "events" && (
@@ -515,6 +625,39 @@ export default function App() {
                 <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Event log coming soon in Phase 2.</p>
               </div>
             )} */}
+            {dataTabs.map((t) => rightPaneTab === t.id && (
+              <div key={t.id} className="panel">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <h3 style={{ margin: 0 }}>{t.title}</h3>
+                  <button onClick={() => closeDataTab(t.id)}>Close</button>
+                </div>
+                {/* Single-column dataframe/series style — index running down
+                    the left, one value per row — not a flat bracketed
+                    string. Direct user reference 2026-07-15: "should look
+                    like a single column in a data frame... indexes running
+                    down." Still plain selectable/copyable text per cell,
+                    same as Colab/VS Code's variable inspector. See
+                    docs/DESIGN_DECISIONS.md. */}
+                <div style={{ height: "calc(100vh - 260px)", overflowY: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
+                  <table style={{ borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--font-mono)", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Index</th>
+                        <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {t.content.map((v, i) => (
+                        <tr key={i}>
+                          <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{i}</td>
+                          <td style={positionTableCellStyle}>{v.toFixed(6)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>

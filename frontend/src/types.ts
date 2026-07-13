@@ -154,6 +154,20 @@ export interface ArchitectureManifest {
   nodes: ArchitectureNode[];
 }
 
+export interface EmbeddingTableData {
+  vocab_size: number;
+  n_embd: number;
+  tokens: string[];
+  // embedding[i] is the trained vector for tokens[i] — full n_embd width,
+  // not windowed (transformer/moe only, small char-level vocabs). See
+  // docs/DESIGN_DECISIONS.md.
+  embedding: number[][];
+  // Only present under pos_encoding="learned" — RoPE has no learned
+  // position table (computed on the fly), so both are null in that case.
+  block_size: number | null;
+  position_embedding: number[][] | null;
+}
+
 export interface NodePositionVectors {
   // Last DIAGNOSTIC_POSITION_WINDOW (12) positions only — see
   // docs/DESIGN_DECISIONS.md.
@@ -172,6 +186,7 @@ export interface NodeRuntimeData {
     max: number;
   };
   position_vectors?: NodePositionVectors | null;
+  input_position_vectors?: NodePositionVectors | null;
 }
 
 export interface TopKByPositionEntry {
@@ -208,6 +223,18 @@ export interface AttentionData {
   token_labels?: string[];
   reason?: string;
   qkv_detail?: QKVDetail;
+  // window_start/total_positions describe the windowed weights/token_labels
+  // above (a square DIAGNOSTIC_POSITION_WINDOW block, not the full T x T
+  // matrix) — lets the frontend stepper know how far it can shift and what
+  // range is currently shown. See docs/DESIGN_DECISIONS.md.
+  window_start?: number;
+  total_positions?: number;
+}
+
+export interface PositionToken {
+  position: number;
+  id: number;
+  token: string;
 }
 
 export interface ActivationSummariesData {
@@ -227,6 +254,9 @@ export interface DiagnosticSnapshot {
   attention: AttentionData;
   activation_summaries: ActivationSummariesData;
   lm_head: LMHeadData;
+  // Windowed token id+text per position, same window as every node's
+  // position_vectors — used by the embedding node's one-hot input table.
+  position_tokens: PositionToken[];
   complete: boolean;
 }
 
@@ -245,6 +275,7 @@ export interface DiagnosticStepRequest {
   attention_layer?: number;
   attention_head?: number;
   qkv_detail?: boolean;
+  attention_window_offset?: number;
 }
 
 export interface GenerateStreamToken {

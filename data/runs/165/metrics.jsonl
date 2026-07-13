@@ -1,0 +1,1 @@
+{"step": 20, "train_loss": 2.9045, "val_loss": 2.9323, "learning_rate": 0.0003, "elapsed_seconds": 89.7, "param_count": 1827137, "timestamp": "2026-07-13T23:06:39.393929", "cpu_percent": 92.1, "ram_used_mb": 5831.7, "ram_total_mb": 15710.4}

@@ -661,6 +661,103 @@ async def test_qkv_detail_capped_to_last_12_positions(temp_db, client, monkeypat
     assert len(top_k_by_position[0]["top_k"]) == 5
 
 
+async def test_attention_heatmap_windowed_not_full_matrix(temp_db, client, monkeypatch, tmp_path):
+    """Real user report, 2026-07-13: the heatmap "gets very busy very
+    quickly" — it was never capped at all (unlike qkv_detail), rendering
+    the full, ever-growing T x T matrix. Now windowed to a
+    DIAGNOSTIC_POSITION_WINDOW x DIAGNOSTIC_POSITION_WINDOW square block,
+    same as qkv_detail. See docs/DESIGN_DECISIONS.md."""
+    from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    long_prompt = "The king said many words indeed"
+    assert len(long_prompt) > DIAGNOSTIC_POSITION_WINDOW
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": long_prompt, "top_k": 5, "max_prompt_tokens": len(long_prompt)},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/step",
+        json={"attention_layer": 0, "attention_head": 0},
+    )
+    assert resp.status_code == 200
+    attn = resp.json()["attention"]
+
+    post_append_len = len(long_prompt) + 1
+    assert len(attn["weights"]) == DIAGNOSTIC_POSITION_WINDOW
+    assert all(len(row) == DIAGNOSTIC_POSITION_WINDOW for row in attn["weights"])
+    assert len(attn["token_labels"]) == DIAGNOSTIC_POSITION_WINDOW
+    assert attn["total_positions"] == post_append_len
+    assert attn["window_start"] == post_append_len - DIAGNOSTIC_POSITION_WINDOW
+
+
+async def test_attention_window_offset_shifts_window_earlier(temp_db, client, monkeypatch, tmp_path):
+    """Direct user request, 2026-07-13: a stepper to shift the heatmap
+    window earlier/later through the sequence instead of only ever seeing
+    the tail. attention_window_offset shifts the window's end back N
+    positions from the most recent. See docs/DESIGN_DECISIONS.md."""
+    from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    long_prompt = "The king said many words indeed, verily"
+    assert len(long_prompt) > DIAGNOSTIC_POSITION_WINDOW * 2
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": long_prompt, "top_k": 5, "max_prompt_tokens": len(long_prompt)},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/step",
+        json={"attention_layer": 0, "attention_head": 0},
+    )
+    assert resp.status_code == 200
+    default_window_start = resp.json()["attention"]["window_start"]
+
+    # Peek with a shifted window — session/token_history untouched, only
+    # the requested window slice changes.
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+        json={"attention_layer": 0, "attention_head": 0, "attention_window_offset": DIAGNOSTIC_POSITION_WINDOW},
+    )
+    assert resp.status_code == 200
+    shifted = resp.json()["attention"]
+    assert shifted["window_start"] == default_window_start - DIAGNOSTIC_POSITION_WINDOW
+    assert len(shifted["weights"]) == DIAGNOSTIC_POSITION_WINDOW
+
+
+async def test_snapshot_includes_position_tokens_for_embedding_one_hot(temp_db, client, monkeypatch, tmp_path):
+    """position_tokens carries the real token id per position — the
+    Inspector's embedding tab needs this to build a one-hot vector per
+    position (id determines which index is 1). Direct user request,
+    2026-07-13. See docs/DESIGN_DECISIONS.md."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert "position_tokens" in body
+    assert len(body["position_tokens"]) == len("The king")
+    first = body["position_tokens"][0]
+    assert set(first.keys()) == {"position", "id", "token"}
+    assert first["position"] == 0
+    assert first["token"] == "T"
+
+
 async def test_qkv_detail_omitted_when_not_requested(temp_db, client, monkeypatch, tmp_path):
     """Phase 4: qkv_detail defaults false — no qkv_detail key in the response."""
     exp_id = temp_db
@@ -1026,6 +1123,33 @@ async def test_generic_node_captures_position_vectors(temp_db, client, monkeypat
         assert len(pv["vectors"][0]) == TRANSFORMER_CONFIG["model"]["n_embd"]
 
 
+async def test_generic_node_captures_input_vectors_where_meaningful(temp_db, client, monkeypatch, tmp_path):
+    """Real gap flagged live (2026-07-15): only output vectors were shown,
+    with no corresponding input to compare against (e.g. LayerNorm's
+    before/after). embedding's input is token ids ([B,T], not a per-token
+    float vector) — correctly has no input_position_vectors, only output.
+    See docs/DESIGN_DECISIONS.md."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king said", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+
+    for node_id in ["block.0.ln1", "block.0.attention", "block.0.ln2", "block.0.mlp", "final_norm"]:
+        ipv = nodes[node_id]["input_position_vectors"]
+        assert ipv is not None, f"{node_id} missing input_position_vectors"
+        assert len(ipv["vectors"][0]) == TRANSFORMER_CONFIG["model"]["n_embd"]
+
+    assert nodes["embedding"]["input_position_vectors"] is None
+
+
 async def test_moe_template_captures_all_nodes_not_just_moe_block(temp_db, client, monkeypatch, tmp_path):
     """Regression test: the MoE template's diagnostic hooks only ever
     branched on isinstance(output, tuple) — true only for the .moe node
@@ -1080,3 +1204,163 @@ async def test_moe_template_captures_all_nodes_not_just_moe_block(temp_db, clien
 
     # The .moe node itself always worked (its output genuinely is a tuple).
     assert nodes["block.0.moe"]["output_shape"] != []
+
+
+async def test_get_embedding_table_returns_real_trained_weights(temp_db, client, monkeypatch, tmp_path):
+    """GET /api/training/{run_id}/architecture/embedding-table returns the
+    checkpoint's actual token_emb.weight, not a freshly-initialized model's
+    (unlike /architecture, which only builds a fresh model to count params).
+    Direct user request 2026-07-15. See docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "transformer",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    # Overwrite the embedding weights with a known, distinctive value so we
+    # can confirm the route returns THIS checkpoint's real weights, not a
+    # freshly re-built model's random init.
+    with torch.no_grad():
+        model.token_emb.weight.fill_(0.0)
+        model.token_emb.weight[3, 0] = 42.0
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.get(f"/api/training/{run_id}/architecture/embedding-table")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["vocab_size"] == 65
+    assert data["n_embd"] == 192
+    assert len(data["tokens"]) == 65
+    assert len(data["embedding"]) == 65
+    assert len(data["embedding"][0]) == 192
+    assert data["embedding"][3][0] == 42.0
+    assert data["embedding"][0][0] == 0.0
+
+
+async def test_get_embedding_table_404_without_checkpoint(temp_db, client, monkeypatch, tmp_path):
+    """No checkpoint yet — clear 400, not a crash."""
+    from backend.training import artifacts
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps({"template": "transformer", "model": {}, "training": {}}))
+
+    resp = await client.get(f"/api/training/{run_id}/architecture/embedding-table")
+    assert resp.status_code == 400
+
+
+async def test_get_embedding_table_rejects_rnn(temp_db, client, monkeypatch, tmp_path):
+    """RNN has no token_emb (one-hot input) — clear 400, not a crash."""
+    from backend.training import artifacts
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps({"template": "rnn", "model": {}, "training": {}}))
+
+    resp = await client.get(f"/api/training/{run_id}/architecture/embedding-table")
+    assert resp.status_code == 400
+
+
+async def test_get_embedding_table_includes_position_table_when_learned(temp_db, client, monkeypatch, tmp_path):
+    """pos_encoding="learned" -> real nn.Embedding(block_size, n_embd)
+    parameter, so the route should return it. Direct user follow-up,
+    2026-07-13: "I can't see the position embedding table... I think they
+    should both be on that tab." See docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "transformer",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.get(f"/api/training/{run_id}/architecture/embedding-table")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["block_size"] == 128
+    assert data["position_embedding"] is not None
+    assert len(data["position_embedding"]) == 128
+    assert len(data["position_embedding"][0]) == 192
+
+
+async def test_get_embedding_table_omits_position_table_when_rope(temp_db, client, monkeypatch, tmp_path):
+    """pos_encoding="rope" -> rotary embeddings computed on the fly, no
+    learned position parameter exists. See docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "transformer",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.get(f"/api/training/{run_id}/architecture/embedding-table")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["block_size"] is None
+    assert data["position_embedding"] is None

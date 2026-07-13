@@ -40,7 +40,7 @@ export default function CodeView({ experimentId, runId }: Props) {
           ))}
         </div>
         <button onClick={() => setActiveFile(WORKER_TAB)} style={tabStyle(activeFile === WORKER_TAB)}>
-          Serverless Metrics
+          Metrics
         </button>
       </div>
       {activeFile === WORKER_TAB ? (

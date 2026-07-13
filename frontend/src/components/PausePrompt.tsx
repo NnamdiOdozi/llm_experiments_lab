@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { promptModel, startDiagnostic, stepDiagnostic, generateDiagnosticStream } from "../hooks/useApi";
 import { DiagnosticSnapshot, DiagnosticSessionResponse } from "../types";
 
@@ -14,6 +14,11 @@ interface Props {
   attentionBlock: number | null;
   attentionHead: number | null;
   showQKVDetail: boolean;
+  // Shifts the attention heatmap/qkv_detail window earlier in the sequence
+  // (0 = most recent) — set from the Inspector's heatmap stepper, applied
+  // here so > also captures the currently-viewed window, not always the
+  // tail. See docs/DESIGN_DECISIONS.md.
+  attentionWindowOffset: number;
   maxNewTokens: number;
   onDiagnosticSnapshot?: (snapshot: DiagnosticSnapshot) => void;
   // Surfaces the active session id (or null once finished/not started) so
@@ -24,7 +29,7 @@ interface Props {
 }
 
 export default function PausePrompt({
-  runId, canPrompt, attentionBlock, attentionHead, showQKVDetail, maxNewTokens, onDiagnosticSnapshot, onSessionIdChange,
+  runId, canPrompt, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset, maxNewTokens, onDiagnosticSnapshot, onSessionIdChange,
 }: Props) {
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState("");
@@ -38,6 +43,29 @@ export default function PausePrompt({
 
   // Phase 3: Generated tokens displayed progressively
   const [generatedTokens, setGeneratedTokens] = useState<string>("");
+
+  // Real bug report, 2026-07-13: prompt a paused model, resume training,
+  // pause again — the old, partially-stepped-through prompt/session was
+  // still sitting here, and stepping it errored (resume loads a fresh
+  // model checkpoint server-side, so the old in-memory diagnostic
+  // session's model reference is stale). This component never unmounts
+  // on a canPrompt flip (App.tsx keeps it mounted the whole time the run
+  // exists), so state survived the round trip. Clear everything the
+  // moment the run leaves paused/completed — resuming or retraining
+  // should always start the next prompt from a clean slate. See
+  // docs/DESIGN_DECISIONS.md.
+  useEffect(() => {
+    if (!canPrompt) {
+      setPrompt("");
+      setOutput("");
+      setDiagnosticSession(null);
+      setDiagnosticSnapshot(null);
+      setDiagnosticStep(0);
+      setGeneratedTokens("");
+      onSessionIdChange?.(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canPrompt]);
 
   if (!canPrompt) {
     return (
@@ -90,6 +118,7 @@ export default function PausePrompt({
           attention_layer: attentionBlock ?? undefined,
           attention_head: attentionHead ?? undefined,
           qkv_detail: showQKVDetail || undefined,
+          attention_window_offset: attentionWindowOffset,
         });
         setDiagnosticSnapshot(snapshot);
         setDiagnosticStep(snapshot.generation_step);
@@ -101,6 +130,7 @@ export default function PausePrompt({
           attention_layer: attentionBlock ?? undefined,
           attention_head: attentionHead ?? undefined,
           qkv_detail: showQKVDetail || undefined,
+          attention_window_offset: attentionWindowOffset,
         });
         // Keep the previous snapshot visible while loading, then swap atomically
         setDiagnosticSnapshot(snapshot);

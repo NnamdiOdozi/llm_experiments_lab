@@ -57,6 +57,9 @@ class DiagnosticSnapshot:
     attention: dict = field(default_factory=lambda: {"available": False, "reason": "Not requested"})
     activation_summaries: dict = field(default_factory=lambda: {"available": False, "reason": "Not requested"})
     lm_head: dict = field(default_factory=dict)  # {logits_shape, selected_position, top_k}
+    # Windowed [{position, id, token}, ...] — same window as position_vectors
+    # on every node. See docs/DESIGN_DECISIONS.md.
+    position_tokens: list[dict] = field(default_factory=list)
     complete: bool = True
 
     def to_dict(self) -> dict:
@@ -70,6 +73,7 @@ class DiagnosticSnapshot:
             "attention": self.attention,
             "activation_summaries": self.activation_summaries,
             "lm_head": self.lm_head,
+            "position_tokens": self.position_tokens,
             "complete": self.complete,
         }
 
@@ -219,16 +223,24 @@ def _compute_attention_weights(
     layer: int,
     head: int,
     qkv_detail: bool = False,
+    window_offset: int = 0,
 ) -> Optional[dict]:
     """Explicit (non-fused) QK^T -> scale -> causal mask -> softmax attention path.
 
     The model's normal forward pass uses fused/fast attention, which per
     Trainer_to_Frontend_Metrics.md doesn't expose weights — this recomputes
     just the requested layer/head manually, only when asked for (Phase 2).
-    When qkv_detail=True, returns Q/K/V vectors for one head across the last
-    DIAGNOSTIC_POSITION_WINDOW token positions (not just the last token —
-    the frontend's position stepper needs one vector per position to step
-    through, see docs/DESIGN_DECISIONS.md).
+
+    The heatmap itself (`weights`/`token_labels`) is windowed to the last
+    DIAGNOSTIC_POSITION_WINDOW positions on both axes (a square block, not
+    just the rows) — previously unwindowed, so a long session rendered an
+    ever-growing T x T grid that got "very busy very quickly" (real user
+    report, 2026-07-13). `window_offset` shifts which block of the sequence
+    is shown: 0 = most recent (default), positive N = shift the window back
+    N positions, so the frontend can step earlier/later through history
+    instead of only ever seeing the tail. qkv_detail (when requested) shares
+    the exact same window — one stepper controls both. See
+    docs/DESIGN_DECISIONS.md.
 
     Attribute names (qkv, n_head, head_size, blocks[i].attn/ln1) match
     backend/training/templates/transformer/model.py's MultiHeadSelfAttention
@@ -263,29 +275,37 @@ def _compute_attention_weights(
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(attn.head_size)
             causal_mask = torch.tril(torch.ones(T, T, device=session.device, dtype=torch.bool))
             scores = scores.masked_fill(~causal_mask, float("-inf"))
-            weights = torch.softmax(scores, dim=-1)[0, head].tolist()
+            full_weights = torch.softmax(scores, dim=-1)[0, head]
 
-            token_labels = [session.tokenizer.decode([tid]) for tid in all_tokens]
+            # Shared window for the heatmap and qkv_detail — offset=0 shows
+            # the most recent `window` positions; positive offset shifts the
+            # window's end earlier by that many positions. Clamped so the
+            # window never goes out of [0, T].
+            window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+            end = max(window, T - max(window_offset, 0))
+            start = end - window
+
+            weights = full_weights[start:end, start:end].tolist()
+            token_labels = [session.tokenizer.decode([tid]) for tid in all_tokens[start:end]]
             result = {
                 "available": True,
                 "layer": layer,
                 "head": head,
                 "weights": weights,
                 "token_labels": token_labels,
+                "window_start": start,
+                "total_positions": T,
             }
 
-            # Q/K/V detail across the last DIAGNOSTIC_POSITION_WINDOW
-            # positions, this head — one vector per position, for the
-            # frontend's stepper to browse.
+            # Q/K/V detail — one vector per position, for the frontend's
+            # position stepper — over the exact same window as the heatmap.
             if qkv_detail:
-                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-                start = T - window
                 result["qkv_detail"] = {
-                    "positions": list(range(start, T)),
-                    "tokens": [session.tokenizer.decode([tid]) for tid in all_tokens[start:T]],
-                    "q": q[0, head, start:T, :].tolist(),
-                    "k": k[0, head, start:T, :].tolist(),
-                    "v": v[0, head, start:T, :].tolist(),
+                    "positions": list(range(start, end)),
+                    "tokens": [session.tokenizer.decode([tid]) for tid in all_tokens[start:end]],
+                    "q": q[0, head, start:end, :].tolist(),
+                    "k": k[0, head, start:end, :].tolist(),
+                    "v": v[0, head, start:end, :].tolist(),
                 }
 
             return result
@@ -319,6 +339,7 @@ def _execute_forward_pass(
     attention_params: Optional[tuple[int, int]],
     qkv_detail: bool = False,
     append_token: bool = True,
+    attention_window_offset: int = 0,
 ) -> DiagnosticSnapshot:
     """Shared core for run_diagnostic_step and the Phase 3 final-token capture
     — one forward pass, tensor capture at hooked nodes, top-k, attention (if
@@ -414,6 +435,20 @@ def _execute_forward_pass(
                 ],
             })
 
+        # Windowed token id + text per position — same pre-append window as
+        # top_k_by_position/position_vectors above. Exists specifically for
+        # the embedding node's Inspector view, which needs the actual input
+        # token id at each position to build a one-hot vector (direct user
+        # request 2026-07-15: "position, then the character, and then the
+        # one-hot vector"). Not attached per-node like position_vectors —
+        # every node in a single forward pass shares this exact same
+        # window, so one shared list avoids repeating identical token text
+        # at every one of ~18 nodes. See docs/DESIGN_DECISIONS.md.
+        position_tokens = [
+            {"position": pos, "id": all_tokens[pos], "token": session.tokenizer.decode([all_tokens[pos]])}
+            for pos in range(pos_start, T_total)
+        ]
+
         nodes_dict = {
             node_id: {
                 "input_shape": c.input_shape, "output_shape": c.output_shape, "summary": c.summary,
@@ -442,7 +477,7 @@ def _execute_forward_pass(
         attention_data = {"available": False, "reason": "Not requested"}
         if attention_params is not None:
             layer, head = attention_params
-            result = _compute_attention_weights(session, layer, head, qkv_detail=qkv_detail)
+            result = _compute_attention_weights(session, layer, head, qkv_detail=qkv_detail, window_offset=attention_window_offset)
             attention_data = result if result is not None else {"available": False, "reason": "Capture failed"}
 
         activation_data = _compute_activation_extras(logits_last)
@@ -456,6 +491,7 @@ def _execute_forward_pass(
             attention=attention_data,
             activation_summaries=activation_data,
             lm_head=lm_head_data,
+            position_tokens=position_tokens,
         )
 
 
@@ -464,6 +500,7 @@ def run_diagnostic_step(
     top_k: int = 5,
     attention_params: Optional[tuple[int, int]] = None,
     qkv_detail: bool = False,
+    attention_window_offset: int = 0,
 ) -> Optional[DiagnosticSnapshot]:
     """Execute one autoregressive forward pass, appending one new token.
 
@@ -478,7 +515,10 @@ def run_diagnostic_step(
 
     session.generation_step += 1
     try:
-        snapshot = _execute_forward_pass(session, top_k, attention_params, qkv_detail=qkv_detail, append_token=True)
+        snapshot = _execute_forward_pass(
+            session, top_k, attention_params, qkv_detail=qkv_detail, append_token=True,
+            attention_window_offset=attention_window_offset,
+        )
         session.last_snapshot = snapshot
         return snapshot
     except Exception as e:
@@ -492,17 +532,23 @@ def run_diagnostic_step_internal(
     attention_params: Optional[tuple[int, int]] = None,
     qkv_detail: bool = False,
     skip_token_generation: bool = True,
+    attention_window_offset: int = 0,
 ) -> Optional[DiagnosticSnapshot]:
     """Capture a snapshot for the CURRENT session state without appending a
     new token — used by Phase 3's /generate to produce the final snapshot
-    after its own sampling loop has already advanced token_history.
+    after its own sampling loop has already advanced token_history, and by
+    /peek to recompute attention (including a shifted window) without
+    advancing anything.
     """
     session = get_session(session_id)
     if session is None:
         training_log.warning("Diagnostic step (internal): session %s not found", session_id)
         return None
     try:
-        snapshot = _execute_forward_pass(session, top_k, attention_params, qkv_detail=qkv_detail, append_token=not skip_token_generation)
+        snapshot = _execute_forward_pass(
+            session, top_k, attention_params, qkv_detail=qkv_detail, append_token=not skip_token_generation,
+            attention_window_offset=attention_window_offset,
+        )
         session.last_snapshot = snapshot
         return snapshot
     except Exception as e:

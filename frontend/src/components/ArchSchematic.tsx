@@ -75,19 +75,62 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
   const [manifest, setManifest] = useState<ArchitectureManifest | null>(null);
   const [selectedBlockIdx, setSelectedBlockIdx] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Tracks whether at least one fetch attempt has failed — distinguishes
+  // "still loading" from "worker's cold-starting, retrying" in the UI.
+  const [retrying, setRetrying] = useState(false);
 
+  // Serverless GPU workers cold-start on first use — a real, observed 7.5
+  // minute wake-up (session log, 2026-07-13 21:32-21:40). A run always gets
+  // created right as that cold start begins, so this component's first
+  // fetch reliably lands in the middle of it and 502s. Previously a single
+  // fetch-and-give-up: once that first attempt failed, the panel stayed
+  // permanently blank even after the worker woke up seconds later, until a
+  // full page reload. Now retries on a timer until it succeeds or runId
+  // changes. See docs/DESIGN_DECISIONS.md.
   useEffect(() => {
-    if (runId) {
-      setLoading(true);
+    if (!runId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const attempt = (isRetry: boolean) => {
+      if (cancelled) return;
+      setLoading(!isRetry);
+      setRetrying(isRetry);
       fetchArchitecture(runId)
-        .then(setManifest)
-        .catch(() => setManifest(null))
-        .finally(() => setLoading(false));
-    }
+        .then((m) => {
+          if (cancelled) return;
+          setManifest(m);
+          setLoading(false);
+          setRetrying(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setManifest(null);
+          setLoading(false);
+          timer = setTimeout(() => attempt(true), 5000);
+        });
+    };
+    attempt(false);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [runId]);
 
   if (loading) {
     return <div className="panel"><h3>Architecture</h3><p>Loading...</p></div>;
+  }
+
+  if (retrying && !manifest) {
+    return (
+      <div className="panel">
+        <h3>Architecture</h3>
+        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          Waking up remote worker — serverless cold starts can take several minutes. Retrying...
+        </p>
+      </div>
+    );
   }
 
   const nodes = manifest ? manifest.nodes : [];

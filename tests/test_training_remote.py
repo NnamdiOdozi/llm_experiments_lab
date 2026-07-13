@@ -18,6 +18,7 @@ from backend import db
 from backend.api import training as training_module
 from backend.main import app
 from backend.nebius import worker_manager
+from backend.training.status import RunStatus
 
 
 class FakeResponse:
@@ -298,6 +299,30 @@ async def test_pause_training_proxies_to_remote_run(temp_db, client, monkeypatch
     assert resp.status_code == 200
     assert resp.json()["run_id"] == run_id  # local id, not the remote 7
     assert fake_client.calls[0] == ("POST", "https://cpu.tunnel.nebius.cloud/api/training/7/pause", None)
+
+
+async def test_pause_training_on_completed_remote_run_returns_clear_400(temp_db, client, monkeypatch):
+    """Real bug report (2026-07-13): pausing a run that already finished
+    training used to blindly proxy to the remote endpoint, whose own
+    pause_run() correctly returned 400, but _proxy()'s raise_for_status()
+    turned that into an httpx error that got collapsed into an unhelpful
+    generic 502 — instead of the local status check catching this before
+    ever touching the network. Confirms no proxy call happens at all. See
+    docs/DESIGN_DECISIONS.md."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.update_training_run(run_id, status=RunStatus.COMPLETED)
+
+    fake_client = FakeAsyncClient([])  # would raise IndexError if ever called
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.post(f"/api/training/{run_id}/pause")
+
+    assert resp.status_code == 400
+    assert "completed" in resp.json()["detail"].lower()
+    assert fake_client.calls == []
 
 
 async def test_pause_resume_and_prompt_touch_the_worker_idle_clock(temp_db, client, monkeypatch):

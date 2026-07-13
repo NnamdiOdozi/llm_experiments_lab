@@ -1,12 +1,14 @@
 {
-  "run_id": 155,
+  "run_id": 164,
   "template": "transformer",
   "dataset": "tiny_shakespeare",
   "device": "cpu",
-  "started_at": "2026-07-13T20:41:33.976916",
+  "started_at": "2026-07-13T22:53:44.117519",
   "seed": 1337,
   "param_count": 1827137,
   "config": {
+    "name": "Baseline Tiny Transformer",
+    "description": "Default 4-layer decoder-only transformer on Tiny Shakespeare.",
     "template": "transformer",
     "model": {
       "vocab_size": 65,
@@ -22,16 +24,18 @@
       "batch_size": 64,
       "learning_rate": 0.0003,
       "max_iters": 1000,
-      "eval_interval": 10,
+      "eval_interval": 20,
       "eval_iters": 2,
       "optimizer": "adamw"
     },
     "inference": {
       "max_new_tokens": 100,
-      "temperature": 0.8
+      "temperature": 0.8,
+      "decoding_mode": "greedy"
     },
-    "run_id": 155,
-    "experiment_id": 148,
+    "dataset": "tiny_shakespeare",
+    "run_id": 164,
+    "experiment_id": 150,
     "device": "cpu"
   },
   "package_versions": {

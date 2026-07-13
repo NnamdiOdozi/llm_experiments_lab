@@ -246,7 +246,11 @@ class TinyMoeLM(nn.Module):
                 if session is None:
                     return
 
-                input_shape = list(input_tuple[0].shape) if input_tuple else []
+                input_tensor = input_tuple[0] if input_tuple else None
+                input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
+                input_position_vectors = (
+                    _position_vectors(input_tensor) if isinstance(input_tensor, torch.Tensor) else None
+                )
                 # MoE block returns (x, drop_rate) tuple
                 if isinstance(output, tuple) and len(output) > 0:
                     x = output[0]
@@ -268,6 +272,7 @@ class TinyMoeLM(nn.Module):
                     output_shape=output_shape,
                     summary=summary,
                     position_vectors=position_vectors,
+                    input_position_vectors=input_position_vectors,
                 )
             return hook
 

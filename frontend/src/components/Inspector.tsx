@@ -1,7 +1,9 @@
 import { useState, useEffect, CSSProperties } from "react";
 import { ArchitectureNode, DiagnosticSnapshot } from "../types";
+import { fetchEmbeddingTable } from "../hooks/useApi";
 
 interface Props {
+  runId: number | null;
   selectedNode: ArchitectureNode | null;
   selectedNodeId: string | null;
   diagnosticSnapshot: DiagnosticSnapshot | null;
@@ -16,9 +18,18 @@ interface Props {
   onAttentionHeadChange: (head: number | null) => void;
   showQKVDetail: boolean;
   onShowQKVDetailChange: (show: boolean) => void;
+  // Shifts the attention heatmap/qkv_detail window earlier in the sequence
+  // — 0 = most recent. See docs/DESIGN_DECISIONS.md.
+  attentionWindowOffset: number;
+  onAttentionWindowOffsetChange: (offset: number) => void;
   // config.model.n_head — bounds the Head dropdown so it only ever lists
   // real options, never a value the model doesn't have.
   numHeads: number | null;
+  // Double-clicking a vector cell opens a full, static, copyable view in a
+  // new closeable tab at the App level (Colab/VS Code variable-inspector
+  // pattern, per direct user reference 2026-07-15). title identifies node +
+  // position + block/head; content is the full-precision vector text.
+  onOpenDataTab: (title: string, content: number[]) => void;
 }
 
 // Hardcoded descriptions per node kind
@@ -216,15 +227,6 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
   // here (would need combining input_tokens/history in a way the response
   // doesn't cleanly expose), kept simple deliberately.
   const isMostRecent = clampedIndex === entries.length - 1;
-  // Real growing sequence length (prompt + everything generated so far) —
-  // same value used to fix the token-count label in §36. entries.length is
-  // only the WINDOW size (capped to DIAGNOSTIC_POSITION_WINDOW, 12) — for
-  // a 15-token sequence, entries.length is 12, not 15. Displaying "12 of
-  // 12" with no mention of the real 15 read as a second, contradicting
-  // position counter right next to the already-correct "Position 14"
-  // label — real bug report, 2026-07-14. See docs/DESIGN_DECISIONS.md.
-  const totalPositions = (snapshot.generated_token?.position ?? entries.length - 1) + 1;
-  const isWindowed = entries.length < totalPositions;
 
   return (
     <div style={{ fontSize: 11 }}>
@@ -233,8 +235,12 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
           ◀
         </button>
         <span>
-          Position {entry.position} ("{entry.token}") — {clampedIndex + 1} of {entries.length} shown
-          {isWindowed && ` (last ${entries.length} of ${totalPositions} total)`}
+          {/* Display 1-indexed — internal entry.position stays 0-indexed.
+              Just the position, per direct user feedback 2026-07-15 — the
+              "X of Y shown (last N of M total)" window-size explanation
+              was unnecessary noise once you can already see the ◀/▶
+              controls. See docs/DESIGN_DECISIONS.md. */}
+          Position {entry.position + 1} ("{entry.token}")
         </span>
         <button onClick={() => setIndex(Math.min(entries.length - 1, clampedIndex + 1))} disabled={clampedIndex === entries.length - 1}>
           ▶
@@ -288,91 +294,210 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
 // same lightweight mechanism the heatmap cells already use, shows the
 // whole window (up to DIAGNOSTIC_POSITION_WINDOW positions) at once instead
 // of stepping through one at a time. See docs/DESIGN_DECISIONS.md.
-function truncatedVector(v: number[], previewLen = 4): { preview: string; full: string } {
+// Consistent everywhere a vector is truncated for preview (real feedback,
+// 2026-07-15: was arbitrary — first-4-only in one place — and needed to be
+// standard). First 6, "…", last 6 — the same convention used everywhere.
+// Vectors shorter than 2*edgeLen just show in full, no ellipsis. See
+// docs/DESIGN_DECISIONS.md.
+function truncatedVector(v: number[], edgeLen = 6): { preview: string; full: string } {
+  const preview =
+    v.length <= edgeLen * 2
+      ? `[${v.map((x) => x.toFixed(2)).join(", ")}]`
+      : `[${v.slice(0, edgeLen).map((x) => x.toFixed(2)).join(", ")}, …, ${v.slice(-edgeLen).map((x) => x.toFixed(2)).join(", ")}]`;
   return {
-    preview: `[${v.slice(0, previewLen).map((x) => x.toFixed(2)).join(", ")}${v.length > previewLen ? ", …" : ""}]`,
+    preview,
     full: `[${v.map((x) => x.toFixed(4)).join(", ")}]`,
   };
 }
 
-function QKVTable({ qkv }: { qkv: import("../types").QKVDetail }) {
+// Shared by QKVTable/NodeVectorTable — one vector-kind (Q, K, V, Input,
+// Output) rendered as its own Position(+Token)/Value table. Previously Q/K/V
+// and Input/Output were side-by-side columns in one table; direct user
+// request 2026-07-15: stack them vertically instead (Input above Output;
+// Q above K above V) so each is read top-to-bottom on its own rather than
+// scanned across a wide row. See docs/DESIGN_DECISIONS.md.
+function VectorPreviewTable({
+  label, positions, tokens, vectors, onOpenCell,
+}: {
+  label: string;
+  positions: number[];
+  tokens?: string[];
+  vectors: number[][];
+  onOpenCell: (pos: number, vector: number[]) => void;
+}) {
   return (
-    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
-        Q/K/V Detail — last {qkv.positions.length} position{qkv.positions.length === 1 ? "" : "s"} (hover a cell for full vector)
-      </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)" }}>
-          <thead>
-            <tr>
-              <th style={positionTableCellStyle}>Position</th>
-              <th style={positionTableCellStyle}>Token</th>
-              <th style={positionTableCellStyle}>Q</th>
-              <th style={positionTableCellStyle}>K</th>
-              <th style={positionTableCellStyle}>V</th>
-            </tr>
-          </thead>
-          <tbody>
-            {qkv.positions.map((pos, i) => {
-              const q = truncatedVector(qkv.q[i]);
-              const k = truncatedVector(qkv.k[i]);
-              const v = truncatedVector(qkv.v[i]);
-              return (
-                <tr key={pos}>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pos}</td>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }}>"{qkv.tokens[i]}"</td>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }} title={q.full}>{q.preview}</td>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }} title={k.full}>{k.preview}</td>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }} title={v.full}>{v.preview}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 4 }}>{label}</div>
+      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+        <thead>
+          <tr>
+            <th style={positionTableCellStyle}>Position</th>
+            {tokens && <th style={positionTableCellStyle}>Token</th>}
+            <th style={positionTableCellStyle}>{label}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {positions.map((pos, i) => {
+            const t = truncatedVector(vectors[i]);
+            return (
+              <tr key={pos}>
+                <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pos + 1}</td>
+                {tokens && <td style={{ ...positionTableCellStyle, color: "var(--text)" }}>"{tokens[i]}"</td>}
+                <td
+                  style={{ ...positionTableCellStyle, color: "var(--text)", cursor: "pointer" }}
+                  title={t.full}
+                  onDoubleClick={() => onOpenCell(pos, vectors[i])}
+                >
+                  {t.preview}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
 
-// Same Colab-style table as QKVTable, generalized to any node's raw output
-// vector (embedding, layernorm, mlp, etc.) — one column instead of three,
-// no token text (position numbers alone are enough to correlate against
-// the heatmap/top-k tables if needed, and re-decoding tokens at every one
-// of ~18 nodes per step for a column that's already shown elsewhere isn't
-// worth the payload). See docs/DESIGN_DECISIONS.md.
-function NodeVectorTable({ pv }: { pv: import("../types").NodePositionVectors }) {
+function QKVTable({
+  qkv, blockNum, head, onOpenDataTab,
+}: {
+  qkv: import("../types").QKVDetail;
+  blockNum: number | null;
+  head: number | null;
+  onOpenDataTab: (title: string, content: number[]) => void;
+}) {
+  const openCell = (kind: "Q" | "K" | "V", pos: number, vector: number[]) => {
+    const title = `Block ${blockNum != null ? blockNum + 1 : "?"} Head ${head != null ? head + 1 : "?"} — ${kind} — pos ${pos + 1}`;
+    onOpenDataTab(title, vector);
+  };
   return (
     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
       <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
-        Output Vectors — last {pv.positions.length} position{pv.positions.length === 1 ? "" : "s"} (hover for full vector)
+        Q/K/V Detail — last {qkv.positions.length} position{qkv.positions.length === 1 ? "" : "s"} (hover a cell for full vector, double-click to open in a tab)
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)" }}>
-          <thead>
-            <tr>
-              <th style={positionTableCellStyle}>Position</th>
-              <th style={positionTableCellStyle}>Vector</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pv.positions.map((pos, i) => {
-              const v = truncatedVector(pv.vectors[i]);
-              return (
-                <tr key={pos}>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pos}</td>
-                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }} title={v.full}>{v.preview}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <VectorPreviewTable label="Q" positions={qkv.positions} tokens={qkv.tokens} vectors={qkv.q} onOpenCell={(pos, v) => openCell("Q", pos, v)} />
+      <VectorPreviewTable label="K" positions={qkv.positions} tokens={qkv.tokens} vectors={qkv.k} onOpenCell={(pos, v) => openCell("K", pos, v)} />
+      <VectorPreviewTable label="V" positions={qkv.positions} tokens={qkv.tokens} vectors={qkv.v} onOpenCell={(pos, v) => openCell("V", pos, v)} />
+    </div>
+  );
+}
+
+// The embedding node's INPUT, not its output — direct user request
+// 2026-07-15: the Runtime tab showed the embedding's float output vectors
+// (what NodeVectorTable shows for every other node), but for embedding
+// specifically what's actually illuminating is the one-hot encoded input:
+// position, character, and a vocab_size-wide vector that's all zeros
+// except a 1 at that token's id. Replaces the output-vector table for this
+// one node entirely — not shown alongside it. Synthesized client-side from
+// snapshot.position_tokens + vocab_size (from lm_head.logits_shape); no
+// new per-node backend capture needed since a one-hot vector is fully
+// determined by the token id alone. See docs/DESIGN_DECISIONS.md.
+function EmbeddingOneHotTable({
+  snapshot, onOpenDataTab,
+}: {
+  snapshot: DiagnosticSnapshot;
+  onOpenDataTab: (title: string, content: number[]) => void;
+}) {
+  const positionTokens = snapshot.position_tokens;
+  const shape = snapshot.lm_head.logits_shape;
+  const vocabSize = shape.length > 0 ? shape[shape.length - 1] : null;
+
+  if (!positionTokens || positionTokens.length === 0 || vocabSize == null) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Not captured</div>;
+  }
+
+  const oneHot = (id: number): number[] => {
+    const v = new Array(vocabSize).fill(0);
+    v[id] = 1;
+    return v;
+  };
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+        Input Vectors (one-hot, width {vocabSize}) — hover for full vector, double-click to open in a tab
       </div>
+      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+        <thead>
+          <tr>
+            <th style={positionTableCellStyle}>Position</th>
+            <th style={positionTableCellStyle}>Character</th>
+            <th style={positionTableCellStyle}>One-Hot Vector</th>
+          </tr>
+        </thead>
+        <tbody>
+          {positionTokens.map((pt) => {
+            const vec = oneHot(pt.id);
+            const t = truncatedVector(vec);
+            return (
+              <tr key={pt.position}>
+                <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pt.position + 1}</td>
+                <td style={{ ...positionTableCellStyle, color: "var(--text)" }}>"{pt.token}"</td>
+                <td
+                  style={{ ...positionTableCellStyle, color: "var(--text)", cursor: "pointer" }}
+                  title={t.full}
+                  onDoubleClick={() => onOpenDataTab(`Embedding Input — "${pt.token}" — pos ${pt.position + 1}`, vec)}
+                >
+                  {t.preview}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Same Colab-style table as QKVTable, generalized to any node's raw
+// input/output vectors (embedding, layernorm, mlp, etc.) — no token text
+// (position numbers alone are enough to correlate against the
+// heatmap/top-k tables if needed, and re-decoding tokens at every one of
+// ~18 nodes per step for a column that's already shown elsewhere isn't
+// worth the payload). Shows both Input and Output columns when input is
+// available (real gap flagged live, 2026-07-15: output-only, no way to see
+// what a LayerNorm actually changed) — embedding has no input column since
+// its input is token ids, not a per-position float vector. See
+// docs/DESIGN_DECISIONS.md.
+function NodeVectorTable({
+  outputPv, inputPv, nodeId, onOpenDataTab,
+}: {
+  outputPv: import("../types").NodePositionVectors;
+  inputPv?: import("../types").NodePositionVectors | null;
+  nodeId: string | null;
+  onOpenDataTab: (title: string, content: number[]) => void;
+}) {
+  const openCell = (kind: "Input" | "Output", pos: number, vector: number[]) => {
+    onOpenDataTab(`${nodeId ?? "node"} — ${kind} — pos ${pos + 1}`, vector);
+  };
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+        {inputPv ? "Input / Output Vectors" : "Output Vectors"} — last {outputPv.positions.length} position
+        {outputPv.positions.length === 1 ? "" : "s"} (hover for full vector, double-click to open in a tab)
+      </div>
+      {/* Input above Output — direct user request 2026-07-15, was
+          side-by-side columns before. See docs/DESIGN_DECISIONS.md. */}
+      {inputPv && (
+        <VectorPreviewTable label="Input" positions={inputPv.positions} vectors={inputPv.vectors} onOpenCell={(pos, v) => openCell("Input", pos, v)} />
+      )}
+      <VectorPreviewTable label="Output" positions={outputPv.positions} vectors={outputPv.vectors} onOpenCell={(pos, v) => openCell("Output", pos, v)} />
     </div>
   );
 }
 
 // Phase 2: Render attention heatmap for attention nodes
-function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
+function AttentionHeatmap({
+  snapshot, blockNum, head, onOpenDataTab, windowOffset, onWindowOffsetChange,
+}: {
+  snapshot: DiagnosticSnapshot;
+  blockNum: number | null;
+  head: number | null;
+  onOpenDataTab: (title: string, content: number[]) => void;
+  windowOffset: number;
+  onWindowOffsetChange: (offset: number) => void;
+}) {
   const att = snapshot.attention;
   if (!att.available) {
     return (
@@ -389,6 +514,18 @@ function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
       </div>
     );
   }
+
+  const tokenLabels = att.token_labels;
+  const windowStart = att.window_start ?? 0;
+  const totalPositions = att.total_positions ?? tokenLabels.length;
+  const windowSize = tokenLabels.length;
+  // offset=0 is "most recent" (window's end sits at totalPositions); larger
+  // offset shifts the window's end earlier. Can't shift the window's end
+  // past totalPositions (offset < 0, meaningless) or its start before 0
+  // (offset so large the window would run off the front of the sequence).
+  const maxOffset = Math.max(0, totalPositions - windowSize);
+  const canShiftEarlier = windowOffset < maxOffset;
+  const canShiftLater = windowOffset > 0;
 
   // Per-row normalization, not global: each row is its own probability
   // distribution (sums to 1), so comparing within a row is what's actually
@@ -409,6 +546,33 @@ function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
       <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
         Layer {att.layer != null ? att.layer + 1 : "?"}, Head {att.head != null ? att.head + 1 : "?"}
       </div>
+      {/* Heatmap window stepper — real user report, 2026-07-13: an
+          unwindowed T x T grid "gets very busy very quickly" as a session
+          grows. Shows the same DIAGNOSTIC_POSITION_WINDOW-wide slice as
+          qkv_detail below (shared window, one stepper controls both), and
+          lets the user shift it earlier/later through the sequence instead
+          of only ever seeing the tail. See docs/DESIGN_DECISIONS.md. */}
+      {totalPositions > windowSize && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
+          <button
+            onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + windowSize))}
+            disabled={!canShiftEarlier}
+            title="Shift window earlier"
+          >
+            ◀ Earlier
+          </button>
+          <span style={{ color: "var(--text-dim)" }}>
+            Positions {windowStart + 1}–{windowStart + windowSize} of {totalPositions}
+          </span>
+          <button
+            onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - windowSize))}
+            disabled={!canShiftLater}
+            title="Shift window later"
+          >
+            Later ▶
+          </button>
+        </div>
+      )}
       <div style={{ overflowX: "auto" }}>
         <table
           style={{
@@ -435,9 +599,15 @@ function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
                     textAlign: "center",
                     color: "var(--text-dim)",
                   }}
-                  title={token}
+                  title={`Position ${windowStart + j + 1}`}
                 >
-                  {j}
+                  {/* Actual token character, not the position number — direct
+                      user request 2026-07-15 ("this letter A is character 1
+                      ... it should have an A or B or C"). Position stays
+                      available via hover. Internal indexing (key,
+                      weights[i][j] lookups) stays 0-indexed. See
+                      docs/DESIGN_DECISIONS.md. */}
+                  {token}
                 </th>
               ))}
             </tr>
@@ -456,8 +626,9 @@ function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
                     fontSize: 9,
                     color: "var(--text-dim)",
                   }}
+                  title={`Position ${windowStart + i + 1}`}
                 >
-                  {i}
+                  {tokenLabels[i]}
                 </td>
                 {row.map((weight, j) => {
                   const masked = j > i;
@@ -509,7 +680,9 @@ function AttentionHeatmap({ snapshot }: { snapshot: DiagnosticSnapshot }) {
           response from a trainer container built before that change would
           still have the old {position, q, k, v} shape and crash QKVTable's
           .positions.length access. See docs/DESIGN_DECISIONS.md. */}
-      {att.qkv_detail && Array.isArray(att.qkv_detail.positions) && <QKVTable qkv={att.qkv_detail} />}
+      {att.qkv_detail && Array.isArray(att.qkv_detail.positions) && (
+        <QKVTable qkv={att.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
+      )}
     </div>
   );
 }
@@ -551,7 +724,119 @@ function LmHeadLogitsSlice({ snapshot }: { snapshot: DiagnosticSnapshot }) {
   );
 }
 
+// The learned embedding table itself (vocab_size x n_embd), not per-position
+// runtime activations for the current prompt — direct user request
+// 2026-07-15: "for the embedding layer, I think we should also have the
+// embedding table or embedding matrix." Fetched once per runId (static
+// model weights, doesn't change per step). transformer/moe only — see the
+// backend route's own docstring for why RNN has none. See
+// docs/DESIGN_DECISIONS.md.
+function EmbeddingTable({
+  runId, onOpenDataTab,
+}: {
+  runId: number | null;
+  onOpenDataTab: (title: string, content: number[]) => void;
+}) {
+  const [table, setTable] = useState<import("../types").EmbeddingTableData | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (runId == null) return;
+    setTable(null);
+    setError(false);
+    fetchEmbeddingTable(runId)
+      .then(setTable)
+      .catch(() => setError(true));
+  }, [runId]);
+
+  if (error) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Embedding table not available (no checkpoint yet, or unsupported template).</div>;
+  }
+  if (!table) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Loading embedding table...</div>;
+  }
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+        Token Embedding Table — {table.vocab_size} tokens × {table.n_embd} dims (hover for full vector, double-click to open in a tab)
+      </div>
+      <div style={{ maxHeight: 400, overflowY: "auto" }}>
+        <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+          <thead>
+            <tr>
+              <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Token</th>
+              <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Vector</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.tokens.map((tok, i) => {
+              const v = truncatedVector(table.embedding[i]);
+              return (
+                <tr key={i}>
+                  <td style={{ ...positionTableCellStyle, color: "var(--text)" }}>"{tok}"</td>
+                  <td
+                    style={{ ...positionTableCellStyle, color: "var(--text)", cursor: "pointer" }}
+                    title={v.full}
+                    onDoubleClick={() => onOpenDataTab(`Token Embedding Table — "${tok}"`, table.embedding[i])}
+                  >
+                    {v.preview}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Direct follow-up, 2026-07-13: "I can't see the position embedding
+          table. I think they should both be on that tab." Only exists
+          under pos_encoding="learned" — RoPE computes rotary embeddings on
+          the fly, no table to show. See docs/DESIGN_DECISIONS.md. */}
+      <div style={{ fontSize: 11, color: "var(--accent)", margin: "16px 0 8px" }}>
+        {table.position_embedding
+          ? `Position Embedding Table — ${table.block_size} positions × ${table.n_embd} dims (hover for full vector, double-click to open in a tab)`
+          : "Position Embedding Table"}
+      </div>
+      {table.position_embedding ? (
+        <div style={{ maxHeight: 400, overflowY: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Position</th>
+                <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Vector</th>
+              </tr>
+            </thead>
+            <tbody>
+              {table.position_embedding.map((vec, pos) => {
+                const v = truncatedVector(vec);
+                return (
+                  <tr key={pos}>
+                    <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pos + 1}</td>
+                    <td
+                      style={{ ...positionTableCellStyle, color: "var(--text)", cursor: "pointer" }}
+                      title={v.full}
+                      onDoubleClick={() => onOpenDataTab(`Position Embedding Table — pos ${pos + 1}`, vec)}
+                    >
+                      {v.preview}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          Not applicable — this model uses RoPE (rotary position encoding), which has no learned position table.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Runtime({
+  runId,
   snapshot,
   selectedNodeId,
   isLoading,
@@ -559,8 +844,12 @@ function Runtime({
   onAttentionHeadChange,
   showQKVDetail,
   onShowQKVDetailChange,
+  attentionWindowOffset,
+  onAttentionWindowOffsetChange,
   numHeads,
+  onOpenDataTab,
 }: {
+  runId: number | null;
   snapshot: DiagnosticSnapshot | null;
   selectedNodeId: string | null;
   isLoading: boolean;
@@ -568,8 +857,21 @@ function Runtime({
   onAttentionHeadChange: (head: number | null) => void;
   showQKVDetail: boolean;
   onShowQKVDetailChange: (show: boolean) => void;
+  attentionWindowOffset: number;
+  onAttentionWindowOffsetChange: (offset: number) => void;
   numHeads: number | null;
+  onOpenDataTab: (title: string, content: number[]) => void;
 }) {
+  // Default Head to the first option as soon as an attention node is
+  // selected and nothing's picked yet — a dropdown that starts blank,
+  // showing nothing until manually chosen, was real reported friction
+  // ("just frustrates the user," 2026-07-15). See docs/DESIGN_DECISIONS.md.
+  useEffect(() => {
+    if (selectedNodeId?.includes(".attention") && attentionHead === null && numHeads) {
+      onAttentionHeadChange(0);
+    }
+  }, [selectedNodeId, attentionHead, numHeads, onAttentionHeadChange]);
+
   if (isLoading) {
     return (
       <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
@@ -641,11 +943,10 @@ function Runtime({
                 0-indexed value the backend expects. See
                 docs/DESIGN_DECISIONS.md. */}
             <select
-              value={attentionHead ?? ""}
-              onChange={(e) => onAttentionHeadChange(e.target.value === "" ? null : parseInt(e.target.value, 10))}
+              value={attentionHead ?? 0}
+              onChange={(e) => onAttentionHeadChange(parseInt(e.target.value, 10))}
               style={{ marginLeft: 4 }}
             >
-              <option value="">—</option>
               {Array.from({ length: numHeads ?? 0 }, (_, i) => (
                 <option key={i} value={i}>{i + 1}</option>
               ))}
@@ -678,7 +979,14 @@ function Runtime({
             Click <strong>&gt;</strong> to refresh.
           </div>
         )}
-        <AttentionHeatmap snapshot={snapshot} />
+        <AttentionHeatmap
+          snapshot={snapshot}
+          blockNum={currentBlock}
+          head={attentionHead}
+          onOpenDataTab={onOpenDataTab}
+          windowOffset={attentionWindowOffset}
+          onWindowOffsetChange={onAttentionWindowOffsetChange}
+        />
       </div>
     );
   }
@@ -718,12 +1026,37 @@ function Runtime({
           </div>
         </div>
       )}
-      {runtimeData.position_vectors && <NodeVectorTable pv={runtimeData.position_vectors} />}
+      {selectedNodeId === "embedding" ? (
+        <>
+          {/* Input (one-hot, synthesized) above Output (real, captured) —
+              direct follow-up 2026-07-13: both wanted on this tab, not
+              just one. See docs/DESIGN_DECISIONS.md. */}
+          <EmbeddingOneHotTable snapshot={snapshot} onOpenDataTab={onOpenDataTab} />
+          {runtimeData.position_vectors && (
+            <NodeVectorTable
+              outputPv={runtimeData.position_vectors}
+              nodeId={selectedNodeId}
+              onOpenDataTab={onOpenDataTab}
+            />
+          )}
+        </>
+      ) : (
+        runtimeData.position_vectors && (
+          <NodeVectorTable
+            outputPv={runtimeData.position_vectors}
+            inputPv={runtimeData.input_position_vectors}
+            nodeId={selectedNodeId}
+            onOpenDataTab={onOpenDataTab}
+          />
+        )
+      )}
+      {selectedNodeId === "embedding" && <EmbeddingTable runId={runId} onOpenDataTab={onOpenDataTab} />}
     </div>
   );
 }
 
 export default function Inspector({
+  runId,
   selectedNode,
   selectedNodeId,
   diagnosticSnapshot,
@@ -733,7 +1066,10 @@ export default function Inspector({
   onAttentionHeadChange,
   showQKVDetail,
   onShowQKVDetailChange,
+  attentionWindowOffset,
+  onAttentionWindowOffsetChange,
   numHeads,
+  onOpenDataTab,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SubTab>("overview");
 
@@ -785,6 +1121,7 @@ export default function Inspector({
         {activeTab === "config" && <Config node={selectedNode} />}
         {activeTab === "runtime" && (
           <Runtime
+            runId={runId}
             snapshot={diagnosticSnapshot}
             selectedNodeId={selectedNodeId}
             isLoading={isLoading}
@@ -792,7 +1129,10 @@ export default function Inspector({
             onAttentionHeadChange={onAttentionHeadChange}
             showQKVDetail={showQKVDetail}
             onShowQKVDetailChange={onShowQKVDetailChange}
+            attentionWindowOffset={attentionWindowOffset}
+            onAttentionWindowOffsetChange={onAttentionWindowOffsetChange}
             numHeads={numHeads}
+            onOpenDataTab={onOpenDataTab}
           />
         )}
       </div>

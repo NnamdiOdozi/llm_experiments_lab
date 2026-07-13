@@ -3,7 +3,7 @@
   "template": "transformer",
   "dataset": "tiny_shakespeare",
   "device": "cpu",
-  "started_at": "2026-07-13T19:28:10.765800",
+  "started_at": "2026-07-13T20:32:33.654495",
   "seed": 1337,
   "param_count": 1827137,
   "config": {
@@ -41,5 +41,5 @@
     "uvicorn": "0.49.0",
     "pydantic": "2.13.4"
   },
-  "git_commit": "bd1e42f"
+  "git_commit": "1e6cd6a"
 }

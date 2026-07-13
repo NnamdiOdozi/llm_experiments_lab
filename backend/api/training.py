@@ -67,6 +67,13 @@ class DiagnosticsStepRequest(BaseModel):
     attention_layer: int | None = None
     attention_head: int | None = None
     qkv_detail: bool = False
+    # Shifts the attention heatmap/qkv_detail window earlier in the
+    # sequence — 0 (default) shows the most recent DIAGNOSTIC_POSITION_WINDOW
+    # positions, positive N shifts back N positions. Lets the Inspector's
+    # heatmap stepper browse history instead of only ever showing the tail
+    # (real user report, 2026-07-13: heatmap "gets very busy very quickly").
+    # See docs/DESIGN_DECISIONS.md.
+    attention_window_offset: int = 0
 
 
 class DiagnosticsGenerateRequest(BaseModel):
@@ -323,6 +330,16 @@ async def list_open_runs():
 @router.post("/{run_id}/pause")
 async def pause_training(run_id: int):
     db_run = await db.get_training_run(run_id)
+    # Check local status before ever touching the network. Previously
+    # pause always proxied straight through for remote runs — if the run
+    # had already reached completed/failed/cancelled (e.g. the frontend's
+    # step counter hadn't caught up with the last poll yet), the remote's
+    # own pause_run() correctly returned 400, but _proxy()'s
+    # raise_for_status() turned that into an httpx error which got
+    # collapsed into a generic, unhelpful 502 here. Real bug report,
+    # 2026-07-13. See docs/DESIGN_DECISIONS.md.
+    if db_run["status"] in TERMINAL_STATUSES:
+        raise HTTPException(400, f"Cannot pause — run is already {db_run['status']}")
     if _is_remote(db_run):
         try:
             await _proxy(db_run, "POST", "/api/training/{run_id}/pause")
@@ -834,6 +851,82 @@ async def get_architecture_manifest(run_id: int):
     }
 
 
+@router.get("/{run_id}/architecture/embedding-table")
+async def get_embedding_table(run_id: int):
+    """Return the trained token embedding matrix (vocab_size x n_embd).
+
+    Direct user request 2026-07-15 — the Inspector's embedding node only
+    ever showed per-position runtime vectors for the current prompt, not
+    the underlying learned table itself. Requires a saved checkpoint (the
+    static /architecture route builds a fresh untrained model just to
+    count params — this one needs real trained weights). transformer/moe
+    only: RNN's CharRNN has no token_emb (uses one-hot input, see
+    get_architecture_manifest's rnn branch), so there's no embedding
+    matrix to show. See docs/DESIGN_DECISIONS.md.
+    """
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(db_run, "GET", "/api/training/{run_id}/architecture/embedding-table")
+            return result
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote embedding table fetch failed: {exc}")
+
+    rd = artifacts.run_dir(run_id)
+    config_path = rd / "config.json"
+    if not config_path.exists():
+        raise HTTPException(404, "Run config not found")
+    config = json.loads(config_path.read_text())
+    template_key = config.get("template", "transformer")
+    if template_key not in ("transformer", "moe"):
+        raise HTTPException(400, f"No embedding table for template: {template_key}")
+
+    cp_path = artifacts.checkpoint_path(run_id)
+    if not cp_path.exists():
+        raise HTTPException(400, "No checkpoint available for this run")
+
+    import torch
+    cp = torch.load(cp_path, map_location="cpu", weights_only=False)
+    model_config = cp.get("config", config)
+    model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config)
+    model.load_state_dict(cp["model_state"])
+    model.eval()
+
+    from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
+    text = load_tiny_shakespeare()
+    tokenizer = CharDataset(text, model_config["model"]["block_size"], 1)
+
+    weight = model.token_emb.weight.detach().cpu()
+    vocab_size, n_embd = weight.shape
+
+    # Position embedding table is only a real learned parameter under
+    # pos_encoding="learned" (nn.Embedding(block_size, n_embd)) — RoPE
+    # computes rotary embeddings on the fly, no table exists to show.
+    # hasattr is the ground truth here (checked against the actual loaded
+    # model), not the config string, so this can't drift out of sync with
+    # the model's real structure. Direct user follow-up, 2026-07-13: "I
+    # can't see the position embedding table... I think they should both
+    # be on that tab." See docs/DESIGN_DECISIONS.md.
+    position_embedding = None
+    block_size = None
+    if hasattr(model, "pos_emb"):
+        pos_weight = model.pos_emb.weight.detach().cpu()
+        block_size = pos_weight.shape[0]
+        position_embedding = pos_weight.tolist()
+
+    return {
+        "vocab_size": vocab_size,
+        "n_embd": n_embd,
+        "tokens": [tokenizer.decode([i]) for i in range(vocab_size)],
+        "embedding": weight.tolist(),
+        "block_size": block_size,
+        "position_embedding": position_embedding,
+    }
+
+
 @router.post("/{run_id}/diagnostics/start")
 async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
     """Initialize a diagnostic session: load model, encode prompt, return session_id.
@@ -953,13 +1046,17 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
     if req is not None and req.attention_layer is not None and req.attention_head is not None:
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
+    attention_window_offset = req.attention_window_offset if req is not None else 0
 
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
         try:
             body = {}
             if attention_params is not None:
-                body = {"attention_layer": attention_params[0], "attention_head": attention_params[1], "qkv_detail": qkv_detail}
+                body = {
+                    "attention_layer": attention_params[0], "attention_head": attention_params[1],
+                    "qkv_detail": qkv_detail, "attention_window_offset": attention_window_offset,
+                }
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/step", body)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics step failed: {exc}")
@@ -977,7 +1074,10 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
         raise HTTPException(404, "Diagnostic session not found")
 
     # Run step
-    snapshot = diagnostics.run_diagnostic_step(session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail)
+    snapshot = diagnostics.run_diagnostic_step(
+        session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
+        attention_window_offset=attention_window_offset,
+    )
     if snapshot is None:
         raise HTTPException(500, "Failed to run diagnostic step")
 
@@ -1002,13 +1102,17 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
     if req is not None and req.attention_layer is not None and req.attention_head is not None:
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
+    attention_window_offset = req.attention_window_offset if req is not None else 0
 
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
         try:
             body = {}
             if attention_params is not None:
-                body = {"attention_layer": attention_params[0], "attention_head": attention_params[1], "qkv_detail": qkv_detail}
+                body = {
+                    "attention_layer": attention_params[0], "attention_head": attention_params[1],
+                    "qkv_detail": qkv_detail, "attention_window_offset": attention_window_offset,
+                }
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/peek", body)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics peek failed: {exc}")
@@ -1025,7 +1129,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
 
     snapshot = diagnostics.run_diagnostic_step_internal(
         session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
-        skip_token_generation=True,
+        skip_token_generation=True, attention_window_offset=attention_window_offset,
     )
     if snapshot is None:
         raise HTTPException(500, "Failed to peek diagnostic state")

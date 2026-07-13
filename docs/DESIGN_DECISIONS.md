@@ -1837,6 +1837,306 @@ for the MoE bug — asserts every node has non-empty shape/summary, not just
 changed — needs a rebuild+repush, same category as every backend change
 this session.
 
+## §42: Greedy/sampling toggle, input vectors everywhere, 1-indexed positions, no-blank Head dropdown, double-click data tabs
+
+Six-item batch from one round of direct feedback (2026-07-15), driven by
+live use of the Inspector, not upfront spec.
+
+**1. Greedy vs sampling decoding mode.** New `inference.decoding_mode`
+config field (`"sample"` | `"greedy"`, default `"sample"` — unchanged
+default behavior). Read once at diagnostic-session creation
+(`DiagnosticSession.decoding_mode`) and by `/generate`'s inline
+token-selection loop and `prompt_paused_model()` — same source Generate
+already used for `max_new_tokens`/`temperature`, so `>`, `>>`, and Generate
+all honor it identically. `model.generate(..., greedy=greedy)` added to all
+three templates (transformer, moe, rnn): `torch.argmax` under greedy,
+`torch.multinomial(softmax(logits/T))` under sample — same branch already
+used in `_execute_forward_pass`.
+
+Temperature is mathematically inert under greedy: `argmax(logits/T) ==
+argmax(logits)` for any positive T, since dividing preserves rank order.
+`ConfigPanel.tsx` greys the `temperature` field and shows "no effect under
+greedy" when `decoding_mode === "greedy"`, rather than leaving a live
+control that silently does nothing.
+
+**2. Input vectors alongside output vectors, for every node.** Previously
+`NodeVectorTable` only showed a node's output. Real gap: no way to see
+what a LayerNorm actually *changed*, just what it produced. Every hook
+(`register_diagnostic_hooks` in both transformer and moe templates) now
+also captures `input_position_vectors` via the same windowed-capture
+helper used for outputs. `NodeVectorTable` renders an Input column
+whenever `inputPv` is present; omitted for nodes whose input isn't a
+per-position float vector (e.g. embedding, whose input is token ids).
+
+**3. Consistent vector truncation: first 6, "…", last 6, everywhere.**
+Previously ad hoc — one place showed only the first 4. `truncatedVector()`
+is now the single shared helper behind both `QKVTable` and
+`NodeVectorTable`; full-precision value still available via the `title`
+hover tooltip (unchanged pattern) and now also via the new data tab (item
+6 below).
+
+**4. All displayed position numbers are 1-indexed.** Heatmap row/column
+headers, `QKVTable`/`NodeVectorTable` Position columns, and
+`LmHeadStepper`'s "Position N" label now all render `position + 1`.
+Internal state, array indices, node ids, and every backend request/response
+payload stay 0-indexed — this is a display-only conversion at the point of
+JSX rendering, same convention already established for Block/Head numbers
+in §37. Chosen specifically because the user flagged inconsistent
+indexing ("some places start from 0... it's just odd") as its own bug
+class, not something to fix piecemeal per screen.
+
+**5. Head dropdown no longer defaults to a blank option.** Real reported
+friction: "I don't think we should be starting on a blank entry where
+there's no image. It just frustrates the user." `Runtime()` now has a
+`useEffect` that defaults `attentionHead` to `0` the moment an attention
+node is selected and nothing's picked yet (placed before any early
+`return`, per the Rules of Hooks). The `<select>` no longer renders an
+empty first `<option>`.
+
+**6. Double-click a vector cell → opens a new, closeable Data tab.**
+Direct reference to the Colab/VS Code variable-inspector pattern: double-
+click to see the whole value, static and copyable. Implementation:
+- `App.tsx`: `RightPaneTab` widened from a fixed union to `string` so
+  dynamically-generated tab ids type-check. New `DataTab { id, title,
+  content }` state array (`dataTabs`), `openDataTab(title, content)`
+  (generates a unique id, appends, switches to it) and
+  `closeDataTab(id)` (removes it, falls back to `"assistant"` if it was
+  active). Tab bar renders one button + a "×" close button per open data
+  tab, appended after the static Assistant/Inspector tabs. Tab content
+  renders the full value in a read-only `<textarea>` (not `<pre>` —
+  needs to be a proper scrollable, selectable, copyable text control).
+- Each double-click opens a **separate new tab**, not a shared/reused one
+  — confirmed twice by the user, explicitly rejecting the "replace a
+  single tab" alternative, specifically so multiple values can be compared
+  side by side and closed individually rather than being clobbered by the
+  next double-click.
+- `onOpenDataTab` threaded from `App.tsx` → `Inspector` → `Runtime` →
+  `QKVTable`/`NodeVectorTable`, called from each `<td>`'s `onDoubleClick`.
+  Tab titles carry enough context to identify the value without opening
+  it: `QKVTable` uses `Block {n} Head {n} — Q/K/V — pos {n}`;
+  `NodeVectorTable` uses `{nodeId} — Input/Output — pos {n}` (nodeId is
+  already a stable, descriptive string like `block.2.mlp` or
+  `final_norm`).
+
+Frontend suite: 38 passed, build clean. Backend suite: 166 passed, no
+regressions (items 1-2 are covered by the existing decoding-mode/input-
+vector tests added alongside the code; items 3-6 are frontend-only, no
+backend tests apply).
+
+**Trainer-image note:** items 1 and 2 touch `backend/training/*` (all
+three template `model.py` files, `diagnostics.py`) and
+`backend/api/training.py` — needs a rebuild+repush before it's live on
+serverless runs. Items 3-6 are frontend-only and need no rebuild.
+
+## §43: Pause-after-completed 502, stale prompt survives resume, embedding table, and Inspector layout requests
+
+Two real bugs found live tonight (2026-07-13), traced with server logs and
+`git blame` rather than guessed at, plus a batch of confirmed UX requests.
+
+**Bug 1 — pausing an already-completed run returned a bare 502.** Real
+user report: clicked pause right as a run hit 1000/1000 steps (frontend's
+step counter hadn't caught up with the last poll yet). `pause_training()`
+in `backend/api/training.py` proxied straight to the remote endpoint
+regardless of local status. The remote's own `pause_run()` correctly
+returned 400 "not running," but `_proxy()`'s `raise_for_status()` turned
+that 400 into an `httpx.HTTPStatusError`, which the wrapper collapsed into
+a generic, unhelpful `HTTPException(502, ...)` — discarding the real
+reason entirely. Fixed: check `db_run["status"] in TERMINAL_STATUSES`
+*before* ever touching the network, returning a clear
+`400 "Cannot pause — run is already completed"` locally. Test:
+`test_pause_training_on_completed_remote_run_returns_clear_400` — asserts
+zero proxy calls happen at all.
+
+**Bug 2 — prompting during a pause, then resuming, then pausing again left
+the old partially-stepped-through prompt/session in place**, and stepping
+it errored. Root cause: `PausePrompt.tsx` never unmounts when `canPrompt`
+flips false (App.tsx keeps it mounted for the run's whole lifetime), so
+its `diagnosticSession`/`prompt`/`generatedTokens` state survived the
+round trip untouched. Server-side, resuming loads a fresh model checkpoint
+into a new process, so the old in-memory diagnostic session's `model`
+reference pointed at nothing valid anymore — stepping it threw. Fixed: a
+`useEffect` keyed on `canPrompt` clears all of that state (session,
+snapshot, prompt text, output, generated tokens) the instant the run
+leaves paused/completed. Resuming or retraining now always hands you a
+clean slate for the next prompt.
+
+Both traced and fixed the same night they were reported — verified via
+`git blame` that bug 2's origin (`1e6cd6a`, 20:15 that day, the §40
+auto-refresh-attention work) was mine, from earlier in the session, not
+the batch immediately before it, per the user's direct question ("it will
+have been one of the last changes you've put through").
+
+**UX batch**, all direct user requests, 2026-07-13:
+
+1. **"Metrics" not "Serverless Metrics."** `CodeView.tsx`'s tab worked
+   identically for local and remote runs already (`WorkerPanel.tsx` has no
+   nebius-specific branching — cpu/ram/gpu fields just come from whatever
+   the run actually reports) — the label was just wrong, not the content.
+   Simple rename, no split into two tabs needed.
+2. **Data tab returns to the tab that opened it, not always "assistant."**
+   `DataTab` gained a `returnTo` field, captured from `rightPaneTab` at
+   the moment `openDataTab()` is called; `closeDataTab()` restores it
+   instead of hardcoding `"assistant"`.
+3. **Data tab is now an actual index/value dataframe**, not a bracketed
+   string blob. `DataTab.content` changed from a preformatted `string` to
+   a raw `number[]`; every `onOpenDataTab` call site in `Inspector.tsx`
+   (`QKVTable`, `NodeVectorTable`, the new `EmbeddingTable`) now passes the
+   raw vector instead of `truncatedVector(...).full`. Rendered as an
+   Index | Value table, one row per element, scrollable.
+4. **Heatmap shows the actual token character, not the position number.**
+   `AttentionHeatmap`'s row and column headers now render `token`/
+   `tokenLabels[i]` directly; position is still available via the `title`
+   hover tooltip. (TS note: had to bind `att.token_labels` to a local
+   `const tokenLabels` after the `!att.token_labels` guard — narrowing
+   through `att.token_labels` directly doesn't survive into the nested
+   `.map()` closures.)
+5. **Input above Output; Q above K above V — vertical, not side-by-side
+   columns.** New shared `VectorPreviewTable` component (one vector-kind,
+   Position(+Token)/Value) used by both `QKVTable` (three stacked
+   instances: Q, K, V) and `NodeVectorTable` (two stacked instances:
+   Input, Output). Replaces the old wide multi-column single table.
+6. **LM Head stepper label simplified.** Was `Position 20 ("n") — 12 of 12
+   shown (last 12 of 21 total)`; now just `Position 20 ("n")`. The window
+   explanation was judged unnecessary noise once the ◀/▶ controls are
+   already visible — real feedback, 2026-07-13.
+7. **Embedding table/matrix in the Inspector.** New backend route
+   `GET /{run_id}/architecture/embedding-table` (local+remote proxy, same
+   pattern as `/architecture`) — loads the *actual trained checkpoint*
+   (unlike `/architecture`, which only builds a fresh untrained model to
+   count params) and returns `model.token_emb.weight` in full
+   (vocab_size × n_embd — small enough for these char-level toy models
+   that no windowing was needed) alongside each row's decoded character.
+   transformer/moe only — RNN's `CharRNN` has no `token_emb` (one-hot
+   input instead), returns a clear 400. New `EmbeddingTable` component in
+   `Inspector.tsx`, fetched once per `runId` and shown under the
+   `embedding` node's Runtime tab, reusing the same double-click-to-open
+   pattern as everything else. `Inspector`/`Runtime` both needed a new
+   `runId` prop threaded down from `App.tsx` to support this.
+
+Tests: `test_get_embedding_table_returns_real_trained_weights` (writes a
+known, distinctive value into the checkpoint's embedding matrix and
+confirms the route returns *that* value, not a freshly-initialized
+model's), `test_get_embedding_table_404_without_checkpoint`,
+`test_get_embedding_table_rejects_rnn`,
+`test_pause_training_on_completed_remote_run_returns_clear_400`. Backend
+suite: 170 passed (was 166, +4). Frontend: 38 passed, build clean.
+
+**Trainer-image note:** the new embedding-table route lives in
+`backend/api/training.py` — needs the same rebuild+repush as every other
+backend change this session before it works on a serverless run whose
+trainer image predates tonight's work (see §42's note — this is the exact
+failure mode that was live-diagnosed via the CPU run screenshot earlier
+tonight). Everything else in this batch is frontend-only.
+
+## §44: Embedding node shows one-hot input, windowed+steppable attention heatmap, LM head label trimmed
+
+Direct user requests, 2026-07-13, continuing straight on from §43.
+
+**1. Embedding node's Runtime tab now shows one-hot INPUT vectors, not
+output vectors.** Previously showed `NodeVectorTable`'s float output
+vectors (same as every other node) — user wanted the *input* instead:
+"position, then the character, and then the one-hot vector... just leave
+it at that for that tab." New `EmbeddingOneHotTable` component replaces
+`NodeVectorTable` entirely for the `embedding` node (not shown alongside
+it). Synthesized client-side — a one-hot vector is fully determined by the
+token id alone (`vocabSize`-wide array, 1 at that index, 0 elsewhere), no
+new per-node backend capture needed. Requires knowing the real token id at
+each position, which the snapshot didn't previously expose beyond the
+prompt-only `input_tokens` and the single most recent `generated_token` —
+added a new top-level `position_tokens: [{position, id, token}, ...]`
+field to `DiagnosticSnapshot`, computed once in `_execute_forward_pass`
+from the same pre-append window already used for `top_k_by_position`
+(shared across every node in one forward pass, so it's one list, not
+duplicated per node). The (separate, still-present) full embedding
+*weight matrix* view added in §43 is unaffected — this is about the
+per-position input to the layer for the current prompt, not the trained
+table itself.
+
+**2. Attention heatmap is now windowed and steppable.** Real bug found
+while implementing the fix: the heatmap's `weights`/`token_labels` were
+*never* capped at all — unlike `qkv_detail`, which was already windowed to
+`DIAGNOSTIC_POSITION_WINDOW`, the heatmap rendered the full, ever-growing
+T×T attention matrix. Exactly matches the user's report ("gets very busy
+in the inspector very quickly"). `_compute_attention_weights` now takes a
+`window_offset` param (0 = most recent window, positive N = shift the
+window's end back N positions) and slices `weights` to a square
+`DIAGNOSTIC_POSITION_WINDOW`-sized block on *both* axes — not just rows —
+so a long session shows a fixed-size, readable grid instead of an
+unbounded one. `qkv_detail` now shares the exact same window (previously
+computed its own independent trailing slice; now both come from one
+`start`/`end` pair). Threaded end-to-end: `DiagnosticsStepRequest` gained
+`attention_window_offset: int = 0`; `run_diagnostic_step`/
+`run_diagnostic_step_internal`/`_execute_forward_pass` all pass it
+through; the `/step` and `/peek` routes forward it (both locally and via
+the remote proxy body). `AttentionHeatmap` gained a ◀ Earlier / Later ▶
+stepper (only rendered when the sequence is actually longer than one
+window) showing "Positions N–M of T", driven by new `attentionWindowOffset`
+state in `App.tsx` — reset to 0 whenever `runId` or `selectedNodeId`
+changes (a stale offset from a previously-viewed block/head silently
+carrying over would show the wrong slice). `>` step calls now also send
+the current offset (so stepping while viewing an earlier window captures
+that window, not always the tail); `>>` continue-generation deliberately
+does **not** — it already produces only a single final snapshot, and
+window-shifting is a review action that makes more sense against a
+snapshot already at rest via `/peek`, not mid-stream.
+
+**3. LM Head stepper label trimmed.** Was `Position 20 ("n") — 12 of 12
+shown (last 12 of 21 total)`; the trailing "X of Y shown" clause read as
+noise once the ◀/▶ controls are already visible (real feedback, same
+session as items 1-2). Now just `Position 20 ("n")`.
+
+Tests: `test_attention_heatmap_windowed_not_full_matrix` (confirms the
+heatmap is capped to a `DIAGNOSTIC_POSITION_WINDOW`² block, not the full
+matrix — regression test for the just-found unbounded-heatmap bug),
+`test_attention_window_offset_shifts_window_earlier` (confirms `/peek`
+with an offset shifts `window_start` by exactly that much),
+`test_snapshot_includes_position_tokens_for_embedding_one_hot`. Backend
+suite: 173 passed (was 170, +3). Frontend: 38 passed, build clean.
+
+**Trainer-image note:** items 1-2 touch `backend/training/diagnostics.py`
+and `backend/api/training.py` — same rebuild+repush requirement as every
+other backend change this session (see §42, §43). Item 3 is frontend-only.
+
+## §45: Position embedding table, embedding output vectors restored, vocab_size read-only
+
+Direct follow-up, 2026-07-13, immediately after §44 — course-correction on
+the embedding node's Runtime tab, plus one unrelated config fix.
+
+**Position embedding table added; output vectors restored alongside the
+one-hot input.** §44 replaced the embedding node's output-vector table
+with the one-hot input table — user then clarified they wanted *both*,
+not one replacing the other, and also wanted the position embedding
+matrix (not just the token embedding matrix already added in §43).
+`GET /{run_id}/architecture/embedding-table` now also returns
+`block_size`/`position_embedding` — extracted from `model.pos_emb.weight`
+via `hasattr(model, "pos_emb")` (the actual loaded model, not the config
+string, so it can't drift out of sync with what the checkpoint really
+contains). Only present under `pos_encoding="learned"`
+(`nn.Embedding(block_size, n_embd)`, a real trained parameter); `null`
+under `"rope"`, since rotary position encoding is computed on the fly and
+has no table — the frontend shows a clear "Not applicable — this model
+uses RoPE" message in that case rather than an empty table. The embedding
+node's Runtime tab now shows, top to bottom: one-hot input vectors →
+output vectors (real, captured) → token embedding table → position
+embedding table (or the RoPE note).
+
+**`vocab_size` is now read-only in the Config panel.** It's a fact about
+the dataset (character-level, fixed alphabet), not a real training
+choice — editing it doesn't do anything useful and just risks a confusing
+mismatch. `ConfigPanel.tsx` gained a `READ_ONLY_FIELDS` set (same
+disabled/title/footnote pattern already used for temperature-under-greedy)
+rather than hiding the field — still shown for information, just not
+editable.
+
+Tests: `test_get_embedding_table_includes_position_table_when_learned`,
+`test_get_embedding_table_omits_position_table_when_rope`. Backend suite:
+175 passed (was 173, +2). Frontend: 38 passed, build clean.
+
+**Trainer-image note:** the embedding-table route change touches
+`backend/api/training.py` — same rebuild+repush requirement as every other
+backend change this session. The `vocab_size` read-only change and the
+Runtime tab restructuring are frontend-only.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

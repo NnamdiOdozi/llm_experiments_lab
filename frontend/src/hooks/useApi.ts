@@ -298,6 +298,7 @@ const FIXTURE_SNAPSHOT_WITH_ATTENTION: import("../types").DiagnosticSnapshot = {
       ] },
     ]
   },
+  position_tokens: [],
   complete: true
 };
 
@@ -363,6 +364,7 @@ const FIXTURE_SNAPSHOT: import("../types").DiagnosticSnapshot = {
       ] },
     ]
   },
+  position_tokens: [],
   complete: true
 };
 
@@ -371,6 +373,10 @@ export function fetchArchitecture(runId: number) {
     return Promise.resolve(FIXTURE_MANIFEST);
   }
   return api<import("../types").ArchitectureManifest>(`/training/${runId}/architecture`);
+}
+
+export function fetchEmbeddingTable(runId: number) {
+  return api<import("../types").EmbeddingTableData>(`/training/${runId}/architecture/embedding-table`);
 }
 
 export function startDiagnostic(runId: number, payload: import("../types").DiagnosticStartRequest) {

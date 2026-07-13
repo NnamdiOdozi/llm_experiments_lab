@@ -111,6 +111,7 @@ describe('Diagnostic Types', () => {
         top_k: topK,
         top_k_by_position: [{ position: 1, token: ' king', top_k: topK }],
       },
+      position_tokens: [],
       complete: true,
     };
 
