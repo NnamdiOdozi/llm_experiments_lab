@@ -22,6 +22,8 @@ import {
   fetchRunStatus,
   fetchMetrics,
   updateConfig,
+  fetchExperiment,
+  fetchPresets,
 } from "./hooks/useApi";
 
 const SESSION_KEY = "llm_lab_session";
@@ -51,6 +53,7 @@ export default function App() {
   const [runId, setRunId] = useState<number | null>(saved.current?.runId ?? null);
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
+  const [baselineConfig, setBaselineConfig] = useState<ExperimentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
@@ -119,6 +122,26 @@ export default function App() {
     pollRef.current = setInterval(pollStatus, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [runId, pollStatus]);
+
+  // Diff-from-baseline: every experiment is created from a preset
+  // (PresetPicker is the only creation path), so preset_key is always set.
+  // Look it up to show the original values as shadow text in ConfigPanel.
+  useEffect(() => {
+    if (experimentId == null) {
+      setBaselineConfig(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const [exp, presets] = await Promise.all([fetchExperiment(experimentId), fetchPresets()]);
+      if (cancelled) return;
+      const preset = presets.find((p) => p.key === exp.preset_key);
+      setBaselineConfig(
+        preset ? { template: preset.template, model: preset.model, training: preset.training, inference: preset.inference } : null,
+      );
+    })();
+    return () => { cancelled = true; };
+  }, [experimentId]);
 
   async function handleStart() {
     if (experimentId == null || !config) return;
@@ -277,6 +300,7 @@ export default function App() {
             config={config}
             onChange={handleConfigChange}
             disabled={runStatus?.status === "running"}
+            baseline={baselineConfig}
           />
           <TrainingControls
             runId={runId}
@@ -295,8 +319,8 @@ export default function App() {
             startError={startError}
             controlError={controlError}
           />
-          <ExportBar experimentId={experimentId} />
-          <ExperimentNotes runId={runId} />
+          <ExportBar experimentId={experimentId} runId={runId} />
+          <ExperimentNotes experimentId={experimentId} />
         </div>
 
         {/* Main area */}

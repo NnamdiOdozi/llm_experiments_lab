@@ -4,6 +4,9 @@ interface Props {
   config: ExperimentConfig;
   onChange: (config: ExperimentConfig) => void;
   disabled?: boolean;
+  // Preset this experiment was created from — used to show "baseline: X"
+  // shadow text under any field the user has changed. Null if unresolved yet.
+  baseline?: ExperimentConfig | null;
 }
 
 const DROPDOWN_FIELDS: Record<string, string[]> = {
@@ -18,7 +21,8 @@ function renderSection(
   sectionKey: "model" | "training" | "inference",
   config: ExperimentConfig,
   onChange: Props["onChange"],
-  disabled: boolean
+  disabled: boolean,
+  baselineSection?: Record<string, number | string>
 ) {
   return (
     <div style={{ marginBottom: 16 }}>
@@ -27,6 +31,8 @@ function renderSection(
       </h4>
       {Object.entries(section).map(([key, val]) => {
         const options = DROPDOWN_FIELDS[key];
+        const baselineVal = baselineSection?.[key];
+        const changedFromBaseline = baselineVal != null && String(baselineVal) !== String(val);
         const handleChange = (newVal: string | number) => {
           onChange({
             ...config,
@@ -34,13 +40,12 @@ function renderSection(
           });
         };
         return (
+          <div key={key} style={{ marginBottom: 6 }}>
           <div
-            key={key}
             style={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
-              marginBottom: 6,
             }}
           >
             <label style={{ fontSize: 12, color: "var(--text-dim)" }}>{key}</label>
@@ -67,6 +72,12 @@ function renderSection(
               />
             )}
           </div>
+          {changedFromBaseline && (
+            <div style={{ textAlign: "right", fontSize: 10, color: "var(--text-dim)", opacity: 0.6 }}>
+              baseline: {String(baselineVal)}
+            </div>
+          )}
+          </div>
         );
       })}
     </div>
@@ -75,7 +86,7 @@ function renderSection(
 
 const INFERENCE_DEFAULTS: Record<string, number> = { max_new_tokens: 100, temperature: 0.8 };
 
-export default function ConfigPanel({ config, onChange, disabled = false }: Props) {
+export default function ConfigPanel({ config, onChange, disabled = false, baseline = null }: Props) {
   // Normalize inference section so onChange always has all fields,
   // even for experiments created before inference config existed.
   const normalizedConfig: ExperimentConfig = {
@@ -90,8 +101,8 @@ export default function ConfigPanel({ config, onChange, disabled = false }: Prop
         style={{ marginBottom: 12 }}>
         {normalizedConfig.template}
       </div>
-      {renderSection("Model", normalizedConfig.model, "model", normalizedConfig, onChange, disabled)}
-      {renderSection("Training", normalizedConfig.training, "training", normalizedConfig, onChange, disabled)}
+      {renderSection("Model", normalizedConfig.model, "model", normalizedConfig, onChange, disabled, baseline?.model)}
+      {renderSection("Training", normalizedConfig.training, "training", normalizedConfig, onChange, disabled, baseline?.training)}
       {/* Inference section controls generation params (temperature, max_new_tokens)
           used when prompting a paused model from the dashboard. */}
       {renderSection("Inference", normalizedConfig.inference!, "inference", normalizedConfig, onChange, disabled)}
