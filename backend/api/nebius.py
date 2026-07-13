@@ -20,26 +20,43 @@ def _warning_seconds(device_type: str) -> int:
     return settings.gpu_idle_warning_seconds if device_type == "gpu" else settings.cpu_idle_warning_seconds
 
 
+def _configured_spec(device_type: str) -> dict:
+    """What settings.py says a *future* create_endpoint call would request —
+    NOT necessarily what's actually running (see actual_platform/actual_preset
+    below and docs/DESIGN_DECISIONS.md §9). Shown on the landing/workspace
+    pages so users can see the hardware without digging into config/settings.py."""
+    if device_type == "gpu":
+        return {"platform": settings.nebius_gpu_platform, "preset": settings.nebius_gpu_preset}
+    return {"platform": settings.nebius_cpu_platform, "preset": settings.nebius_cpu_preset}
+
+
 @router.get("/workers/{device}")
 async def get_worker_status(device: str):
     device_type = device_type_for(device)
-    base = {"backend_mode": settings.training_backend}
+    configured = _configured_spec(device_type)
+    base = {
+        "backend_mode": settings.training_backend,
+        "configured_platform": configured["platform"],
+        "configured_preset": configured["preset"],
+    }
     session = await db.get_worker_session(session_id_for(device_type))
     if session is None:
         return {
             **base,
             "preset": None,
+            "actual_platform": None,
             "worker_status": "none", "seconds_idle": None,
             "idle_timeout_seconds": None, "warning_seconds": None,
         }
     return {
         **base,
-        # The endpoint's *actual* preset, captured when it last became READY —
-        # never settings.nebius_cpu_preset/nebius_gpu_preset, which is only
-        # what a *future* create_endpoint call would request. A config bump
-        # doesn't retroactively resize an already-running endpoint. See
+        # The endpoint's *actual* platform/preset, captured when it last became
+        # READY — never settings.nebius_cpu_preset/nebius_gpu_preset, which is
+        # only what a *future* create_endpoint call would request. A config
+        # bump doesn't retroactively resize an already-running endpoint. See
         # docs/DESIGN_DECISIONS.md for the 2026-07-11 incident this fixed.
         "preset": session["actual_preset"],
+        "actual_platform": session["actual_platform"],
         "worker_status": session["worker_status"],
         "seconds_idle": seconds_since(session["last_activity_at"]),
         "idle_timeout_seconds": session["idle_timeout_seconds"],

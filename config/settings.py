@@ -12,8 +12,14 @@ class Settings(BaseSettings):
     database_path: Path = Path("lab.db")
 
     default_device: str = "cpu"
-    max_concurrent_runs: int = 2
-    max_concurrent_gpu_runs: int = 1
+    # Separate limits per device x execution backend — a laptop's local CPU/GPU
+    # capacity is unrelated to how many concurrent serverless endpoint sessions
+    # are allowed, so a single combined limit doesn't fit either constraint
+    # well. See docs/DESIGN_DECISIONS.md.
+    max_concurrent_local_cpu_runs: int = 2
+    max_concurrent_local_gpu_runs: int = 1
+    max_concurrent_serverless_cpu_runs: int = 3
+    max_concurrent_serverless_gpu_runs: int = 3
     stop_grace_seconds: int = 5
     stop_kill_seconds: int = 10
     # GPU yield — sync GPU every N training steps to prevent WSL2 display

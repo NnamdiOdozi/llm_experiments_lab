@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { ExperimentConfig, MetricRow, RunStatus } from "./types";
+import { ExperimentConfig, MetricRow, RunStatus, ArchitectureNode, DiagnosticSnapshot } from "./types";
 import PresetPicker from "./components/PresetPicker";
+import ExperimentBrowser from "./components/ExperimentBrowser";
+import HardwareSpecs from "./components/HardwareSpecs";
 import ConfigPanel from "./components/ConfigPanel";
 import ArchSchematic from "./components/ArchSchematic";
+import Inspector from "./components/Inspector";
 import CodeView from "./components/CodeView";
 import LossChart from "./components/LossChart";
 import DropRateChart from "./components/DropRateChart";
@@ -46,6 +49,8 @@ function loadSession(): { experimentId: number; runId: number | null; config: Ex
   return null;
 }
 
+type RightPaneTab = "assistant" | "inspector" | "events";
+
 export default function App() {
   const saved = useRef(loadSession());
   const [experimentId, setExperimentId] = useState<number | null>(saved.current?.experimentId ?? null);
@@ -63,6 +68,14 @@ export default function App() {
   const [pollError, setPollError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
+
+  // Inspector/diagnostic state
+  const [rightPaneTab, setRightPaneTab] = useState<RightPaneTab>("assistant");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<ArchitectureNode | null>(null);
+  const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<DiagnosticSnapshot | null>(null);
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
+
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -89,6 +102,21 @@ export default function App() {
     setMetrics([]);
     setDevice(selectedDevice);
     setBackend(selectedBackend);
+    saveSession(expId, null, cfg);
+  }
+
+  // Reopening a past experiment (which may already have runs) to add a new
+  // one — mirrors handlePresetSelect but skips creating a new experiment.
+  // Device/backend reset to the same defaults a fresh session starts with;
+  // TrainingControls lets the user change them before clicking Start.
+  function handleLoadExperiment(expId: number, cfg: ExperimentConfig) {
+    setExperimentId(expId);
+    setConfig(cfg);
+    setRunId(null);
+    setRunStatus(null);
+    setMetrics([]);
+    setDevice("cpu");
+    setBackend("local");
     saveSession(expId, null, cfg);
   }
 
@@ -216,10 +244,14 @@ export default function App() {
           <h1 style={{ fontSize: 24 }}>LLM Experiments Lab</h1>
           <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
         </div>
-        <p style={{ color: "var(--text-dim)", marginBottom: 24, fontSize: 14 }}>
+        <p style={{ color: "var(--text-dim)", marginBottom: 8, fontSize: 14 }}>
           Pick a preset to create an experiment. Tweak the config, train, and watch loss curves.
         </p>
+        <div style={{ marginBottom: 24 }}>
+          <HardwareSpecs />
+        </div>
         <PresetPicker onSelect={handlePresetSelect} />
+        <ExperimentBrowser onSelect={handleLoadExperiment} />
       </div>
     );
   }
@@ -262,15 +294,17 @@ export default function App() {
           fontSize: 13,
         }}>
           Waiting for the serverless {device === "cuda" ? "GPU" : "CPU"} endpoint to start —
-          this can take a few minutes (up to ~5 for a cold GPU restart). Training starts
-          automatically once it's ready, no action needed.
+          {device === "cuda"
+            ? " a cold GPU restart can take up to ~5 minutes."
+            : " a cold CPU restart is usually faster, up to ~2 minutes."}{" "}
+          Training starts automatically once it's ready, no action needed.
         </div>
       )}
       {/* Hide when the current run is definitively local — a remote worker's
           idle status is irrelevant noise if you're not using it right now.
           See docs/DESIGN_DECISIONS.md §10. */}
       {runStatus?.execution_backend !== "local" && <WorkerIdleBanner device={device} />}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <h1 style={{ fontSize: 20 }}>
           LLM Experiments Lab
           <span style={{ color: "var(--text-dim)", fontSize: 14, marginLeft: 12 }}>
@@ -284,12 +318,18 @@ export default function App() {
           </button>
         </div>
       </div>
+      <div style={{ marginBottom: 12 }}>
+        {/* runStatus.execution_backend (the active run's real backend) takes
+            priority over the device/backend picker state, which is only a
+            pending choice for the *next* Start click. */}
+        <HardwareSpecs device={device} backend={runStatus?.execution_backend ?? backend} />
+      </div>
 
       <div
         style={{
           display: "grid",
           // 190px right pane ≈ 50mm at 96dpi — dedicated Lab Assistant column
-          gridTemplateColumns: "300px 1fr 570px",
+          gridTemplateColumns: "360px 1fr 570px",
           gap: 16,
           alignItems: "start",
         }}
@@ -336,19 +376,83 @@ export default function App() {
               </div>
             )}
           </div>
-          <ArchSchematic config={config} />
+          <ArchSchematic
+            runId={runId}
+            onNodeClick={(nodeId, node) => {
+              setSelectedNodeId(nodeId);
+              setSelectedNode(node);
+              setRightPaneTab("inspector");
+            }}
+            selectedNodeId={selectedNodeId}
+          />
           {runId != null && (
             <PausePrompt
               runId={runId}
               canPrompt={runStatus?.status === "paused" || runStatus?.status === "completed"}
+              onDiagnosticSnapshot={(snapshot) => {
+                setDiagnosticSnapshot(snapshot);
+                setDiagnosticLoading(false);
+              }}
             />
           )}
           <CodeView experimentId={experimentId} runId={runId} />
         </div>
 
-        {/* Right pane: Lab Assistant, sticky, runs top-to-bottom of the viewport */}
+        {/* Right pane: Lab Assistant / Inspector / Events, sticky, runs top-to-bottom of the viewport */}
         <div style={{ position: "sticky", top: 20, height: "calc(100vh - 100px)" }}>
-          <ChatPanel experimentId={experimentId} />
+          {/* Tabs header */}
+          <div
+            style={{
+              display: "flex",
+              gap: 24,
+              borderBottom: "1px solid var(--border)",
+              marginBottom: 12,
+              backgroundColor: "var(--surface)",
+              borderRadius: "8px 8px 0 0",
+              padding: "0 16px",
+            }}
+          >
+            {(["assistant", "inspector", "events"] as RightPaneTab[]).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setRightPaneTab(tab)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: rightPaneTab === tab ? "var(--accent)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  padding: "12px 0",
+                  fontSize: 12,
+                  fontWeight: rightPaneTab === tab ? 600 : 400,
+                  borderBottom: rightPaneTab === tab ? "2px solid var(--accent)" : "none",
+                  transition: "all 0.15s",
+                  textTransform: "capitalize",
+                }}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          <div style={{ height: "calc(100% - 50px)", overflowY: "auto" }}>
+            {rightPaneTab === "assistant" && <ChatPanel experimentId={experimentId} />}
+            {rightPaneTab === "inspector" && (
+              <Inspector
+                selectedNode={selectedNode}
+                selectedNodeId={selectedNodeId}
+                diagnosticSnapshot={diagnosticSnapshot}
+                currentStep={diagnosticSnapshot?.generation_step ?? null}
+                isLoading={diagnosticLoading}
+              />
+            )}
+            {rightPaneTab === "events" && (
+              <div className="panel">
+                <h3>Events</h3>
+                <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Event log coming soon in Phase 2.</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

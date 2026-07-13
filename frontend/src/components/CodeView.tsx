@@ -31,16 +31,15 @@ export default function CodeView({ experimentId, runId }: Props) {
   return (
     <div className="panel">
       <h3>Template Code ({code.template})</h3>
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        {fileNames.map((f) => (
-          <button key={f} onClick={() => setActiveFile(f)} style={tabStyle(f === activeFile)}>
-            {f}
-          </button>
-        ))}
-        <button
-          onClick={() => setActiveFile(WORKER_TAB)}
-          style={{ ...tabStyle(activeFile === WORKER_TAB), marginLeft: 16, paddingLeft: 12, borderLeft: "1px solid var(--border)" }}
-        >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {fileNames.map((f) => (
+            <button key={f} onClick={() => setActiveFile(f)} style={tabStyle(f === activeFile)}>
+              {f}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setActiveFile(WORKER_TAB)} style={tabStyle(activeFile === WORKER_TAB)}>
           Serverless Metrics
         </button>
       </div>

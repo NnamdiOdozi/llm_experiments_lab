@@ -81,6 +81,33 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_diagnostic_snapshot",
+            "description": (
+                "Get the latest model-internals diagnostic snapshot for the current run: "
+                "tensor shapes at each architecture node, the top-k next-token predictions "
+                "with probabilities, and attention weights/Q-K-V detail if the user has "
+                "computed them. Only available while the user has the diagnostics panel open "
+                "on a paused or completed run and has stepped through at least once — if "
+                "nothing is available, say so rather than guessing at internal values."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "integer",
+                        "description": (
+                            "Optional run id. Defaults to the latest run in the current experiment."
+                        ),
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 _TOOL_RESULT_PREFIX = (
@@ -219,7 +246,32 @@ def search_experiment_file(
     return _search_file(path, query, label=label)
 
 
-def execute_tool_call(
+async def get_diagnostic_snapshot(
+    allowed_run_ids: list[int], requested_run_id: int | None = None
+) -> dict[str, Any]:
+    """Fetches the latest diagnostic snapshot for a run via the training API's
+    accessor (handles local/remote dual-path). The only tool here that does
+    I/O beyond local file reads, hence async and kept separate from
+    _search_file's synchronous grep-style tools."""
+    from backend.api.training import get_diagnostic_snapshot_for_run
+
+    run_id = _allowed_run_id(requested_run_id, allowed_run_ids)
+    if run_id is None:
+        return {"success": False, "error": "Run is not part of the current experiment"}
+    snapshot = await get_diagnostic_snapshot_for_run(run_id)
+    if snapshot is None:
+        return {
+            "success": False,
+            "error": (
+                "No diagnostic snapshot available for this run. The user must open the "
+                "Inspector's diagnostics panel on a paused or completed run and step "
+                "through at least once."
+            ),
+        }
+    return {"success": True, "run_id": run_id, "snapshot": snapshot, "note": _TOOL_RESULT_PREFIX}
+
+
+async def execute_tool_call(
     name: str, arguments: str | dict[str, Any], *, allowed_run_ids: list[int], template: str
 ) -> str:
     try:
@@ -234,6 +286,8 @@ def execute_tool_call(
                 args.get("query", ""),
                 args.get("run_id"),
             )
+        elif name == "get_diagnostic_snapshot":
+            result = await get_diagnostic_snapshot(allowed_run_ids, args.get("run_id"))
         else:
             result = {"success": False, "error": f"Unknown tool: {name}"}
     except Exception as exc:

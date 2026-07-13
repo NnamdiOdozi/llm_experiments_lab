@@ -3,6 +3,8 @@ node_modules/
 .vite/
 *.tsbuildinfo
 npm-debug.log*
+frontend/test-results/
+frontend/playwright-report/
 yarn-error.log*
 .env.local
 .env.*.local

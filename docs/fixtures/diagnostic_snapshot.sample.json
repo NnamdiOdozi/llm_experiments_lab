@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagnostic_session_id": "diag-17",
+  "generation_step": 3,
+  "input_tokens": [
+    { "position": 0, "id": 51, "text": "The" },
+    { "position": 1, "id": 82, "text": " king" },
+    { "position": 2, "id": 44, "text": " said" }
+  ],
+  "generated_token": { "position": 3, "id": 91, "text": " to" },
+  "nodes": {
+    "embedding": {
+      "input_shape": [1, 3],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.004, "std": 0.131, "l2_norm": 3.27, "min": -0.51, "max": 0.62 }
+    },
+    "block.0.ln1": {
+      "input_shape": [1, 3, 192],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 24.1, "min": -3.1, "max": 3.4 }
+    },
+    "block.0.attention": {
+      "input_shape": [1, 3, 192],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.01, "std": 0.44, "l2_norm": 10.8, "min": -1.9, "max": 2.1 }
+    },
+    "block.0.ln2": {
+      "input_shape": [1, 3, 192],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 24.1, "min": -3.0, "max": 3.2 }
+    },
+    "block.0.mlp": {
+      "input_shape": [1, 3, 192],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.02, "std": 0.51, "l2_norm": 12.3, "min": -2.2, "max": 2.4 }
+    },
+    "block.1.ln1": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 24.0, "min": -3.0, "max": 3.3 } },
+    "block.1.attention": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.02, "std": 0.47, "l2_norm": 11.1, "min": -2.0, "max": 2.2 } },
+    "block.1.ln2": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 24.0, "min": -3.1, "max": 3.1 } },
+    "block.1.mlp": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.03, "std": 0.53, "l2_norm": 12.6, "min": -2.3, "max": 2.5 } },
+    "block.2.ln1": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 23.9, "min": -3.0, "max": 3.2 } },
+    "block.2.attention": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.02, "std": 0.49, "l2_norm": 11.4, "min": -2.1, "max": 2.3 } },
+    "block.2.ln2": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 23.9, "min": -3.1, "max": 3.0 } },
+    "block.2.mlp": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.03, "std": 0.55, "l2_norm": 12.8, "min": -2.4, "max": 2.6 } },
+    "block.3.ln1": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 23.8, "min": -3.0, "max": 3.1 } },
+    "block.3.attention": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.02, "std": 0.50, "l2_norm": 11.6, "min": -2.1, "max": 2.3 } },
+    "block.3.ln2": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 23.8, "min": -3.0, "max": 3.0 } },
+    "block.3.mlp": { "input_shape": [1, 3, 192], "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.04, "std": 0.56, "l2_norm": 13.0, "min": -2.4, "max": 2.6 } },
+    "final_norm": {
+      "input_shape": [1, 3, 192],
+      "output_shape": [1, 3, 192],
+      "summary": { "mean": 0.0, "std": 1.0, "l2_norm": 24.1, "min": -3.2, "max": 3.3 }
+    }
+  },
+  "attention": { "available": false, "reason": "Deferred to phase 2" },
+  "activation_summaries": { "available": false, "reason": "Deferred to phase 2" },
+  "lm_head": {
+    "logits_shape": [1, 3, 65],
+    "selected_position": 2,
+    "top_k": [
+      { "rank": 1, "token_id": 91, "token": " to", "logit": 6.21, "probability": 0.31 },
+      { "rank": 2, "token_id": 12, "token": " have", "logit": 5.87, "probability": 0.22 },
+      { "rank": 3, "token_id": 33, "token": " be", "logit": 5.40, "probability": 0.14 },
+      { "rank": 4, "token_id": 7,  "token": " see", "logit": 5.02, "probability": 0.09 },
+      { "rank": 5, "token_id": 58, "token": " go",  "logit": 4.75, "probability": 0.07 }
+    ]
+  },
+  "complete": true
+}

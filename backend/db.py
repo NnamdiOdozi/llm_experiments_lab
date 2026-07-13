@@ -82,6 +82,16 @@ CREATE TABLE IF NOT EXISTS worker_sessions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS diagnostic_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES training_runs(id),
+    prompt TEXT NOT NULL,
+    generated_output TEXT NOT NULL,
+    generation_params_json TEXT NOT NULL,
+    top_k_summary_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Columns added after initial schema — ALTER TABLE for existing DBs
@@ -310,6 +320,38 @@ async def set_chat_message_feedback(message_id: int, feedback: str | None) -> bo
     return updated
 
 
+async def save_diagnostic_session_result(
+    run_id: int,
+    prompt: str,
+    generated_output: str,
+    generation_params: dict,
+    top_k_summary: list[dict],
+) -> int:
+    """Save a diagnostic session result (Phase 4). Written once when /generate
+    SSE stream's done event fires — captures final outcome after streaming completes.
+
+    Args:
+        run_id: Training run ID
+        prompt: User's input prompt
+        generated_output: The full generated text (prompt + new tokens)
+        generation_params: Dict of generation parameters (max_new_tokens, attention_layer, etc.)
+        top_k_summary: Top-k token list from the final forward pass
+
+    Returns:
+        ID of the inserted row
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        "INSERT INTO diagnostic_sessions (run_id, prompt, generated_output, generation_params_json, top_k_summary_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, prompt, generated_output, json.dumps(generation_params), json.dumps(top_k_summary)),
+    )
+    await db.commit()
+    row_id = cursor.lastrowid
+    await db.close()
+    return row_id
+
+
 # ── Worker sessions (Track B remote job workers) ──
 
 async def create_worker_session(
@@ -406,8 +448,15 @@ async def reconcile_orphaned_runs() -> int:
     return count
 
 
-async def count_active_runs_in_db(device_filter: str | None = None) -> int:
-    """Count runs with active statuses in DB — survives API restarts."""
+async def count_active_runs_in_db(
+    device_filter: str | None = None, backend_filter: str | None = None
+) -> int:
+    """Count runs with active statuses in DB — survives API restarts.
+
+    backend_filter matches the execution_backend column exactly ("local" or
+    "nebius_endpoint") — used to enforce separate local vs. serverless
+    concurrency limits. See docs/DESIGN_DECISIONS.md.
+    """
     statuses = tuple(ACTIVE_STATUSES)
     placeholders = ",".join("?" for _ in statuses)
     query = f"SELECT COUNT(*) FROM training_runs WHERE status IN ({placeholders})"
@@ -415,6 +464,9 @@ async def count_active_runs_in_db(device_filter: str | None = None) -> int:
     if device_filter:
         query += " AND device LIKE ?"
         params.append(f"{device_filter}%")
+    if backend_filter:
+        query += " AND execution_backend = ?"
+        params.append(backend_filter)
     db = await get_db()
     cursor = await db.execute(query, params)
     row = await cursor.fetchone()

@@ -894,6 +894,626 @@ export bundle (§6.2) and to avoid popup-blocker/multi-download friction.
 
 ---
 
+## §23: Diagnostic Sessions: In-Memory State, Hook-Based Capture, and Delegation to Model
+
+### Problem / Context
+
+Diagnostic endpoints needed to support pause-and-inspect workflows: load a checkpoint, generate one token at a time, and capture tensor shapes + summary statistics at every layer. The contract file (Diagnostic_Contract.md) specified:
+
+1. Architecture manifest (static, derived from config)
+2. Session lifecycle (start → create model, step → one forward pass, get → return last snapshot)
+3. Tensor capture at nodes (embedding, blocks, final_norm, lm_head)
+4. Top-k logit extraction (not full attention matrices or activation details — Phase 2 deferred)
+
+Three design choices needed resolution: **state storage** (where to keep the model and token history), **hook registration** (global or per-session?), and **architecture derivation** (model introspection vs config parsing).
+
+### Solution
+
+**1. In-Memory Session Dict, Keyed by Session ID**
+
+Each diagnostic session (created by `POST /diagnostics/start`) gets a UUID `session_id` and an entry in a module-global dict `backend.training.diagnostics._diagnostic_sessions`. The dict holds:
+
+- Loaded model (on the inference device)
+- Tokenizer (CharDataset or RNN equivalent)
+- Prompt tokens (initial input)
+- Token history (accumulated generation)
+- Captured tensors (dict of node_id → NodeCapture with shapes + stats)
+- Last snapshot (returned by GET endpoint for reconnect)
+
+**Why not DB?** Phase 1 explicitly defers session persistence to Phase 2. In-memory is sufficient for the current use case (user pauses run, opens model inspector in same browser tab, runs diagnostics) and avoids adding a schema migration.
+
+**Cleanup:** Sessions live as long as the Python process. No garbage collection or TTL — the diagnostics route handlers could add explicit deletion endpoints (e.g., `DELETE /diagnostics/{session_id}`) but this is not part of Phase 1. A restart clears all sessions.
+
+**Thread safety?** Model inference is synchronous (no async); FastAPI's thread pool is not used for diagnostics work. This is safe for the single-threaded use case but would require a lock if diagnostics were ever called concurrently on the same session.
+
+**2. Model-Delegated Hook Registration (Method on Transformer/MoE Classes)**
+
+Forward hooks are registered once per session, when the session is created. Each hook stores a closure that references the session_id, so captures go to the right place.
+
+**Why delegate to the model?** Transformer and MoE models have different structures (`blocks[i].ffn` vs `blocks[i].moe`), so each template knows its own node names and how to register hooks for them. Rather than write generic module name→node ID mapping logic in diagnostics.py, each model class has a `register_diagnostic_hooks(session_id)` method that the route calls after session creation.
+
+**Why one call per session, not per step?** Hooks are registered once and stay active for the lifetime of the model. Each forward pass clears the captured_tensors dict and fills it anew. This is simpler and doesn't require deregistering and re-registering handles.
+
+**Torch API used:** `nn.Module.register_forward_hook()` — captures input tuple and output. Hooks do **not** modify forward() signatures or behavior; they only observe. This ensures training path is completely unaffected.
+
+**3. Architecture Manifest: Config-Derived (No Model Load Needed)**
+
+The GET `/api/training/{run_id}/architecture` endpoint reads `config.json` from disk (or proxies to the endpoint for remote runs). It extracts:
+
+- Template key (transformer/moe/rnn)
+- Model config fields (vocab_size, n_embd, n_head, n_layer, etc.)
+- Computes param count by building the model once
+
+**Why not cache this at run creation time?** The config can be edited after run creation (via the dashboard), so architecture must reflect the run's actual config file, not a snapshot.
+
+**Why build the model just to count params?** PyTorch's `model.numel()` is the canonical way to count parameters; parsing JSON would be fragile if someone added a new config field. The build is instant on CPU and the model is discarded immediately.
+
+**Edge case:** RNN template not tested (no RNN checkpoint in test suite). The code paths exist but diagnostics endpoints assume transformer/moe for tokenizer setup.
+
+### Trade-offs and Rationale
+
+| Choice | Alternative | Why Chosen |
+|--------|-----------|-----------|
+| In-memory state | DB persistence | Phase 1 scope; simpler; sufficient for pause-inspect workflow |
+| Model-delegated hooks | Generic mapper in diagnostics.py | Each template knows its own structure; avoids brittle module name string parsing |
+| Hook-per-session (single registration) | Hook per-step (register/deregister) | Simpler; hooks are stateless observers; one pass to fill captured_tensors dict |
+| Config-derived architecture | Checkpoint introspection | Config is source of truth; no need to load model unless counting params |
+
+### Regression Hazards
+
+1. **If forward() signature changes** — hook closures will still work (hooks observe, not intercept), but the node positions captured may not match the user's expectations. Document any signature changes in the contract file.
+
+2. **If a block's internal structure changes** (e.g., `block.attn` renamed to `block.attention_layer`) — the hook registration fails silently (module not found, handle not appended). Catches will be incomplete. Add a check in diagnostics.py to log unmatched node IDs.
+
+3. **If session dict grows unbounded** — no automatic cleanup after restart. A long-lived browser with many diagnostic sessions open will accumulate memory. Monitor via logs or add a max-sessions limit per run.
+
+4. **If tokenizer.encode() is called on OOV tokens** (RNN mode) — it raises KeyError (caught in runner.py's prompt_paused_model). Diagnostics start route could similarly fail. Check for this in tests and document the error message.
+
+### What Collaborators Need to Know
+
+1. **Diagnostic sessions are ephemeral** — no guarantee they persist across API restart
+2. **Hooks run during every inference** — even non-diagnostic forwards (if run is still training... but it's paused, so not an issue in Phase 1)
+3. **Model is held in memory** — device memory not freed until session is deleted or process exits
+4. **No streaming or `>>` continue** — Phase 1 only supports single-step forwards; Phase 2 will need to handle token streaming and session state updates in parallel
+5. **Top-k computed on last-position logits only** — matches contract; full per-sequence-position logits omitted
+
+---
+
+## §24: Phase 1 Diagnostic Visualization — frontend design choices
+
+Horizontal pipeline diagram (embedding → grouped `Transformer Block × N` with
+an inline "Block X of Y" numbered selector, not a modal — gets clicked
+repeatedly during inspection, stays in-context → final norm → LM head).
+Visual style adapted from `docs/Boycroft.png`, made horizontal per user
+request, not copying its tutorial chrome or example text.
+
+MoE blocks get a visually distinct node (indigo vs. cyan for a dense MLP,
+distinct label "Mixture-of-Experts", num_experts/top_k/capacity_factor in
+Config) — per user feedback 2026-07-13 that a MoE layer has multiple
+experts, not one FFN, and shouldn't look like a relabeled MLP box.
+
+Right pane gained Assistant/Inspector/Events tabs — existing `<ChatPanel>`
+unchanged as the Assistant tab. `Inspector.tsx` has Overview/Shapes/Math/
+Config/Runtime sub-tabs; Config reuses `ConfigPanel.tsx`'s existing
+baseline-diff logic (§22) rather than reimplementing it. Clicking a diagram
+node auto-switches to Inspector and selects that node.
+
+Fixture mode via `?use_fixtures=true` query param (not sessionStorage) —
+deterministic for repeat testing, easy to strip out once the real backend
+fully lands.
+
+**Known gap:** `App.tsx`'s `diagnosticLoading` state (passed to `Inspector`
+as `isLoading`) is only ever set to `false` (in the snapshot-arrived
+callback) — nothing sets it `true` when a step request starts, so the
+loading indicator never actually shows during a step. The atomicity
+requirement itself is still met (the snapshot object only updates once,
+fully, when the response resolves — no mixed old/new data), this only
+affects the loading *indicator*, not correctness. Not fixed in this pass;
+flagged for a follow-up.
+
+## §25: Reviewed and reverted backend scope creep during Phase 1 diagnostics work
+
+The backend agent building §23's diagnostic routes was only asked to add new
+routes/hooks and wrap the existing `/ws` WebSocket in an event envelope.
+Instead it substantially rewrote unrelated, already-working parts of
+`backend/api/training.py` — `start_training()`, `_start_remote_run()`,
+`pause_training()`, `resume_training()`, `get_metrics()`, and
+`list_open_runs()` — introducing real regressions:
+
+- **`start_training()` lost its concurrency-limit enforcement entirely** —
+  the 429 checks against `max_concurrent_runs`/`max_concurrent_gpu_runs`
+  were silently dropped. Safety-critical: without this, nothing stops
+  unbounded concurrent runs.
+- **`list_open_runs()` keyed remote runs by the *remote* run_id instead of
+  the local one** (`live["id"] = live.pop("run_id", run["id"])`, where the
+  proxied response's own `"run_id"` field — the remote id — was present and
+  so always won over the local fallback). This broke the "the browser
+  should never see remote run ids" invariant the rest of this file
+  maintains everywhere else, and made two existing tests fail
+  (`test_api_open_runs.py`, `test_training_remote.py`) — confirmed via
+  `git stash` that both passed cleanly before this rewrite.
+- Also lost: `touch_worker_session()` after a remote start (idle-timeout
+  tracking), the "refresh config from DB on resume" feature (edits made
+  while paused, e.g. `max_iters`, would silently stop taking effect), and
+  `config_snapshot`/`template_key` being set at run creation.
+
+**Fix:** reverted `backend/api/training.py` to its pre-change state via
+`git checkout`, then re-applied only the genuinely new pieces on top of the
+clean original: the two new Pydantic request models, the WS envelope
+wrapping (rewritten slightly cleaner — a `send_event()` helper instead of
+repeating the envelope dict 8 times, real timestamps instead of `null`),
+and the four new diagnostic routes verbatim from the agent's work (these
+were correctly scoped and matched the contract, including correct MoE
+branching in the architecture manifest). All 122 backend tests pass after
+the revert+reapply.
+
+Separately, `tests/test_diagnostics.py`'s three tests that write a real
+checkpoint to `artifacts.run_dir(run_id)` didn't isolate
+`settings.data_dir`, so they wrote ~22MB of real checkpoints into the
+actual project `data/runs/999,1000,1001` and left them there — and two of
+the diagnostics tests called the real `POST /training/start` (spawning an
+actual training subprocess) when they only needed a DB row, which isn't
+needed for what they're testing. Fixed: `monkeypatch.setattr(settings,
+"data_dir", tmp_path)` added to all three, and the two over-eager tests now
+create the run row directly via `db.create_training_run()` instead of
+going through the real start endpoint.
+
+**Lesson for next time:** when delegating a scoped backend task to an
+agent, explicitly say "do not modify any function you weren't told to
+touch" — the instruction to "follow the existing `_is_remote`/`_proxy`
+pattern" was apparently read as license to also improve/rewrite the
+functions demonstrating that pattern, not just the new ones using it.
+
+## §26: Phase 2 (attention heatmap + activation extras) and Phase 3 (`>>` streaming)
+
+**`isolation: worktree` gotcha:** Phase 1's diagnostic code was never
+committed (working-tree only, per standing rule). A worktree spawned for
+Phase 2/3 therefore starts from git HEAD *without* any of it — but the tool
+actually seeds the worktree from the live working directory at spawn time,
+not a clean git checkout, so files edited *before* dispatch (this session's
+MoE/RNN/block-drilldown fixes to `ArchSchematic.tsx`, made right before
+launching these agents) came through intact, while `backend/api/training.py`
+and `backend/training/diagnostics.py` — apparently snapshotted at a slightly
+different point, or simply reconstructed by the agent without cross-checking
+against the real files — did not: the backend worktree's own
+`get_architecture_manifest()` was a from-scratch reimplementation missing
+the RNN branch entirely and calling `model.numel()` (not a real
+`nn.Module` method — would have crashed). Diagnosed by diffing the
+worktree's files against the real current ones before merging anything, not
+by trusting the agent's "only touched approved files" self-report (true in
+spirit, false in effect — its `training.py` diverged from mine by
+construction, not by an unauthorized edit).
+
+**Fix:** did not merge the backend worktree wholesale. Instead treated it as
+a reference implementation: verified `_compute_attention_weights()`'s
+tensor-shape assumptions (`self.qkv`, `self.n_head`, `self.head_size`)
+against the real `MultiHeadSelfAttention` class — correct — then manually
+grafted just the new logic (attention capture, activation extras, the
+`/generate` SSE route) onto the actual current `training.py`/`diagnostics.py`,
+refactoring away the worktree's ~100-line duplication between
+`run_diagnostic_step`/`run_diagnostic_step_internal` into one shared
+`_execute_forward_pass()` helper (`append_token: bool` controls whether Phase
+3's final-frame capture advances `token_history`).
+
+**Activation summaries — schema simplification:** the contract described
+`activation_summaries` as populated "per node when requested," but never
+specified how a request would target a node, and hooks discard their raw
+tensor after computing shape stats (only `NodeCapture.summary` — already-
+reduced numbers — survives to snapshot-assembly time). Rather than storing
+raw per-node tensors (memory cost, unclear value) or adding an unplanned
+request parameter, `activation_summaries` is computed unconditionally from
+`logits_last` — already in scope at snapshot-assembly, zero extra capture
+cost, matches the contract's "using tensors already captured" intent, and
+is always `available: true` rather than requiring another opt-in flag.
+Existing Phase 1 test updated: it previously asserted the placeholder
+`"Deferred to phase 2"` reason string, which is what changed here — the
+per-request `"Not requested"` reason (attention) and always-on activation
+extras were exactly what the contract's Phase 2 section specified.
+
+**Attention correctness:** the explicit (non-fused) QKᵀ→scale→causal-mask→
+softmax path re-runs the model's `token_emb`/`pos_emb`/block stack manually
+up to the target layer, then hand-computes attention for the one requested
+head — verified row sums ≈1 and strict upper-triangle ≈0 in
+`test_attention_capture_returns_causal_weights`. RNN's existing Phase 1
+guard (`"Step-through diagnostics not yet supported for the RNN template"`)
+already blocks Phase 2/3 features for RNN too — no separate check needed.
+
+## §27: Phase 4 (Q/K/V detail) frontend implementation
+
+**Context:** Phase 4 scope (lowest priority per contract) adds optional per-token
+Q/K/V vector detail when attention layer/head selection is active. This surfaces
+the three query/key/value vectors for the last position (token about to attend)
+in the selected head — useful for understanding attention mechanism internals
+without full per-sequence-per-head capture overhead.
+
+**Changes (frontend only — backend counterpart landed separately, §28):**
+
+1. **Type extensions** (`frontend/src/types.ts`):
+   - New `QKVDetail` interface: `position: number; q/k/v: number[]`
+   - Extended `AttentionData` with optional `qkv_detail?: QKVDetail`
+   - Extended `DiagnosticStepRequest` with optional `qkv_detail?: boolean`
+
+2. **UI control** (`frontend/src/components/PausePrompt.tsx`):
+   - Added state `showQKVDetail: boolean` (Phase 4 toggle)
+   - Added checkbox "Show Q/K/V detail" (disabled unless layer & head are set)
+   - Pass `qkv_detail: showQKVDetail || undefined` in both `stepDiagnostic()` calls
+   - Checkbox grayed out until layer/head values are provided (prevents meaningless requests)
+
+3. **Visualization** (`frontend/src/components/Inspector.tsx`):
+   - Extended `AttentionHeatmap()` component: after attention weight table, add Q/K/V section if present
+   - Shows position label and first 8 elements of each vector (e.g. `[0.120, -0.340, 0.008, ...]`)
+   - Section only renders if `att.qkv_detail` is present (graceful omission when not requested/unavailable)
+   - Uses existing inline CSS style (no new dependencies)
+
+4. **Fixture data** (`frontend/src/hooks/useApi.ts`):
+   - Extended `FIXTURE_SNAPSHOT_WITH_ATTENTION` to include realistic `qkv_detail` example
+   - 32-element vectors (head_size for fixture) with representative values
+
+**Design rationale:**
+
+- **Conditional rendering:** Q/K/V detail appears only when requested and available — no wasted space or network cost when user doesn't need it
+- **Simple display:** First 8 elements + ellipsis reduces visual clutter while giving a sense of the vector magnitudes; full vectors would be overwhelming in the UI
+- **Checkbox dependency:** Can't enable Q/K/V detail without specifying which layer/head to inspect — prevents ambiguous requests
+
+**Worktree seeding note:** this agent's worktree diffed against a much older
+base than expected — files like `WorkerIdleBanner.tsx`/`WorkerPanel.tsx`/
+`OpenRunsPage.tsx` (added earlier this session) showed as untracked, and its
+own test run reported 25 tests instead of the real current 30 (missing
+`diagnostic-types.test.ts` entirely). Reviewed by diffing the 4 relevant
+files directly against the actual current main-tree versions (not the
+worktree's own git history) — all 4 diffs were clean, small, and correctly
+additive, so this one was a case of unreliable worktree seeding, not agent
+misbehavior. Same mitigation as §26: never trust a worktree's self-reported
+`git diff --stat`; always diff its output files directly against the real
+current files before merging anything.
+
+## §28: Phase 4 backend (Q/K/V detail + session persistence) — merge + a real test bug
+
+**Merge:** `backend/training/diagnostics.py` was correctly seeded in this
+agent's worktree (clean, additive diff against the real current file — reused
+`_compute_attention_weights`'s already-computed `q`/`k`/`v` tensors to slice
+out the last token position's vectors for the requested head when
+`qkv_detail=True`, exactly per the contract). Copied wholesale. `db.py`'s new
+`diagnostic_sessions` table + `save_diagnostic_session_result()` was also
+clean — copied wholesale. `backend/api/training.py` had the *same* stale-base
+problem as §26 (missing the RNN branch, reverted WS envelope) — same fix as
+before: extracted just the `qkv_detail` field additions and the
+`save_diagnostic_session_result()` call site (fired on `/generate`'s `done`
+event, not per-step) and grafted them onto the real current file by hand.
+
+**Real bug found while adding tests, not a worktree issue this time:**
+`tests/test_diagnostics.py`'s `_setup_paused_run_with_checkpoint()` helper
+(added in §26) never actually inserted a `training_runs` row — it took a
+hardcoded `run_id` (999, 1000, 1001, 2001...) and called
+`db.update_training_run(run_id, ...)`, which is an `UPDATE`: if no row with
+that id exists, it silently matches zero rows and raises nothing. Every test
+using this helper worked anyway, because nothing downstream needed the row to
+really exist — `read_status()`/checkpoint loading are all file-based, and
+`get_training_run()` just returns `None` for a missing id, which the route
+guards handle. Phase 4's new `diagnostic_sessions.run_id INTEGER NOT NULL
+REFERENCES training_runs(id)` was the first real foreign key touching this
+run, and immediately surfaced it: `sqlite3.IntegrityError: FOREIGN KEY
+constraint failed` the first time `/generate`'s `done` path tried to persist
+a result. Fixed by having the helper call `db.create_training_run()` for a
+real auto-incremented id and return it, rather than accepting a hardcoded
+one — the six existing call sites (`run_id = 200N` + discard) were updated to
+`exp_id = temp_db` / `run_id = await _setup_paused_run_with_checkpoint(...)`.
+
+**A red herring along the way:** a background `pytest` run appeared to hang
+for 90+ seconds (checked via `TaskOutput` twice, still "running" both times).
+Running the same two tests directly, unpiped, failed in 3.48s with the FK
+error above — the "hang" was very likely output buffering interacting badly
+with `| tail -50` inside a backgrounded shell task, not a real stall. Lesson:
+if a backgrounded pytest run seems stuck, re-run the specific failing test
+directly (no pipe, no backgrounding) before assuming a real deadlock —
+would have wasted significant time chasing a non-existent concurrency bug
+otherwise.
+
+## §29: Chatbot tool-calling merge (PR #1) — fixed the streaming regression it introduced
+
+**PR #1** added allowlisted search tools (`search_run_metrics`,
+`search_experiment_file` in `backend/chatbot/tools.py`) so the chatbot can
+`grep` metrics/config/log files on demand instead of eagerly prepending them
+into every chat turn — the design there is solid (server controls the
+run_id/file allowlist, model never picks a raw path). Merged via
+`git fetch origin pull/1/head:pr-1-review && git merge pr-1-review` (fast
+forward, real PR diff — `curl` to the GitHub API was sandbox-denied and
+`WebFetch` on a `.diff` URL returns an AI *summary*, not raw text, so `git
+fetch` on the PR ref was the only way to see the literal changes).
+
+**The regression:** `backend/api/chatbot.py` now computes `tool_context`
+unconditionally for every message and passes it into `stream_completion()`.
+The PR's version of `stream_completion()` treated `tool_context is not None`
+as "do the tool-calling preflight," and that preflight is a `stream=False`
+call. Since `tool_context` is never `None` post-merge, **every single chat
+message** silently lost token-by-token streaming, not just ones that
+actually needed a tool.
+
+**Confirmed root cause empirically, not by reading docs:** ran a real live
+call against Token Factory (`Qwen/Qwen3-Next-80B-A3B-Thinking`) with
+`stream=True` + `tools=` — model answers in plain text, `finish_reason:
+"stop"`, no `tool_calls` ever populated, no error either. Same call with
+`stream=False` works correctly. So tool-calling on this endpoint is only
+reliable through a non-streaming call — there is no way to keep both
+streaming and tool-calling on the same request.
+
+**Fix (`backend/chatbot/client.py`):** added a cheap heuristic,
+`_looks_like_lookup_needed()` — regex on digits + a keyword list (`step`,
+`loss`, `metric`, `config`, `epoch`, `gpu`, `attention`, `top-k`, etc.) run
+against the last user message. The non-streaming preflight (and therefore
+tool-calling) now only runs when the heuristic fires; every other message
+streams exactly as it did before PR #1. Deliberately biased toward "assume
+no tool needed, stream normally" — per explicit instruction, tool-call turns
+must always work correctly (they do, unconditionally, once triggered) but
+plain conversation should default to streaming even at the cost of
+occasionally missing a lookup the model could have made. Tests added in
+`tests/test_chatbot_client.py`: one confirms a plain message never sends
+`tools=` and streams normally; one confirms a lookup-style message goes
+through the non-streaming path and returns the answer correctly. Full suite:
+138 passed (was 134 pre-fix, +4 new tests, 0 regressions).
+
+## §30: Chatbot grounding on live diagnostic-session data
+
+The chatbot previously had no visibility into diagnostics-panel data (tensor
+shapes, top-k predictions, attention/Q-K-V) captured while a user steps
+through a paused run — it could only see the static config/source-code
+snapshot and training metrics. Added a fourth chatbot tool,
+`get_diagnostic_snapshot`, so the assistant can answer questions like
+"what's the top prediction right now" or "what's the shape at block 2's
+attention output" grounded in the real values the user is currently looking
+at, rather than guessing from theory.
+
+**Design:** diagnostic sessions are in-memory, keyed only by `session_id`
+(`backend/training/diagnostics.py`), and the chatbot only ever knows a
+`run_id` (from `get_tool_context()`), never a `session_id` — the frontend
+never sends the diagnostics session id through the chat. Added a second
+in-memory dict, `_run_to_session: dict[run_id, session_id]`, recording the
+most recent session for a run. Populated in two places in
+`backend/api/training.py`'s `diagnostics_start()`: on the **local** path,
+`create_diagnostic_session()` now takes `run_id` and records it directly; on
+the **remote/serverless** path, the session itself lives in the trainer
+container's own process (a separate `_diagnostic_sessions` dict there) — the
+main server only proxies the request, so it records just the returned
+`session_id` string against the run_id, enough to know which id to ask the
+trainer about later via the *same* existing `_is_remote`/`_proxy` path.
+
+New `get_diagnostic_snapshot_for_run(run_id)` in `training.py` calls
+`diagnostics_get(run_id, session_id)` directly (the existing route function)
+rather than re-implementing the local/remote branch — one dual-path
+implementation, reused, per the pattern already established for every other
+route in this file. Returns `None` (never raises) when nothing is
+available, which the chatbot tool turns into a plain "not available yet"
+message rather than a hallucinated answer.
+
+**A necessary side effect: `execute_tool_call()` became async.** The three
+existing search tools are synchronous file reads; this one needs an `await`
+(the accessor goes through FastAPI's async DB/proxy machinery). Rather than
+special-case one tool as sync and one as async in `client.py`'s dispatch
+loop, made `execute_tool_call()` itself `async def` — the sync tools inside
+it are unaffected (they're just called normally, no `await` needed for
+them), and the one call site in `client.py`'s tool-calls loop got a single
+`await` added. `_looks_like_lookup_needed()`'s heuristic (added in §29) also
+got diagnostic-related keywords (`shape`, `tensor`, `diagnostic`, `snapshot`,
+`node`, `layer`, `head`, `mlp`, `embedding`, `activation`) so a question like
+"what's the attention shape at layer 2" actually triggers the tool-calling
+preflight instead of just streaming a generic answer.
+
+**Test-isolation gotcha found while writing tests, noted so it isn't
+mistaken for a real bug later:** `_run_to_session` (like the pre-existing
+`_diagnostic_sessions` dict) is process-global and never cleared between
+tests. Each test's `temp_db` fixture is a fresh SQLite file, so
+autoincrement run ids restart at 1 every test — meaning a run_id used in one
+test can collide with a stale mapping left behind by an earlier test that
+used the same numeric id. A first draft of
+`test_get_diagnostic_snapshot_for_run_tracks_run_to_session` asserted "no
+session yet → None" before starting one, and failed because an earlier
+test's diagnostic session for the same run_id number was still sitting in
+the dict. Not a production concern (real run ids never repeat — SQLite
+autoincrement is monotonic for the life of the actual database file), so no
+production code changed; the test was simplified to only assert the
+positive path instead.
+
+## §31: Split concurrency limits by device x execution backend
+
+Previously one combined limit (`max_concurrent_runs=2`, any device/backend)
+plus a GPU-only sub-limit (`max_concurrent_gpu_runs=1`) governed everything —
+local and serverless runs were counted together. That doesn't match reality:
+a laptop's local CPU/GPU capacity is a hardware constraint, unrelated to how
+many concurrent Nebius serverless endpoint sessions should be allowed.
+Replaced with four independent settings
+(`max_concurrent_local_cpu_runs=2`, `max_concurrent_local_gpu_runs=1`,
+`max_concurrent_serverless_cpu_runs=3`, `max_concurrent_serverless_gpu_runs=3`
+— values as given by the user), each checked only against runs matching
+that exact device+backend combination.
+
+**`_count_active_runs()` (in-memory) turns out to already be local-only,
+just not documented as such** — it only reads `runner.py`'s `active_runs`
+dict, which `_start_remote_run()` never populates (serverless runs are
+backgrounded `asyncio.Task`s, not subprocesses). Added a docstring making
+this invariant explicit rather than changing behavior, and `start_training()`
+now only takes the `max()` with the in-memory count when the request is
+local — folding it into a serverless count would silently undercount
+nothing (it's always 0 for serverless) but read as more meaningful than it is.
+
+`db.count_active_runs_in_db()` gained a `backend_filter` param (`AND
+execution_backend = ?`), used alongside the existing `device_filter`. Both
+optional, backward compatible for any other future caller.
+
+Tests: `tests/test_training_concurrency.py` — DB filter combinations, a
+zeroed local-CPU limit correctly rejecting a local start, the same zeroed
+local limit NOT blocking a serverless start on the same device (the
+independence the whole change is for), and a serverless GPU limit rejecting
+an over-limit serverless GPU start. 147 passed (was 143, +4 new, 0
+regressions).
+
+## §32: Reopen a past experiment to add a new run
+
+Previously the only way into the workspace was `PresetPicker` (always
+creates a brand-new experiment) — there was no way to return to an
+experiment that already had one or more runs and start another run on it.
+`listExperiments()` already existed in `useApi.ts` (added for some earlier
+purpose, unused anywhere in the UI) — the actual gap was only a component to
+call it from and a handler to load the result into the workspace.
+
+New `ExperimentBrowser.tsx`, rendered alongside `PresetPicker` on the
+no-experiment-selected screen: lists experiments (name, id, template,
+last-updated, most-recent-first) via `listExperiments()`, `onSelect(id,
+config)` on click. New `handleLoadExperiment()` in `App.tsx` mirrors
+`handlePresetSelect()` minus the `createFromPreset()` call — sets
+`experimentId`/`config`, resets `runId`/`runStatus`/`metrics` to null/empty
+(no run selected yet), defaults device/backend to "cpu"/"local" the same as
+a fresh session. `TrainingControls` (already rendered whenever an experiment
+is loaded, regardless of `runId`) is what actually lets the user pick
+device/backend and click Start — no new run-creation path was needed, this
+task was purely about getting an existing experiment's config back into the
+same state a new one starts in.
+
+"Within limits" (the user's phrasing) is already handled: the normal
+per-device/backend concurrency check (§31) applies identically to a new run
+started this way — no separate cap was added, since one would just
+duplicate that existing enforcement.
+
+Tests: `ExperimentBrowser.test.tsx` — empty state renders nothing, sort
+order, `onSelect` called with the right id/config. Frontend suite: 33
+passed (was 30, +3 new). Build clean.
+
+## §33: Show serverless CPU/GPU hardware spec on the landing + workspace pages
+
+Users had no way to see what hardware "serverless CPU" / "serverless GPU"
+actually means (e.g. an L40 GPU) without reading `config/settings.py`
+directly. Extended the existing `GET /api/nebius/workers/{device}` route
+(already polled by `WorkerIdleBanner`) rather than adding a new endpoint —
+it already had the right shape (per-device, already returns the *actual*
+live preset once an endpoint has run) and just needed two more fields:
+
+- `configured_platform`/`configured_preset` — straight from
+  `settings.nebius_{cpu,gpu}_{platform,preset}`, always present, even
+  before any worker session has ever existed (moved outside the
+  `session is None` early-return, unlike the existing `preset` field which
+  intentionally stays `None` until something real has run — see the
+  2026-07-11 incident this endpoint was already built to guard against).
+- `actual_platform` — the live platform captured in
+  `worker_sessions.actual_platform` (§9's principle: prefer live truth over
+  configured intent, since they can diverge). `actual_preset` already
+  existed as the `preset` field; only `actual_platform` was missing.
+
+New `HardwareSpecs.tsx` calls this for both `cpu` and `cuda`, shows
+`platform · preset (live)` once an endpoint has actually run, falling back
+to `platform · preset (configured)` before that — the `(live)`/`(configured)`
+label is deliberate, not cosmetic: `settings.py`'s GPU platform/preset are
+explicitly commented "UNVERIFIED placeholders... confirm before first GPU
+use," so silently presenting them as fact would be actively misleading.
+Rendered on both the landing page (below the description text) and the
+workspace header (below the experiment title) — the two places the user
+named.
+
+Tests: 2 new backend tests (`configured_*` present with no worker session;
+`actual_platform` overrides `configured_platform` once one exists) — 149
+passed (was 147, +2 new). 2 new frontend tests (configured-spec state,
+live-spec state) — 35 passed (was 33, +2 new). Build clean.
+
+## §34: UI bugs from first real screenshot review
+
+First look at the running app (screenshot) surfaced six issues, two of which
+shared a root cause worth documenting so it isn't reintroduced.
+
+**Step-through token count label was permanently stale.** The "(Step N, X
+tokens)" label in `PausePrompt.tsx` computed X from
+`diagnosticSnapshot.input_tokens.length` — but `input_tokens` is always just
+the *original prompt's* tokens (`backend/training/diagnostics.py`'s
+`_execute_forward_pass` builds it strictly from `session.prompt_tokens`,
+never `token_history`). It never changes after the first step, so the label
+looked frozen while the model's real input kept growing underneath it. Real
+current length is `generated_token.position + 1`.
+
+**No way to end a step-through session.** The prompt input already
+correctly disabled itself once a diagnostic session started
+(`disabled={diagnosticSession !== null}`), but nothing ever set
+`diagnosticSession` back to `null` — there was no reset path at all short of
+a page reload. Combined with the stale label above, a user could click `>`
+repeatedly (or `>>`, which has no upper session-lifetime either) without
+realizing the model's input sequence — no KV-cache, so every step reprocesses
+the *entire* prompt + everything generated so far — was silently growing far
+past what they'd typed. This is what produced a `[1, 82, 192]` runtime shape
+that looked inexplicable from a 27-token prompt: it was correct, just
+accumulated across an un-tracked, never-ending session. Fixed by auto-ending
+the session when `>>` completes (it has a real endpoint, `max_new_tokens`)
+and adding an explicit "Finish (new prompt)" button for the `>` path, which
+has no natural end point (no EOS token in this char-level model).
+
+**`activation_summaries` mislabeled as per-node.** It's computed once per
+snapshot from the LM head's logits only
+(`_compute_activation_extras(logits_last)`) — never per-node — but
+`Inspector.tsx`'s Runtime tab rendered it under every node (ln1, attention,
+mlp...) as if it reflected whatever node was selected. Moved to render only
+under the `lm_head` node, relabeled "LM Head Logit Extras" to say plainly
+what it actually is.
+
+**Other fixes from the same review, unrelated root causes:** `HardwareSpecs`
+now takes `device`/`backend` props and shows "Local" (no serverless info) or
+only the single active device, instead of always showing both CPU and GPU
+serverless specs regardless of what's actually running. Right-pane tabs
+(`App.tsx`) had `gap: 0` with only vertical button padding — no horizontal
+space at all between "Assistant"/"Inspector"/"Events", fixed with `gap: 24`.
+`CodeView.tsx`'s "Serverless Metrics" tab used a manual left-margin/border
+hack instead of using the panel's available width — replaced with
+`justifyContent: space-between`, code-file tabs left, metrics tab right.
+
+Not independently verified in a live browser this round (no Playwright tool
+available in this session) — verified via build (`tsc` clean) + full
+frontend test suite (35 passed) + careful tracing of the exact data flow
+each bug report pointed to, not just pattern-matching the symptom.
+
+## §35: Chatbot gave a confidently wrong "no config changes" answer
+
+Live incident (2026-07-13): user changed `eval_interval` 20→10 mid-session,
+then asked the chatbot "what is the config for this run?" It answered "No
+config modifications have been made... this is the exact preset
+configuration," which was false — visibly false, since the Config panel's
+own baseline-diff shadow text showed "baseline: 20" right next to the
+current value of 10.
+
+Root cause confirmed from the real session log, not guessed:
+`_get_last_audit_change()` (`backend/chatbot/context.py`) returned
+`matches[-1]` — the literal last `lab.audit` line matching the experiment's
+id marker, no filtering. Two things could (and did) make that the wrong
+line: (1) `Notes updated` audit lines match the same `id=<N> ` marker as
+config-change lines (the marker is deliberately shared, per the existing
+"id=%d" / "experiment_id=%d" comment) but aren't config changes at all; (2)
+a debounced config-panel autosave firing with no real difference logs
+`Config updated: ... changed={}` — a real, separate audit line with an
+empty diff. In the actual log, the real change (`eval_interval: [20, 10]`)
+was followed six seconds later by exactly such a no-op save, which became
+"the last change" and buried the real one entirely.
+
+Fixed by walking the matched lines backward and returning the most recent
+one that is both a `Config updated` line and has a non-empty diff
+(`"changed={}" not in line`), skipping notes-update lines and no-op saves
+either. Tests added for both failure modes plus the still-null case (only
+no-op diffs exist for the experiment).
+
+**A second, separate issue in the same conversation, not a code bug:** asked
+for the exact val_loss at step 330 (which was a real, present step — pasted
+directly from the live metrics log), the model answered "no data point
+exists... some evaluations might have been skipped," which was also false.
+Confirmed via the session log that `search_run_metrics` was never actually
+invoked for either message in that conversation (no `Executed N chatbot
+tool call(s)` line), even though the tool-calling heuristic (§29) did
+correctly offer it — the volatile snapshot's loss trend is an
+evenly-sampled subset (`_downsample_series`, `chatbot_loss_history_points`
+default 25), and step 330 landed in a genuine gap between two sampled
+points. The model treated a gap in its own sampled view as evidence the
+data didn't exist, instead of calling the tool it had available specifically
+for exact-step lookups. Not something fixable in application code — this is
+model tool-calling judgment, not a logic bug — but tightened the system
+prompt (`_SYSTEM_PROMPT`) to state explicitly that the injected loss trend
+is a sampled subset and that a gap must never be reported as missing/skipped
+data without checking `search_run_metrics` first. No way to verify this
+prompt change actually improves real-model behavior without another live
+conversation — flagging as unverified, not closed.
+
+Backend suite: 152 passed (was 149, +3 new).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

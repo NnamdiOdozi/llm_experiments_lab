@@ -96,6 +96,41 @@ async def test_worker_status_preset_is_none_before_any_endpoint_exists(temp_db, 
     assert resp.json()["preset"] is None
 
 
+async def test_worker_status_always_returns_configured_spec_even_with_no_worker(temp_db, client, monkeypatch):
+    """Landing/workspace pages show configured hardware before any endpoint
+    has ever been created — configured_platform/preset come straight from
+    settings.py, independent of worker_sessions state."""
+    monkeypatch.setattr(nebius_api.settings, "nebius_cpu_platform", "cpu-d3")
+    monkeypatch.setattr(nebius_api.settings, "nebius_cpu_preset", "16vcpu-64gb")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_platform", "gpu-l40s-a")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_preset", "1gpu-8vcpu-32gb")
+
+    cpu_resp = await client.get("/api/nebius/workers/cpu")
+    gpu_resp = await client.get("/api/nebius/workers/cuda")
+
+    assert cpu_resp.json()["configured_platform"] == "cpu-d3"
+    assert cpu_resp.json()["configured_preset"] == "16vcpu-64gb"
+    assert cpu_resp.json()["actual_platform"] is None
+    assert gpu_resp.json()["configured_platform"] == "gpu-l40s-a"
+    assert gpu_resp.json()["configured_preset"] == "1gpu-8vcpu-32gb"
+
+
+async def test_worker_status_reports_actual_platform_not_configured_platform(temp_db, client, monkeypatch):
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_platform", "gpu-l40s-a")
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", idle_timeout_seconds=600)
+    await db.update_worker_session(
+        "worker-gpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-2", actual_platform="gpu-h100-a", actual_preset="1gpu-16vcpu-64gb",
+    )
+
+    resp = await client.get("/api/nebius/workers/cuda")
+
+    body = resp.json()
+    assert body["actual_platform"] == "gpu-h100-a"
+    assert body["preset"] == "1gpu-16vcpu-64gb"
+    assert body["configured_platform"] == "gpu-l40s-a"
+
+
 async def test_get_worker_logs_returns_raw_text(temp_db, client, monkeypatch):
     await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", idle_timeout_seconds=1800)
     await db.update_worker_session("worker-cpu", nebius_endpoint_id="aiendpoint-1")

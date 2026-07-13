@@ -188,6 +188,55 @@ class TinyTransformerLM(nn.Module):
 
         return logits, loss
 
+    def register_diagnostic_hooks(self, session_id: str):
+        """Register forward hooks at diagnostic node points for a session.
+
+        Called by diagnostic route handlers. Hooks capture tensor shapes
+        and summary statistics at embedding, attention, MLP, and final
+        normalization layers. Hook closures reference the session_id so
+        they store captures in the correct session's captured_tensors dict.
+
+        For simplicity and zero impact on normal forward passes, hooks
+        are not unregistered per-layer — they stay live for the lifetime
+        of the model. Session cleanup will remove model references entirely.
+        """
+        from backend.training.diagnostics import _compute_summary
+
+        def make_hook(node_id: str):
+            def hook(module, input_tuple, output):
+                from backend.training.diagnostics import get_session
+                session = get_session(session_id)
+                if session is None:
+                    return
+
+                input_shape = list(input_tuple[0].shape) if input_tuple else []
+                output_shape = list(output.shape) if isinstance(output, torch.Tensor) else []
+                summary = {}
+                if isinstance(output, torch.Tensor):
+                    summary = _compute_summary(output)
+
+                from backend.training.diagnostics import NodeCapture
+                session.captured_tensors[node_id] = NodeCapture(
+                    input_shape=input_shape,
+                    output_shape=output_shape,
+                    summary=summary,
+                )
+            return hook
+
+        # Register embedding hook
+        self.token_emb.register_forward_hook(make_hook("embedding"))
+
+        # Register block hooks
+        for i, block in enumerate(self.blocks):
+            block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1"))
+            block.attn.register_forward_hook(make_hook(f"block.{i}.attention"))
+            block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2"))
+            block.ffn.register_forward_hook(make_hook(f"block.{i}.mlp"))
+
+        # Register final norm and lm_head hooks
+        self.ln_f.register_forward_hook(make_hook("final_norm"))
+        self.lm_head.register_forward_hook(make_hook("lm_head"))
+
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8) -> torch.Tensor:
         """Autoregressive generation.  temperature < 1 → sharper (more greedy),

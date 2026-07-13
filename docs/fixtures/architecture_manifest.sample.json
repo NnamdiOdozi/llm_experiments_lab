@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "local_run_id": 42,
+  "template": "transformer",
+  "param_count": 1782529,
+  "trainable_param_count": 1782529,
+  "nodes": [
+    {
+      "id": "embedding",
+      "kind": "embedding",
+      "label": "Token + Positional Embedding",
+      "config": { "vocab_size": 65, "n_embd": 192, "pos_encoding": "learned" },
+      "static_shapes": [
+        { "name": "input", "dims": ["batch", "sequence"] },
+        { "name": "output", "dims": ["batch", "sequence", "n_embd"] }
+      ],
+      "math_key": "embedding_lookup"
+    },
+    {
+      "id": "block",
+      "kind": "transformer_block_group",
+      "label": "Transformer Block",
+      "repeat_count": 4,
+      "config": { "n_head": 6, "head_dim": 32, "dropout": 0.1, "activation": "gelu" },
+      "children": [
+        { "id": "block.{i}.ln1", "kind": "layernorm", "label": "LayerNorm (pre-attention)" },
+        { "id": "block.{i}.attention", "kind": "attention", "label": "Causal Self-Attention",
+          "math_key": "scaled_dot_product_attention" },
+        { "id": "block.{i}.ln2", "kind": "layernorm", "label": "LayerNorm (pre-MLP)" },
+        { "id": "block.{i}.mlp", "kind": "mlp", "label": "Feed-Forward (dense)",
+          "math_key": "mlp_gelu" }
+      ]
+    },
+    {
+      "id": "final_norm",
+      "kind": "layernorm",
+      "label": "Final LayerNorm",
+      "config": {}
+    },
+    {
+      "id": "lm_head",
+      "kind": "lm_head",
+      "label": "LM Head",
+      "config": { "vocab_size": 65 },
+      "static_shapes": [
+        { "name": "input", "dims": ["batch", "sequence", "n_embd"] },
+        { "name": "output", "dims": ["batch", "sequence", "vocab_size"] }
+      ]
+    }
+  ]
+}

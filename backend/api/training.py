@@ -1,10 +1,13 @@
 """Training control endpoints + WebSocket for metrics streaming."""
 
 import asyncio
+import itertools
 import json
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend import db
@@ -49,8 +52,38 @@ class PromptRequest(BaseModel):
     max_new_tokens: int = 200
 
 
+class DiagnosticsStartRequest(BaseModel):
+    prompt: str
+    top_k: int = 5
+    max_prompt_tokens: int = 32
+
+
+class DiagnosticsStepRequest(BaseModel):
+    """POST body for step endpoint. Phase 1: always captures shapes + top-k.
+    Phase 2: optional attention_layer/head triggers an explicit attention
+    capture for that layer/head; omit both to skip it (cheap default).
+    Phase 4: qkv_detail (requires attention_layer/head) adds Q/K/V vectors
+    for the last token position, one head only."""
+    attention_layer: int | None = None
+    attention_head: int | None = None
+    qkv_detail: bool = False
+
+
+class DiagnosticsGenerateRequest(BaseModel):
+    """POST body for the Phase 3 streaming /generate endpoint."""
+    max_new_tokens: int = 50
+    attention_layer: int | None = None
+    attention_head: int | None = None
+    qkv_detail: bool = False
+
+
 def _count_active_runs(device_filter: str | None = None) -> int:
-    """Count runs with live worker processes."""
+    """Count runs with live worker processes.
+
+    active_runs (backend/training/runner.py) only ever holds LOCAL runs —
+    _start_remote_run() never calls start_run(), so a serverless run never
+    gets an entry here. Meaningful only for the local-backend concurrency
+    check; see start_training()."""
     count = 0
     for r in active_runs.values():
         if r.process.poll() is not None:
@@ -175,24 +208,36 @@ async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
 @router.post("/start")
 async def start_training(req: StartRunRequest):
     async with _start_lock:
-        # Enforce concurrency limits — check both in-memory and DB
-        active_total = max(
-            _count_active_runs(),
-            await db.count_active_runs_in_db(),
-        )
-        if active_total >= settings.max_concurrent_runs:
+        # Enforce concurrency limits — separate per device x execution
+        # backend (a laptop's local capacity is unrelated to how many
+        # concurrent serverless endpoint sessions are allowed). Check both
+        # in-memory (local runs only) and DB (survives API restarts, covers
+        # both backends) and take the max. See docs/DESIGN_DECISIONS.md.
+        is_gpu = req.device.startswith("cuda")
+        is_serverless = req.backend == "nebius_endpoint"
+        device_filter = "cuda" if is_gpu else "cpu"
+        backend_filter = "nebius_endpoint" if is_serverless else "local"
+        if is_serverless:
+            limit = (
+                settings.max_concurrent_serverless_gpu_runs
+                if is_gpu else settings.max_concurrent_serverless_cpu_runs
+            )
+        else:
+            limit = (
+                settings.max_concurrent_local_gpu_runs
+                if is_gpu else settings.max_concurrent_local_cpu_runs
+            )
+
+        active_count = await db.count_active_runs_in_db(device_filter, backend_filter)
+        if not is_serverless:
+            active_count = max(active_count, _count_active_runs(device_filter))
+
+        if active_count >= limit:
+            kind = "GPU" if is_gpu else "CPU"
+            where = "serverless" if is_serverless else "local"
             raise HTTPException(
-                429, f"Max {settings.max_concurrent_runs} concurrent runs. Stop a run first."
+                429, f"Max {limit} concurrent {where} {kind} run(s). Stop a run first."
             )
-        if req.device.startswith("cuda"):
-            gpu_count = max(
-                _count_active_runs("cuda"),
-                await db.count_active_runs_in_db("cuda"),
-            )
-            if gpu_count >= settings.max_concurrent_gpu_runs:
-                raise HTTPException(
-                    429, f"Max {settings.max_concurrent_gpu_runs} GPU run(s). Stop the GPU run first."
-                )
 
         exp = await db.get_experiment(req.experiment_id)
         if exp is None:
@@ -500,12 +545,32 @@ async def get_metrics(run_id: int):
 
 @router.websocket("/{run_id}/ws")
 async def metrics_websocket(websocket: WebSocket, run_id: int):
-    """Stream metrics to the browser as they arrive."""
+    """Stream metrics to the browser as they arrive.
+
+    Messages wrapped in the standard event envelope (schema_version,
+    event_id, timestamp, local_run_id, remote_run_id, type, payload) per
+    docs/Diagnostic_Contract.md / docs/Trainer_to_Frontend_Metrics.md — the
+    transport itself (this WS, polling disk/remote every 2s) is unchanged,
+    only the message shape gained a stable envelope around existing content.
+    """
     from backend.training import artifacts
 
     await websocket.accept()
     last_sent = 0
     db_run = await db.get_training_run(run_id)
+    remote_run_id = db_run.get("remote_run_id") if db_run else None
+    event_ids = itertools.count(1)
+
+    async def send_event(event_type: str, payload: dict) -> None:
+        await websocket.send_json({
+            "schema_version": 1,
+            "event_id": next(event_ids),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "local_run_id": run_id,
+            "remote_run_id": remote_run_id,
+            "type": event_type,
+            "payload": payload,
+        })
 
     try:
         if _is_remote(db_run):
@@ -516,23 +581,22 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
                     status = await _proxy(db_run, "GET", "/api/training/{run_id}/status")
                     current_metrics = await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
                 except httpx.HTTPError:
-                    await websocket.send_json({"type": "error", "message": "Remote worker unreachable"})
+                    await send_event("error", {"message": "Remote worker unreachable"})
                     break
 
                 if isinstance(current_metrics, list) and len(current_metrics) > last_sent:
                     for metric in current_metrics[last_sent:]:
-                        await websocket.send_json({"type": "metric", "data": metric})
+                        await send_event("metric", {"data": metric})
                     last_sent = len(current_metrics)
 
-                await websocket.send_json({
-                    "type": "status",
+                await send_event("status", {
                     "status": status.get("status"),
                     "current_step": status.get("current_step", 0),
                     "total_steps": status.get("total_steps", 0),
                 })
 
                 if status.get("status") in TERMINAL_STATUSES:
-                    await websocket.send_json({"type": "done", "status": status.get("status")})
+                    await send_event("done", {"status": status.get("status")})
                     break
 
                 await asyncio.sleep(2)
@@ -541,19 +605,18 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
         while True:
             status = artifacts.read_status(run_id)
             if status is None:
-                await websocket.send_json({"type": "error", "message": "Run not found"})
+                await send_event("error", {"message": "Run not found"})
                 break
 
             # Send new metrics from disk
             current_metrics = read_metrics_from_disk(run_id)
             if len(current_metrics) > last_sent:
                 for metric in current_metrics[last_sent:]:
-                    await websocket.send_json({"type": "metric", "data": metric})
+                    await send_event("metric", {"data": metric})
                 last_sent = len(current_metrics)
 
             # Send status updates
-            await websocket.send_json({
-                "type": "status",
+            await send_event("status", {
                 "status": status["status"],
                 "current_step": status.get("current_step", 0),
                 "total_steps": status.get("total_steps", 0),
@@ -561,10 +624,495 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
 
             # Stop streaming if run is done
             if status["status"] in TERMINAL_STATUSES:
-                await websocket.send_json({"type": "done", "status": status["status"]})
+                await send_event("done", {"status": status["status"]})
                 break
 
             await asyncio.sleep(2)
 
     except WebSocketDisconnect:
         pass
+
+
+@router.get("/{run_id}/architecture")
+async def get_architecture_manifest(run_id: int):
+    """Return static architecture manifest derived from config.
+
+    For local runs, derive from run_dir/config.json. For remote runs,
+    proxy to the endpoint. Node IDs and Phase 1 scope per
+    docs/Diagnostic_Contract.md.
+    """
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(db_run, "GET", "/api/training/{run_id}/architecture")
+            result["local_run_id"] = run_id  # Override with local run_id
+            return result
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote architecture fetch failed: {exc}")
+
+    # Load config from disk
+    rd = artifacts.run_dir(run_id)
+    config_path = rd / "config.json"
+    if not config_path.exists():
+        raise HTTPException(404, "Run config not found")
+
+    config = json.loads(config_path.read_text())
+    template_key = config.get("template", "transformer")
+    model_cfg = config.get("model", {})
+
+    # Count parameters using template's model
+    total_params = 0
+    trainable_params = 0
+    try:
+        model = TEMPLATE_REGISTRY[template_key]["build_model"](config)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    except Exception as e:
+        training_log.warning("Could not count params for run %d (may not have a saved checkpoint yet): %s", run_id, e)
+
+    # RNN (CharRNN) has a completely different shape from transformer/MoE —
+    # one-hot input, a single stacked nn.LSTM (n_layers is internal to one
+    # module, not separate Block instances), dropout, then a linear head.
+    # No attention, no residual blocks, no separate per-layer boxes — a
+    # deliberately simpler diagram per user request (2026-07-13: "easier
+    # than the transformer/MoE one, come up with something sensible").
+    if template_key == "rnn":
+        n_hidden = model_cfg.get("n_hidden", 256)
+        n_layers = model_cfg.get("n_layers", 2)
+        rnn_nodes = [
+            {
+                "id": "one_hot",
+                "kind": "embedding",
+                "label": "One-Hot Encoding",
+                "config": {"vocab_size": model_cfg.get("vocab_size")},
+                "static_shapes": [
+                    {"name": "input", "dims": ["batch", "sequence"]},
+                    {"name": "output", "dims": ["batch", "sequence", "vocab_size"]},
+                ],
+                "math_key": "one_hot",
+            },
+            {
+                "id": "lstm",
+                "kind": "rnn",
+                "label": f"LSTM ({n_layers} layer{'s' if n_layers != 1 else ''}, stacked)",
+                "config": {"n_hidden": n_hidden, "n_layers": n_layers, "dropout": model_cfg.get("dropout", 0.5)},
+                "static_shapes": [
+                    {"name": "input", "dims": ["batch", "sequence", "vocab_size"]},
+                    {"name": "output", "dims": ["batch", "sequence", "n_hidden"]},
+                ],
+                "math_key": "lstm_cell",
+            },
+            {
+                "id": "dropout",
+                "kind": "dropout",
+                "label": "Dropout",
+                "config": {"dropout": model_cfg.get("dropout", 0.5)},
+            },
+            {
+                "id": "lm_head",
+                "kind": "lm_head",
+                "label": "Linear (FC)",
+                "config": {"vocab_size": model_cfg.get("vocab_size")},
+                "static_shapes": [
+                    {"name": "input", "dims": ["batch * sequence", "n_hidden"]},
+                    {"name": "output", "dims": ["batch * sequence", "vocab_size"]},
+                ],
+            },
+        ]
+        return {
+            "schema_version": 1,
+            "local_run_id": run_id,
+            "template": template_key,
+            "param_count": total_params,
+            "trainable_param_count": trainable_params,
+            "nodes": rnn_nodes,
+        }
+
+    # Build nodes list
+    nodes = []
+
+    # Embedding node
+    nodes.append({
+        "id": "embedding",
+        "kind": "embedding",
+        "label": "Token + Positional Embedding",
+        "config": {
+            "vocab_size": model_cfg.get("vocab_size"),
+            "n_embd": model_cfg.get("n_embd"),
+            "pos_encoding": model_cfg.get("pos_encoding", "learned"),
+        },
+        "static_shapes": [
+            {"name": "input", "dims": ["batch", "sequence"]},
+            {"name": "output", "dims": ["batch", "sequence", "n_embd"]},
+        ],
+        "math_key": "embedding_lookup",
+    })
+
+    # Transformer/MoE blocks
+    n_layer = model_cfg.get("n_layer", 4)
+    n_head = model_cfg.get("n_head", 6)
+    head_dim = model_cfg.get("n_embd", 192) // n_head
+    dropout = model_cfg.get("dropout", 0.1)
+    activation = model_cfg.get("activation", "gelu")
+
+    block_children = [
+        {"id": "block.{i}.ln1", "kind": "layernorm", "label": "LayerNorm (pre-attention)"},
+        {"id": "block.{i}.attention", "kind": "attention", "label": "Causal Self-Attention",
+         "math_key": "scaled_dot_product_attention"},
+        {"id": "block.{i}.ln2", "kind": "layernorm", "label": "LayerNorm (pre-MLP/MoE)"},
+    ]
+
+    # MLP or MoE, depending on template — per user feedback (2026-07-13), a
+    # MoE layer has multiple experts, not one FFN, so it gets a distinct
+    # node kind/config here, not a relabeled "mlp" node.
+    if template_key == "moe":
+        moe_config = {
+            "num_experts": model_cfg.get("num_experts", 8),
+            "top_k": model_cfg.get("top_k", 2),
+            "capacity_factor": model_cfg.get("capacity_factor", 1.25),
+        }
+        block_children.append({
+            "id": "block.{i}.moe",
+            "kind": "moe",
+            "label": "Mixture-of-Experts",
+            "config": moe_config,
+        })
+        block_group_label = "Transformer Block (MoE)"
+    else:
+        block_children.append({
+            "id": "block.{i}.mlp",
+            "kind": "mlp",
+            "label": "Feed-Forward (dense)",
+            "math_key": "mlp_gelu",
+        })
+        block_group_label = "Transformer Block"
+
+    nodes.append({
+        "id": "block",
+        "kind": "transformer_block_group",
+        "label": block_group_label,
+        "repeat_count": n_layer,
+        "config": {
+            "n_head": n_head,
+            "head_dim": head_dim,
+            "dropout": dropout,
+            "activation": activation,
+        },
+        "children": block_children,
+    })
+
+    # Final norm
+    nodes.append({
+        "id": "final_norm",
+        "kind": "layernorm",
+        "label": "Final LayerNorm",
+        "config": {},
+    })
+
+    # LM head
+    nodes.append({
+        "id": "lm_head",
+        "kind": "lm_head",
+        "label": "LM Head",
+        "config": {"vocab_size": model_cfg.get("vocab_size")},
+        "static_shapes": [
+            {"name": "input", "dims": ["batch", "sequence", "n_embd"]},
+            {"name": "output", "dims": ["batch", "sequence", "vocab_size"]},
+        ],
+    })
+
+    return {
+        "schema_version": 1,
+        "local_run_id": run_id,
+        "template": template_key,
+        "param_count": total_params,
+        "trainable_param_count": trainable_params,
+        "nodes": nodes,
+    }
+
+
+@router.post("/{run_id}/diagnostics/start")
+async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
+    """Initialize a diagnostic session: load model, encode prompt, return session_id.
+
+    Only valid if run is paused or completed.
+    """
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(
+                db_run, "POST", "/api/training/{run_id}/diagnostics/start",
+                {"prompt": req.prompt, "top_k": req.top_k, "max_prompt_tokens": req.max_prompt_tokens},
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote diagnostics start failed: {exc}")
+        await _touch_worker_for_run(db_run)
+        remote_session_id = result.get("diagnostic_session_id")
+        if remote_session_id:
+            # Session itself lives in the trainer container's process — only
+            # the id is recorded here so chatbot grounding knows which
+            # session_id to ask the trainer about via the same _proxy path.
+            diagnostics.record_session_for_run(run_id, remote_session_id)
+        return result
+
+    # Check run status
+    status = artifacts.read_status(run_id)
+    if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
+        raise HTTPException(400, "Run must be paused or completed to start diagnostics")
+
+    # Check checkpoint exists
+    cp_path = artifacts.checkpoint_path(run_id)
+    if not cp_path.exists():
+        raise HTTPException(400, "No checkpoint available for this run")
+
+    rd = artifacts.run_dir(run_id)
+    config = json.loads((rd / "config.json").read_text())
+    template_key = config.get("template", "transformer")
+    device = config.get("device", "cpu")
+
+    # RNN's forward(x, hc) signature (one-hot input + threaded hidden state)
+    # is fundamentally different from transformer/moe's forward(idx) — a
+    # step-through diagnostic session for it needs its own hidden-state
+    # bookkeeping, not yet built. Reject early and clearly rather than
+    # crashing deeper in run_diagnostic_step(). RNN still gets a correct
+    # static architecture manifest (see get_architecture_manifest) — only
+    # the live step-through session is unsupported. See docs/DESIGN_DECISIONS.md.
+    if template_key == "rnn":
+        raise HTTPException(400, "Step-through diagnostics not yet supported for the RNN template — architecture view only.")
+
+    try:
+        # Load checkpoint
+        import torch
+        cp = torch.load(cp_path, map_location=device, weights_only=False)
+        cp.pop("optimizer_state", None)
+        model_config = cp.get("config", config)
+        model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config).to(device)
+        model.load_state_dict(cp["model_state"])
+        model.eval()
+
+        # Load tokenizer
+        if template_key in ("transformer", "moe"):
+            from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
+            text = load_tiny_shakespeare()
+            tokenizer = CharDataset(text, config["model"]["block_size"], 1)
+        elif template_key == "rnn":
+            from backend.training.templates.rnn.data import load_dinos_dataset
+            tokenizer = load_dinos_dataset(config["training"].get("seq_len", 50))
+        else:
+            raise HTTPException(400, f"Unknown template: {template_key}")
+
+        # Encode prompt
+        encoded = tokenizer.encode(req.prompt[:req.max_prompt_tokens])
+
+        # Create session
+        session_id = diagnostics.create_diagnostic_session(model, tokenizer, device, encoded, run_id=run_id)
+
+        # Register hooks (delegates to model's register_diagnostic_hooks method)
+        diagnostics.register_diagnostic_hooks(model, session_id)
+
+        # Return session info with initial tokens
+        input_tokens = [
+            {"position": i, "id": tid, "text": tokenizer.decode([tid])}
+            for i, tid in enumerate(encoded)
+        ]
+
+        return {
+            "diagnostic_session_id": session_id,
+            "tokens": input_tokens,
+        }
+
+    except Exception as e:
+        training_log.error("Diagnostics start failed for run %d: %s", run_id, e, exc_info=True)
+        raise HTTPException(500, f"Failed to start diagnostic session: {str(e)}")
+
+
+@router.post("/{run_id}/diagnostics/{session_id}/step")
+async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepRequest = None):
+    """Execute one forward pass and return diagnostic snapshot.
+
+    Only valid if run is paused or completed. Optional attention_layer/head
+    (Phase 2) trigger an explicit attention capture for that layer/head.
+    """
+    from backend.training import artifacts, diagnostics
+
+    attention_params = None
+    if req is not None and req.attention_layer is not None and req.attention_head is not None:
+        attention_params = (req.attention_layer, req.attention_head)
+    qkv_detail = req.qkv_detail if req is not None else False
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            body = {}
+            if attention_params is not None:
+                body = {"attention_layer": attention_params[0], "attention_head": attention_params[1], "qkv_detail": qkv_detail}
+            result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/step", body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote diagnostics step failed: {exc}")
+        await _touch_worker_for_run(db_run)
+        return result
+
+    # Check run status
+    status = artifacts.read_status(run_id)
+    if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
+        raise HTTPException(400, "Run must be paused or completed for diagnostics")
+
+    # Get session
+    session = diagnostics.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Diagnostic session not found")
+
+    # Run step
+    snapshot = diagnostics.run_diagnostic_step(session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail)
+    if snapshot is None:
+        raise HTTPException(500, "Failed to run diagnostic step")
+
+    return snapshot.to_dict()
+
+
+@router.get("/{run_id}/diagnostics/{session_id}")
+async def diagnostics_get(run_id: int, session_id: str):
+    """Retrieve the last diagnostic snapshot (for reconnect/refresh).
+
+    Does not advance the session.
+    """
+    from backend.training import artifacts, diagnostics
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            result = await _proxy(db_run, "GET", f"/api/training/{{run_id}}/diagnostics/{session_id}")
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote diagnostics get failed: {exc}")
+        return result
+
+    # Check run status
+    status = artifacts.read_status(run_id)
+    if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
+        raise HTTPException(400, "Run must be paused or completed for diagnostics")
+
+    # Get session and last snapshot
+    session = diagnostics.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Diagnostic session not found")
+
+    if session.last_snapshot is None:
+        raise HTTPException(404, "No snapshots in this session yet")
+
+    return session.last_snapshot.to_dict()
+
+
+async def get_diagnostic_snapshot_for_run(run_id: int) -> dict | None:
+    """Chatbot grounding accessor — latest diagnostic snapshot for a run, if
+    a diagnostic session has been started for it. Reuses diagnostics_get()
+    (the same local/remote _is_remote/_proxy dual path every other route
+    here uses) rather than re-implementing it, so this stays correct for
+    both local and serverless runs without duplicating that logic. Returns
+    None (never raises) when there's no session yet, the run isn't
+    paused/completed, or the run doesn't exist — the chatbot tool turns
+    that into a plain "not available" message for the model.
+    """
+    from backend.training import diagnostics
+
+    session_id = diagnostics.get_latest_session_id_for_run(run_id)
+    if session_id is None:
+        return None
+    try:
+        return await diagnostics_get(run_id, session_id)
+    except HTTPException:
+        return None
+
+
+@router.post("/{run_id}/diagnostics/{session_id}/generate")
+async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGenerateRequest):
+    """Phase 3: continue generation (`>>`) — SSE stream, matching
+    docs/fixtures/generate_stream.sample.txt. One `event: token` frame per
+    generated token (no per-node capture — cost control), then one
+    `event: done` frame with a full snapshot for the FINAL token only.
+    """
+    from backend.training import artifacts, diagnostics
+
+    db_run = await db.get_training_run(run_id)
+
+    async def event_stream():
+        if _is_remote(db_run):
+            try:
+                endpoint_url = await _remote_endpoint_url(db_run)
+                if endpoint_url is None:
+                    raise HTTPException(502, "Remote worker endpoint not available")
+                remote_path = f"/api/training/{db_run['remote_run_id']}/diagnostics/{session_id}/generate"
+                async with httpx.AsyncClient(timeout=60) as client:
+                    async with client.stream("POST", f"{endpoint_url}{remote_path}", json=req.model_dump()) as resp:
+                        async for line in resp.aiter_lines():
+                            yield line + "\n"
+                await _touch_worker_for_run(db_run)
+            except httpx.HTTPError as exc:
+                yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+            return
+
+        status = artifacts.read_status(run_id)
+        if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
+            yield f"event: error\ndata: {json.dumps({'error': 'Run must be paused or completed'})}\n\n"
+            return
+        session = diagnostics.get_session(session_id)
+        if session is None:
+            yield f"event: error\ndata: {json.dumps({'error': 'Diagnostic session not found'})}\n\n"
+            return
+
+        try:
+            import torch
+            for _ in range(req.max_new_tokens):
+                with torch.inference_mode():
+                    all_tokens = session.prompt_tokens + session.token_history
+                    idx = torch.tensor([all_tokens], dtype=torch.long, device=session.device)
+                    if "Moe" in session.model.__class__.__name__:
+                        logits, _, _ = session.model(idx)
+                    else:
+                        logits, _ = session.model(idx)
+                    next_id = torch.argmax(torch.softmax(logits[0, -1, :], dim=-1)).item()
+                    session.token_history.append(next_id)
+                    session.generation_step += 1
+
+                yield f"event: token\ndata: {json.dumps({'position': len(session.prompt_tokens) + len(session.token_history) - 1, 'id': next_id, 'text': session.tokenizer.decode([next_id]), 'generation_step': session.generation_step})}\n\n"
+
+            attention_params = None
+            if req.attention_layer is not None and req.attention_head is not None:
+                attention_params = (req.attention_layer, req.attention_head)
+            final_snapshot = diagnostics.run_diagnostic_step_internal(
+                session_id, top_k=5, attention_params=attention_params,
+                qkv_detail=req.qkv_detail, skip_token_generation=True,
+            )
+            if final_snapshot is None:
+                yield f"event: error\ndata: {json.dumps({'error': 'Failed to capture final snapshot'})}\n\n"
+                return
+
+            # Phase 4: persist the final outcome once the stream completes —
+            # not per-token, per contract cost-control guidance.
+            prompt_text = session.tokenizer.decode(session.prompt_tokens)
+            generated_output = session.tokenizer.decode(session.prompt_tokens + session.token_history)
+            generation_params = {
+                "max_new_tokens": req.max_new_tokens,
+                "attention_layer": req.attention_layer,
+                "attention_head": req.attention_head,
+                "qkv_detail": req.qkv_detail,
+            }
+            await db.save_diagnostic_session_result(
+                run_id,
+                prompt=prompt_text,
+                generated_output=generated_output,
+                generation_params=generation_params,
+                top_k_summary=final_snapshot.lm_head.get("top_k", []),
+            )
+
+            yield f"event: done\ndata: {json.dumps({'final_snapshot': final_snapshot.to_dict()})}\n\n"
+        except Exception as e:
+            training_log.error("Diagnostics generate failed for run %d: %s", run_id, e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

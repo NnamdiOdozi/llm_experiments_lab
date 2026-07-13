@@ -1,0 +1,16 @@
+Example raw SSE stream from POST /diagnostics/{session_id}/generate — one
+possible sequence for {"max_new_tokens": 3}. Intermediate "token" events
+carry no per-node capture; only the final "done" event includes a full
+DiagnosticSnapshot (same shape as a normal /step response).
+
+event: token
+data: {"position": 4, "id": 91, "text": " to", "generation_step": 4}
+
+event: token
+data: {"position": 5, "id": 12, "text": " have", "generation_step": 5}
+
+event: token
+data: {"position": 6, "id": 7, "text": " reign", "generation_step": 6}
+
+event: done
+data: {"final_snapshot": {"schema_version": 1, "diagnostic_session_id": "diag-17", "generation_step": 6, "input_tokens": [], "generated_token": {"position": 6, "id": 7, "text": " reign"}, "nodes": {}, "attention": {"available": false, "reason": "Not requested"}, "activation_summaries": {"available": false, "reason": "Not requested"}, "lm_head": {"logits_shape": [1, 7, 65], "selected_position": 6, "top_k": []}, "complete": true}}

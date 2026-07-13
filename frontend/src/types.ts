@@ -112,3 +112,127 @@ export interface ChatMessage {
   feedback?: "up" | "down" | null;
   created_at: string;
 }
+
+// === Diagnostic API types ===
+
+export interface TokenInfo {
+  position: number;
+  id: number;
+  text: string;
+}
+
+export interface TopKEntry {
+  rank: number;
+  token_id: number;
+  token: string;
+  logit: number;
+  probability: number;
+}
+
+export interface NodeShape {
+  name: string;
+  dims: string[];
+}
+
+export interface ArchitectureNode {
+  id: string;
+  kind: string;
+  label: string;
+  repeat_count?: number;
+  config: Record<string, unknown>;
+  static_shapes?: NodeShape[];
+  math_key?: string;
+  children?: ArchitectureNode[];
+}
+
+export interface ArchitectureManifest {
+  schema_version: number;
+  local_run_id: number;
+  template: string;
+  param_count: number;
+  trainable_param_count: number;
+  nodes: ArchitectureNode[];
+}
+
+export interface NodeRuntimeData {
+  input_shape?: number[];
+  output_shape?: number[];
+  summary?: {
+    mean: number;
+    std: number;
+    l2_norm: number;
+    min: number;
+    max: number;
+  };
+}
+
+export interface LMHeadData {
+  logits_shape: number[];
+  selected_position: number;
+  top_k: TopKEntry[];
+}
+
+export interface QKVDetail {
+  position: number;
+  q: number[];
+  k: number[];
+  v: number[];
+}
+
+export interface AttentionData {
+  available: boolean;
+  layer?: number;
+  head?: number;
+  weights?: number[][];
+  token_labels?: string[];
+  reason?: string;
+  qkv_detail?: QKVDetail;
+}
+
+export interface ActivationSummariesData {
+  available: boolean;
+  top_abs_components?: Array<{ index: number; value: number }>;
+  value_slice?: number[];
+  reason?: string;
+}
+
+export interface DiagnosticSnapshot {
+  schema_version: number;
+  diagnostic_session_id: string;
+  generation_step: number;
+  input_tokens: TokenInfo[];
+  generated_token: TokenInfo;
+  nodes: Record<string, NodeRuntimeData>;
+  attention: AttentionData;
+  activation_summaries: ActivationSummariesData;
+  lm_head: LMHeadData;
+  complete: boolean;
+}
+
+export interface DiagnosticSessionResponse {
+  diagnostic_session_id: string;
+  tokens: TokenInfo[];
+}
+
+export interface DiagnosticStartRequest {
+  prompt: string;
+  top_k: number;
+  max_prompt_tokens: number;
+}
+
+export interface DiagnosticStepRequest {
+  attention_layer?: number;
+  attention_head?: number;
+  qkv_detail?: boolean;
+}
+
+export interface GenerateStreamToken {
+  position: number;
+  id: number;
+  text: string;
+  generation_step: number;
+}
+
+export interface GenerateStreamDone {
+  final_snapshot: DiagnosticSnapshot;
+}

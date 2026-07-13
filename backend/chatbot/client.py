@@ -1,5 +1,6 @@
 """Thin wrapper around the Nebius Token Factory OpenAI-compatible API."""
 
+import re
 import time
 from collections.abc import AsyncIterator
 
@@ -10,6 +11,35 @@ from backend.logging_config import chatbot_log, error_log
 from config.settings import settings
 
 _client: AsyncOpenAI | None = None
+
+# Live-tested against the real Token Factory endpoint (2026-07-13, model
+# Qwen/Qwen3-Next-80B-A3B-Thinking): stream=True + tools= silently never
+# produces tool_calls — the model just answers in plain text instead
+# (finish_reason "stop", not "tool_calls"). stream=False + tools= works
+# correctly. So tool-calling can only run through a non-streaming call.
+# Doing that non-streaming preflight on every single message would kill
+# token-by-token streaming for the common case (most messages don't need a
+# lookup). This heuristic gates the preflight to messages that plausibly
+# need one — deliberately biased toward "assume no tool needed, just
+# stream" per explicit instruction: tool-call turns must always work
+# correctly (they do — this heuristic never affects that path once
+# triggered), but streaming should be the default for everything else, even
+# at the cost of occasionally missing a lookup opportunity. See
+# docs/DESIGN_DECISIONS.md.
+_LOOKUP_HINT_RE = re.compile(
+    r"\d"  # any digit — strong signal the user wants an exact number
+    r"|\b(step|loss|metric|config|exact|value|epoch|param|token|checkpoint"
+    r"|gpu|cpu|memory|throughput|drop.?rate|learning.?rate|compare|attention"
+    r"|logit|top.?k"
+    # Diagnostic-snapshot grounding keywords (get_diagnostic_snapshot tool) —
+    # see docs/DESIGN_DECISIONS.md.
+    r"|shape|tensor|diagnostic|snapshot|node|layer|head|mlp|embedding|activation)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_lookup_needed(user_message: str) -> bool:
+    return bool(_LOOKUP_HINT_RE.search(user_message))
 
 
 def is_configured() -> bool:
@@ -41,7 +71,12 @@ async def stream_completion(
     )
     try:
         stream_messages = list(messages)
-        if tool_context is not None:
+        last_user_message = next(
+            (m.get("content", "") for m in reversed(stream_messages) if m.get("role") == "user"),
+            "",
+        )
+        use_tools = tool_context is not None and _looks_like_lookup_needed(last_user_message)
+        if use_tools:
             first = await client.chat.completions.create(
                 model=settings.token_factory_model,
                 messages=stream_messages,
@@ -58,7 +93,7 @@ async def stream_completion(
                 else:
                     stream_messages.append(first_message)
                 for call in tool_calls:
-                    result = execute_tool_call(
+                    result = await execute_tool_call(
                         call.function.name,
                         call.function.arguments,
                         allowed_run_ids=tool_context.get("run_ids", []),

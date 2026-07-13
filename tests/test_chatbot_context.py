@@ -133,6 +133,52 @@ def test_get_last_audit_change_missing_file_returns_none(tmp_path, monkeypatch):
     assert context._get_last_audit_change(5) is None
 
 
+def test_get_last_audit_change_skips_trailing_noop_diff(tmp_path, monkeypatch):
+    """Regression test for a real live incident (2026-07-13): a debounced
+    autosave logging an empty diff as the literal last audit line buried a
+    real config change, and the chatbot told the user 'no config
+    modifications have been made' right after they'd changed eval_interval
+    20->10."""
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-13 15:36:19 | INFO  | lab.audit | Config updated: experiment_id=148 changed={\"eval_interval\": [20, 10]}\n"
+        "2026-07-13 15:36:27 | INFO  | lab.audit | Config updated: experiment_id=148 changed={}\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    result = context._get_last_audit_change(148)
+
+    assert result is not None
+    assert "eval_interval" in result
+
+
+def test_get_last_audit_change_skips_non_config_lines(tmp_path, monkeypatch):
+    """A 'Notes updated' line matches the same id=<N> marker but isn't a
+    config change — must not win over a real config change just for being
+    more recent in the log."""
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-13 15:36:19 | INFO  | lab.audit | Config updated: experiment_id=148 changed={\"eval_interval\": [20, 10]}\n"
+        "2026-07-13 16:12:03 | INFO  | lab.audit | Notes updated: experiment_id=148 len=193\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    result = context._get_last_audit_change(148)
+
+    assert result is not None
+    assert "eval_interval" in result
+
+
+def test_get_last_audit_change_returns_none_when_only_noop_diffs_exist(tmp_path, monkeypatch):
+    log_file = tmp_path / "session.log"
+    log_file.write_text(
+        "2026-07-13 15:36:19 | INFO  | lab.audit | Config updated: experiment_id=148 changed={}\n"
+    )
+    monkeypatch.setattr(context, "get_log_path", lambda: log_file)
+
+    assert context._get_last_audit_change(148) is None
+
+
 def test_get_log_tail_returns_last_n_lines(tmp_path, monkeypatch):
     log_file = tmp_path / "session.log"
     log_file.write_text("\n".join(f"line {i}" for i in range(100)) + "\n")

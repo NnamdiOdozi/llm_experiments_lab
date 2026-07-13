@@ -206,6 +206,57 @@ class TinyMoeLM(nn.Module):
             idx = torch.cat([idx, next_idx], dim=1)
         return idx
 
+    def register_diagnostic_hooks(self, session_id: str):
+        """Register forward hooks at diagnostic node points for a session.
+
+        Called by diagnostic route handlers. For MoE, the MoE block is treated
+        as a single opaque node (block.{i}.moe) with shape capture only;
+        per-expert routing breakdown is deferred to Phase 2.
+
+        Hook closures reference the session_id so they store captures in the
+        correct session's captured_tensors dict.
+        """
+        from backend.training.diagnostics import _compute_summary
+
+        def make_hook(node_id: str):
+            def hook(module, input_tuple, output):
+                from backend.training.diagnostics import get_session
+                session = get_session(session_id)
+                if session is None:
+                    return
+
+                input_shape = list(input_tuple[0].shape) if input_tuple else []
+                # MoE block returns (x, drop_rate) tuple
+                if isinstance(output, tuple) and len(output) > 0:
+                    x = output[0]
+                    output_shape = list(x.shape) if isinstance(x, torch.Tensor) else []
+                    summary = _compute_summary(x) if isinstance(x, torch.Tensor) else {}
+                else:
+                    output_shape = []
+                    summary = {}
+
+                from backend.training.diagnostics import NodeCapture
+                session.captured_tensors[node_id] = NodeCapture(
+                    input_shape=input_shape,
+                    output_shape=output_shape,
+                    summary=summary,
+                )
+            return hook
+
+        # Register embedding hook
+        self.token_emb.register_forward_hook(make_hook("embedding"))
+
+        # Register block hooks
+        for i, block in enumerate(self.blocks):
+            block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1"))
+            block.attn.register_forward_hook(make_hook(f"block.{i}.attention"))
+            block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2"))
+            block.moe.register_forward_hook(make_hook(f"block.{i}.moe"))
+
+        # Register final norm and lm_head hooks
+        self.ln_f.register_forward_hook(make_hook("final_norm"))
+        self.lm_head.register_forward_hook(make_hook("lm_head"))
+
 
 def build_model_from_config(config: dict) -> TinyMoeLM:
     """Instantiate a TinyMoeLM from an experiment config dict."""
