@@ -1,5 +1,6 @@
 """Grounded chatbot endpoints — SSE chat streaming and history."""
 
+import inspect
 import json
 import time
 from typing import Literal
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from backend import db
 from backend.chatbot import client as tf_client
-from backend.chatbot.context import assemble_messages
+from backend.chatbot.context import assemble_messages, get_tool_context
 from backend.logging_config import chatbot_log
 from config.settings import settings
 
@@ -66,13 +67,17 @@ async def post_message(experiment_id: int, req: ChatMessageRequest):
     runs = await db.list_runs_for_experiment(experiment_id)
     latest_run = runs[0] if runs else None
     messages = assemble_messages(exp, latest_run, history, req.message)
+    tool_context = get_tool_context(exp, runs)
 
     async def event_stream():
         full_text = []
         usage_info = None
         start = time.perf_counter()
         try:
-            async for delta, usage in tf_client.stream_completion(messages):
+            stream_kwargs = {}
+            if "tool_context" in inspect.signature(tf_client.stream_completion).parameters:
+                stream_kwargs["tool_context"] = tool_context
+            async for delta, usage in tf_client.stream_completion(messages, **stream_kwargs):
                 if delta:
                     full_text.append(delta)
                     yield f"data: {json.dumps({'delta': delta})}\n\n"
