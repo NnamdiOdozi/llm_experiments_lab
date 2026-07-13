@@ -13,6 +13,14 @@ from typing import Optional
 from dataclasses import dataclass, field
 from backend.logging_config import training_log
 
+# Per-position diagnostic data (lm_head.top_k_by_position, attention.qkv_detail)
+# is capped to the most recent N positions — a long-running step-through
+# session can accumulate far more tokens than are useful to browse in the
+# Inspector's position stepper, and every position multiplies the response
+# payload (each position needs its own decoded top-5 + Q/K/V vectors). See
+# docs/DESIGN_DECISIONS.md.
+DIAGNOSTIC_POSITION_WINDOW = 12
+
 
 @dataclass
 class NodeCapture:
@@ -20,6 +28,21 @@ class NodeCapture:
     input_shape: list[int]
     output_shape: list[int]
     summary: dict  # {mean, std, l2_norm, min, max}
+    # Raw per-position output vectors, last DIAGNOSTIC_POSITION_WINDOW
+    # positions only: {"positions": [...], "vectors": [[...], ...]}. None
+    # for non-3D outputs (e.g. lm_head's [B,T,vocab_size] is handled
+    # separately via DiagnosticSnapshot.lm_head, not here). Captured for
+    # every node on every step (not just the currently-selected one) — user
+    # explicitly chose this over per-node-on-demand for instant node
+    # switching with no re-fetch, accepting the larger response size. See
+    # docs/DESIGN_DECISIONS.md.
+    position_vectors: Optional[dict] = None
+    # Same shape/window as position_vectors, but for the node's INPUT
+    # rather than output — e.g. what went into a LayerNorm, not just what
+    # came out. Real gap flagged live (2026-07-15): output-only vectors
+    # were shown everywhere, without the corresponding input to compare
+    # against. See docs/DESIGN_DECISIONS.md.
+    input_position_vectors: Optional[dict] = None
 
 
 @dataclass
@@ -60,6 +83,15 @@ class DiagnosticSession:
     device: str
     prompt_tokens: list[int]  # initial prompt encoded
     run_id: Optional[int] = None  # training run this session belongs to
+    # Read once from config.inference.temperature at session start — same
+    # source and value model.generate() (the Generate button) uses. Fixed
+    # for the life of the session, matching the fact that nothing in this
+    # app changes temperature mid-run. See docs/DESIGN_DECISIONS.md.
+    temperature: float = 0.8
+    # "greedy" or "sample" — read once from config.inference.decoding_mode
+    # at session start, same setting model.generate() (Generate button)
+    # uses. See docs/DESIGN_DECISIONS.md.
+    decoding_mode: str = "sample"
     token_history: list[int] = field(default_factory=list)  # tokens generated so far
     captured_tensors: dict = field(default_factory=dict)  # node_id -> NodeCapture
     generation_step: int = 0
@@ -104,6 +136,8 @@ def create_diagnostic_session(
     device: str,
     prompt_tokens: list[int],
     run_id: Optional[int] = None,
+    temperature: float = 0.8,
+    decoding_mode: str = "sample",
 ) -> str:
     """Create a new diagnostic session and register it.
 
@@ -113,6 +147,8 @@ def create_diagnostic_session(
         device: "cpu" or "cuda"
         prompt_tokens: Initial prompt tokens
         run_id: Training run this session belongs to (for chatbot grounding lookup)
+        temperature: config.inference.temperature — same value model.generate() uses
+        decoding_mode: "greedy" or "sample" — config.inference.decoding_mode
 
     Returns:
         session_id
@@ -125,6 +161,8 @@ def create_diagnostic_session(
         device=device,
         prompt_tokens=prompt_tokens,
         run_id=run_id,
+        temperature=temperature,
+        decoding_mode=decoding_mode,
         token_history=[],
     )
     _diagnostic_sessions[session_id] = session
@@ -187,8 +225,10 @@ def _compute_attention_weights(
     The model's normal forward pass uses fused/fast attention, which per
     Trainer_to_Frontend_Metrics.md doesn't expose weights — this recomputes
     just the requested layer/head manually, only when asked for (Phase 2).
-    Phase 4: when qkv_detail=True, returns Q/K/V vectors for the last token
-    position, one head only.
+    When qkv_detail=True, returns Q/K/V vectors for one head across the last
+    DIAGNOSTIC_POSITION_WINDOW token positions (not just the last token —
+    the frontend's position stepper needs one vector per position to step
+    through, see docs/DESIGN_DECISIONS.md).
 
     Attribute names (qkv, n_head, head_size, blocks[i].attn/ln1) match
     backend/training/templates/transformer/model.py's MultiHeadSelfAttention
@@ -234,17 +274,18 @@ def _compute_attention_weights(
                 "token_labels": token_labels,
             }
 
-            # Phase 4: Q/K/V detail for the last token position only, this head
+            # Q/K/V detail across the last DIAGNOSTIC_POSITION_WINDOW
+            # positions, this head — one vector per position, for the
+            # frontend's stepper to browse.
             if qkv_detail:
-                last_token_pos = T - 1
-                q_last = q[0, head, last_token_pos, :].tolist()
-                k_last = k[0, head, last_token_pos, :].tolist()
-                v_last = v[0, head, last_token_pos, :].tolist()
+                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+                start = T - window
                 result["qkv_detail"] = {
-                    "position": last_token_pos,
-                    "q": q_last,
-                    "k": k_last,
-                    "v": v_last,
+                    "positions": list(range(start, T)),
+                    "tokens": [session.tokenizer.decode([tid]) for tid in all_tokens[start:T]],
+                    "q": q[0, head, start:T, :].tolist(),
+                    "k": k[0, head, start:T, :].tolist(),
+                    "v": v[0, head, start:T, :].tolist(),
                 }
 
             return result
@@ -301,7 +342,18 @@ def _execute_forward_pass(
         topk_probs, topk_ids = torch.topk(probs, k=min(top_k, logits_last.shape[0]))
 
         if append_token:
-            next_token_id = topk_ids[0].item()
+            # Same recipe as model.generate() (the Generate button), and
+            # same decoding_mode setting — greedy always picks the single
+            # highest-probability token (temperature has no effect, order
+            # is scale-invariant); sample scales logits by temperature then
+            # draws from the resulting distribution. top_k above always
+            # shows the model's raw (unscaled) confidence regardless of
+            # which mode is active. See docs/DESIGN_DECISIONS.md.
+            if session.decoding_mode == "greedy":
+                next_token_id = torch.argmax(logits_last).item()
+            else:
+                sample_probs = torch.softmax(logits_last / session.temperature, dim=-1)
+                next_token_id = torch.multinomial(sample_probs, num_samples=1).item()
             session.token_history.append(next_token_id)
             generated_token = {
                 "position": len(session.prompt_tokens) + len(session.token_history) - 1,
@@ -321,8 +373,53 @@ def _execute_forward_pass(
             for pos, tid in enumerate(session.prompt_tokens)
         ]
 
+        # Per-position top-k for the frontend's position stepper — reuses
+        # `logits` (already computed above for every position, `top_k`
+        # above only ever kept the last one) rather than a second forward
+        # pass. Capped to the last DIAGNOSTIC_POSITION_WINDOW positions.
+        #
+        # Note: this uses the PRE-append `all_tokens`/`logits` (computed
+        # above, before token_history gets the new token appended a few
+        # lines up in the append_token branch) — so its window ends one
+        # position earlier than attention.qkv_detail's, which is computed
+        # AFTER the append via its own fresh forward pass. That's correct,
+        # not a bug: the just-generated token has real Q/K/V (it's part of
+        # the sequence now, shows in the heatmap) but no "what comes next"
+        # prediction yet — computing one would need another forward pass,
+        # and that prediction is exactly what the NEXT step naturally
+        # produces. Each dataset carries its own explicit "position" labels
+        # (not a shared implicit index) for exactly this reason — the
+        # frontend stepper for each section reads that section's own
+        # positions, not a forced-shared range. See docs/DESIGN_DECISIONS.md.
+        T_total = logits.shape[1]
+        pos_window = min(T_total, DIAGNOSTIC_POSITION_WINDOW)
+        pos_start = T_total - pos_window
+        top_k_by_position = []
+        for pos in range(pos_start, T_total):
+            pos_logits = logits[0, pos, :]
+            pos_probs = torch.softmax(pos_logits, dim=-1)
+            pos_topk_probs, pos_topk_ids = torch.topk(pos_probs, k=min(top_k, pos_logits.shape[0]))
+            top_k_by_position.append({
+                "position": pos,
+                "token": session.tokenizer.decode([all_tokens[pos]]),
+                "top_k": [
+                    {
+                        "rank": r + 1,
+                        "token_id": int(tid.item()),
+                        "token": session.tokenizer.decode([tid.item()]),
+                        "logit": float(pos_logits[tid].item()),
+                        "probability": float(p.item()),
+                    }
+                    for r, (p, tid) in enumerate(zip(pos_topk_probs, pos_topk_ids))
+                ],
+            })
+
         nodes_dict = {
-            node_id: {"input_shape": c.input_shape, "output_shape": c.output_shape, "summary": c.summary}
+            node_id: {
+                "input_shape": c.input_shape, "output_shape": c.output_shape, "summary": c.summary,
+                "position_vectors": c.position_vectors,
+                "input_position_vectors": c.input_position_vectors,
+            }
             for node_id, c in session.captured_tensors.items()
         }
 
@@ -339,6 +436,7 @@ def _execute_forward_pass(
                 }
                 for i, (p, tid) in enumerate(zip(topk_probs, topk_ids))
             ],
+            "top_k_by_position": top_k_by_position,
         }
 
         attention_data = {"available": False, "reason": "Not requested"}

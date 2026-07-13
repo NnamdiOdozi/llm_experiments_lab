@@ -109,6 +109,7 @@ describe('Diagnostic Types', () => {
         logits_shape: [1, 2, 65],
         selected_position: 1,
         top_k: topK,
+        top_k_by_position: [{ position: 1, token: ' king', top_k: topK }],
       },
       complete: true,
     };

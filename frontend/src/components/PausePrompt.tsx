@@ -7,10 +7,25 @@ interface Props {
   // A checkpoint exists for a paused run just as much as a completed one —
   // prompt_paused_model() (backend/training/runner.py) works for either.
   canPrompt: boolean;
+  // Block/head/QKV-detail selection lives in App.tsx and is configured from
+  // the Inspector pane (contextual to whichever attention node is selected
+  // in the diagram) — this component only consumes it when running a step.
+  // See docs/DESIGN_DECISIONS.md.
+  attentionBlock: number | null;
+  attentionHead: number | null;
+  showQKVDetail: boolean;
+  maxNewTokens: number;
   onDiagnosticSnapshot?: (snapshot: DiagnosticSnapshot) => void;
+  // Surfaces the active session id (or null once finished/not started) so
+  // App.tsx can call peekDiagnostic() when Head/Block changes — that needs
+  // the session id, which otherwise only lives in this component's local
+  // state. See docs/DESIGN_DECISIONS.md.
+  onSessionIdChange?: (sessionId: string | null) => void;
 }
 
-export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: Props) {
+export default function PausePrompt({
+  runId, canPrompt, attentionBlock, attentionHead, showQKVDetail, maxNewTokens, onDiagnosticSnapshot, onSessionIdChange,
+}: Props) {
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -20,13 +35,6 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
   const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<DiagnosticSnapshot | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const [diagnosticStep, setDiagnosticStep] = useState(0);
-
-  // Phase 2: Attention layer/head selectors
-  const [attentionLayer, setAttentionLayer] = useState<number | null>(null);
-  const [attentionHead, setAttentionHead] = useState<number | null>(null);
-
-  // Phase 4: Q/K/V detail toggle
-  const [showQKVDetail, setShowQKVDetail] = useState(false);
 
   // Phase 3: Generated tokens displayed progressively
   const [generatedTokens, setGeneratedTokens] = useState<string>("");
@@ -76,9 +84,10 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
           max_prompt_tokens: 32,
         });
         setDiagnosticSession(session);
+        onSessionIdChange?.(session.diagnostic_session_id);
         // Immediately step to get the first snapshot
         const snapshot = await stepDiagnostic(runId, session.diagnostic_session_id, {
-          attention_layer: attentionLayer ?? undefined,
+          attention_layer: attentionBlock ?? undefined,
           attention_head: attentionHead ?? undefined,
           qkv_detail: showQKVDetail || undefined,
         });
@@ -89,7 +98,7 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
       } else {
         // Step the existing diagnostic session
         const snapshot = await stepDiagnostic(runId, diagnosticSession.diagnostic_session_id, {
-          attention_layer: attentionLayer ?? undefined,
+          attention_layer: attentionBlock ?? undefined,
           attention_head: attentionHead ?? undefined,
           qkv_detail: showQKVDetail || undefined,
         });
@@ -111,7 +120,11 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
 
     setDiagnosticLoading(true);
     try {
-      const generator = generateDiagnosticStream(runId, diagnosticSession.diagnostic_session_id, 50);
+      const generator = generateDiagnosticStream(runId, diagnosticSession.diagnostic_session_id, maxNewTokens, {
+        attention_layer: attentionBlock ?? undefined,
+        attention_head: attentionHead ?? undefined,
+        qkv_detail: showQKVDetail || undefined,
+      });
       for await (const event of generator) {
         // Check if this is a token event or a done event
         if ("text" in event) {
@@ -131,6 +144,7 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
       // model), so it needs the explicit Finish button instead — see
       // handleFinishSession. See docs/DESIGN_DECISIONS.md.
       setDiagnosticSession(null);
+      onSessionIdChange?.(null);
       setDiagnosticStep(0);
     } catch (err) {
       console.error("Generate stream error:", err);
@@ -149,6 +163,7 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
   // like only a few steps. See docs/DESIGN_DECISIONS.md.
   function handleFinishSession() {
     setDiagnosticSession(null);
+    onSessionIdChange?.(null);
     setDiagnosticStep(0);
   }
 
@@ -188,64 +203,28 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
           )}
         </div>
 
-        {/* Phase 2: Attention layer/head selectors */}
-        <div style={{ marginBottom: 12, display: "flex", gap: 8, fontSize: 12 }}>
-          <label>
-            Layer:
-            <input
-              type="number"
-              min={0}
-              value={attentionLayer ?? ""}
-              onChange={(e) => setAttentionLayer(e.target.value === "" ? null : parseInt(e.target.value, 10))}
-              placeholder="0-3"
-              style={{ width: 50, marginLeft: 4 }}
-            />
-          </label>
-          <label>
-            Head:
-            <input
-              type="number"
-              min={0}
-              value={attentionHead ?? ""}
-              onChange={(e) => setAttentionHead(e.target.value === "" ? null : parseInt(e.target.value, 10))}
-              placeholder="0-5"
-              style={{ width: 50, marginLeft: 4 }}
-            />
-          </label>
-          <span style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 4 }}>
-            (Leave blank to skip attention capture)
-          </span>
-        </div>
-
-        {/* Phase 4: Q/K/V detail checkbox */}
-        <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-          <input
-            type="checkbox"
-            id="show-qkv"
-            checked={showQKVDetail}
-            onChange={(e) => setShowQKVDetail(e.target.checked)}
-            disabled={attentionLayer === null || attentionHead === null}
-            // Unstyled checkboxes render as the browser's native grey/white
-            // widget, which clashes badly against the dark theme (looked
-            // like a mystery empty square with no context) — accentColor is
-            // the simplest cross-browser way to theme a native checkbox.
-            style={{ accentColor: "var(--accent)" }}
-          />
-          <label htmlFor="show-qkv" style={{ cursor: "pointer" }}>
-            Show Q/K/V detail
-          </label>
-          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-            (requires layer & head)
-          </span>
-        </div>
-        {/* Setting Layer/Head only controls WHAT gets captured — it doesn't
-            display anything here. The actual heatmap/Q-K-V values render in
-            the Inspector tab, only after clicking that block's "Causal
-            Self-Attention" node in the Architecture diagram above. This was
-            genuinely not discoverable before — nothing here pointed there. */}
+        {/* Block/Head/Q-K-V-detail selection now lives in the Inspector pane
+            (contextual to whichever attention node is selected in the
+            diagram) — this panel just runs the step using whatever's
+            currently configured there. See docs/DESIGN_DECISIONS.md. */}
         <div style={{ marginBottom: 12, fontSize: 11, color: "var(--text-dim)" }}>
-          Captured attention/Q-K-V appears in the <strong>Inspector</strong> tab (right pane) —
-          click the block's "Causal Self-Attention" node in the diagram above to view it.
+          {/* Internal state stays 0-indexed (matches node ids, request
+              payloads, Python range(n_head)) — only the display converts to
+              1-indexed, matching the diagram's "Block 4 of 4" labeling.
+              See docs/DESIGN_DECISIONS.md. */}
+          {attentionBlock !== null ? (
+            <>
+              Capturing block {attentionBlock + 1}
+              {attentionHead !== null ? `, head ${attentionHead + 1}` : " (pick a head in Inspector)"}
+              {showQKVDetail && attentionHead !== null ? " + Q/K/V detail" : ""} —
+              results appear in the <strong>Inspector</strong> tab.
+            </>
+          ) : (
+            <>
+              No attention node selected — click a block's "Causal Self-Attention" node in the
+              diagram above and pick a head in the <strong>Inspector</strong> tab to capture attention/Q-K-V.
+            </>
+          )}
         </div>
 
         <div style={{ display: "flex", gap: 8 }}>
@@ -274,18 +253,6 @@ export default function PausePrompt({ runId, canPrompt, onDiagnosticSnapshot }: 
               Finish (new prompt)
             </button>
           )}
-        </div>
-        {/* > and >> always pick the single highest-probability token
-            (greedy decoding) — deliberately, so this always matches the
-            Top-k panel's #1 entry exactly. Generate above instead samples
-            with temperature (config.inference.temperature). Greedy decoding
-            on an early-training model can fall into a repetition loop
-            (e.g. "the the the the") — that's a real, well-known decoding
-            behavior, not a bug, but nothing else here explains why >/>>
-            output looks different from Generate's. See docs/DESIGN_DECISIONS.md. */}
-        <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>
-          &gt;/&gt;&gt; always pick the single most-likely token (greedy) — matches the Top-k panel exactly,
-          but can loop on an early-training model. Generate above samples with temperature instead.
         </div>
         {generatedTokens && (
           <div style={{ marginTop: 8, fontSize: 12 }}>

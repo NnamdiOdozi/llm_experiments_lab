@@ -4,6 +4,7 @@ Reuses MultiHeadSelfAttention and RotaryPositionalEncoding from the transformer 
 """
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -193,16 +194,25 @@ class TinyMoeLM(nn.Module):
         return logits, loss, avg_drop_rate
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8) -> torch.Tensor:
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8, greedy: bool = False) -> torch.Tensor:
         """Autoregressive generation.  temperature < 1 → sharper (more greedy),
-        temperature > 1 → flatter (more random)."""
+        temperature > 1 → flatter (more random).
+
+        greedy=True always picks the single highest-probability token
+        (argmax) — temperature has no effect in this mode, see
+        transformer/model.py's generate() docstring for why. See
+        docs/DESIGN_DECISIONS.md.
+        """
         self.train(False)
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]
             logits, _, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature  # scale logits before softmax
-            probs = F.softmax(logits, dim=-1)
-            next_idx = torch.multinomial(probs, num_samples=1)
+            logits = logits[:, -1, :]
+            if greedy:
+                next_idx = torch.argmax(logits, dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits / temperature, dim=-1)  # scale before softmax
+                next_idx = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_idx], dim=1)
         return idx
 
@@ -216,7 +226,18 @@ class TinyMoeLM(nn.Module):
         Hook closures reference the session_id so they store captures in the
         correct session's captured_tensors dict.
         """
-        from backend.training.diagnostics import _compute_summary
+        from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
+
+        def _position_vectors(tensor: torch.Tensor) -> Optional[dict]:
+            """Raw per-position vectors, last DIAGNOSTIC_POSITION_WINDOW
+            positions — any 3D [B, T, *] tensor. See docs/DESIGN_DECISIONS.md."""
+            if tensor.dim() != 3:
+                return None
+            with torch.no_grad():
+                T = tensor.shape[1]
+                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+                start = T - window
+                return {"positions": list(range(start, T)), "vectors": tensor[0, start:T, :].tolist()}
 
         def make_hook(node_id: str):
             def hook(module, input_tuple, output):
@@ -231,15 +252,22 @@ class TinyMoeLM(nn.Module):
                     x = output[0]
                     output_shape = list(x.shape) if isinstance(x, torch.Tensor) else []
                     summary = _compute_summary(x) if isinstance(x, torch.Tensor) else {}
+                    position_vectors = _position_vectors(x) if isinstance(x, torch.Tensor) else None
+                elif isinstance(output, torch.Tensor):
+                    output_shape = list(output.shape)
+                    summary = _compute_summary(output)
+                    position_vectors = _position_vectors(output)
                 else:
                     output_shape = []
                     summary = {}
+                    position_vectors = None
 
                 from backend.training.diagnostics import NodeCapture
                 session.captured_tensors[node_id] = NodeCapture(
                     input_shape=input_shape,
                     output_shape=output_shape,
                     summary=summary,
+                    position_vectors=position_vectors,
                 )
             return hook
 

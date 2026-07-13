@@ -154,6 +154,13 @@ export interface ArchitectureManifest {
   nodes: ArchitectureNode[];
 }
 
+export interface NodePositionVectors {
+  // Last DIAGNOSTIC_POSITION_WINDOW (12) positions only — see
+  // docs/DESIGN_DECISIONS.md.
+  positions: number[];
+  vectors: number[][];
+}
+
 export interface NodeRuntimeData {
   input_shape?: number[];
   output_shape?: number[];
@@ -164,19 +171,33 @@ export interface NodeRuntimeData {
     min: number;
     max: number;
   };
+  position_vectors?: NodePositionVectors | null;
+}
+
+export interface TopKByPositionEntry {
+  position: number;
+  token: string;
+  top_k: TopKEntry[];
 }
 
 export interface LMHeadData {
   logits_shape: number[];
   selected_position: number;
   top_k: TopKEntry[];
+  // Last DIAGNOSTIC_POSITION_WINDOW (12) positions only — see
+  // docs/DESIGN_DECISIONS.md. Feeds the LM Head position stepper.
+  top_k_by_position: TopKByPositionEntry[];
 }
 
 export interface QKVDetail {
-  position: number;
-  q: number[];
-  k: number[];
-  v: number[];
+  // One entry per position (last 12 — see docs/DESIGN_DECISIONS.md), not
+  // just the final token. positions[i]/tokens[i]/q[i]/k[i]/v[i] all
+  // correspond to the same position.
+  positions: number[];
+  tokens: string[];
+  q: number[][];
+  k: number[][];
+  v: number[][];
 }
 
 export interface AttentionData {

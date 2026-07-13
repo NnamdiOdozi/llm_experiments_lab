@@ -27,6 +27,7 @@ import {
   updateConfig,
   fetchExperiment,
   fetchPresets,
+  peekDiagnostic,
 } from "./hooks/useApi";
 
 const SESSION_KEY = "llm_lab_session";
@@ -75,6 +76,48 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<ArchitectureNode | null>(null);
   const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<DiagnosticSnapshot | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
+  // Head picker lives in the Inspector pane (contextual — only shown once an
+  // attention node is selected), not the Prompt Model panel. Block is never
+  // a separate input at all: it's derived below from whichever attention
+  // node is currently selected in the diagram, since selecting that node
+  // already says which block you mean. See docs/DESIGN_DECISIONS.md.
+  const [attentionHead, setAttentionHead] = useState<number | null>(null);
+  const [showQKVDetail, setShowQKVDetail] = useState(false);
+  const attentionBlockMatch = selectedNodeId?.match(/^block\.(\d+)\.attention$/);
+  const attentionBlock = attentionBlockMatch ? parseInt(attentionBlockMatch[1], 10) : null;
+  // Set/cleared by PausePrompt as its diagnostic session starts/ends — used
+  // below to auto-refresh attention when Head/Block changes, without
+  // requiring a full > click. See docs/DESIGN_DECISIONS.md.
+  const [diagnosticSessionId, setDiagnosticSessionId] = useState<string | null>(null);
+
+  // Real bug report, 2026-07-14: changing Head (or clicking a different
+  // block's attention node) only updated local selection — the Inspector
+  // kept showing whatever was captured on the last >/>> click, with no
+  // indication anything was stale. peekDiagnostic recomputes the current
+  // state's snapshot for the newly-selected block/head WITHOUT sampling a
+  // new token or advancing the session (backend: run_diagnostic_step_internal,
+  // skip_token_generation=True) — so this fires automatically instead of
+  // requiring the user to click > again just to see a different head.
+  useEffect(() => {
+    if (diagnosticSessionId == null || runId == null || attentionBlock == null || attentionHead == null) return;
+    let cancelled = false;
+    setDiagnosticLoading(true);
+    peekDiagnostic(runId, diagnosticSessionId, {
+      attention_layer: attentionBlock,
+      attention_head: attentionHead,
+      qkv_detail: showQKVDetail || undefined,
+    })
+      .then((snapshot) => {
+        if (!cancelled) setDiagnosticSnapshot(snapshot);
+      })
+      .catch((err) => {
+        console.error("Peek diagnostic failed:", err);
+      })
+      .finally(() => {
+        if (!cancelled) setDiagnosticLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail]);
 
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -389,10 +432,20 @@ export default function App() {
             <PausePrompt
               runId={runId}
               canPrompt={runStatus?.status === "paused" || runStatus?.status === "completed"}
+              attentionBlock={attentionBlock}
+              attentionHead={attentionHead}
+              showQKVDetail={showQKVDetail}
+              // Same config.inference.max_new_tokens the ConfigPanel already
+              // shows and Generate already uses (server-side, via
+              // prompt_paused_model's inference_cfg.get(...)) — >> was
+              // hardcoding 50 regardless of this value. See
+              // docs/DESIGN_DECISIONS.md.
+              maxNewTokens={typeof config?.inference?.max_new_tokens === "number" ? config.inference.max_new_tokens : 50}
               onDiagnosticSnapshot={(snapshot) => {
                 setDiagnosticSnapshot(snapshot);
                 setDiagnosticLoading(false);
               }}
+              onSessionIdChange={setDiagnosticSessionId}
             />
           )}
           <CodeView experimentId={experimentId} runId={runId} />
@@ -412,7 +465,12 @@ export default function App() {
               padding: "0 16px",
             }}
           >
-            {(["assistant", "inspector", "events"] as RightPaneTab[]).map((tab) => (
+            {/* "events" tab hidden for now (2026-07-14) — it only ever showed
+                "Coming soon" (see docs/Diagnostic_Contract.md's Outstanding
+                section), which read as confusing/broken rather than deferred.
+                Re-enable by adding "events" back here once it has real
+                content. See docs/DESIGN_DECISIONS.md. */}
+            {(["assistant", "inspector"] as RightPaneTab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setRightPaneTab(tab)}
@@ -444,14 +502,19 @@ export default function App() {
                 diagnosticSnapshot={diagnosticSnapshot}
                 currentStep={diagnosticSnapshot?.generation_step ?? null}
                 isLoading={diagnosticLoading}
+                attentionHead={attentionHead}
+                onAttentionHeadChange={setAttentionHead}
+                showQKVDetail={showQKVDetail}
+                onShowQKVDetailChange={setShowQKVDetail}
+                numHeads={typeof config?.model?.n_head === "number" ? config.model.n_head : null}
               />
             )}
-            {rightPaneTab === "events" && (
+            {/* {rightPaneTab === "events" && (
               <div className="panel">
                 <h3>Events</h3>
                 <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Event log coming soon in Phase 2.</p>
               </div>
-            )}
+            )} */}
           </div>
         </div>
       </div>

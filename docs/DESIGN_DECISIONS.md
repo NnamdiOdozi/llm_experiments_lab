@@ -1514,6 +1514,329 @@ conversation — flagging as unverified, not closed.
 
 Backend suite: 152 passed (was 149, +3 new).
 
+## §36: >/>> now sample with temperature, matching Generate exactly
+
+Previously `>` (step-through), `>>` (continue-generation), and `/generate`'s
+token loop always picked the single highest-probability token
+(`topk_ids[0]` / `torch.argmax`) — deliberately, on the assumption that
+would keep the Top-k panel's rank-1 entry matching what actually got
+selected. User pushback (2026-07-14): temperature never changes mid-run in
+this app, so there's no real reason `>`/`>>` should behave differently from
+Generate (`model.generate()`, which samples: `logits/temperature → softmax →
+torch.multinomial`) — matching them isn't complexity, it's just using the
+same recipe. Agreed; implemented plainly, no dynamic temperature-tracking
+added (explicitly out of scope per the user — temperature is read once at
+session start, same as it's read once for Generate).
+
+**Change:** `DiagnosticSession` gained a `temperature: float = 0.8` field,
+set once in `diagnostics_start()` from `config["inference"]["temperature"]`
+— identical source to what `prompt_paused_model()` already uses for
+Generate. `_execute_forward_pass()`'s token selection
+(`backend/training/diagnostics.py`) and `/generate`'s inline loop
+(`backend/api/training.py`) both replaced greedy pick with
+`torch.multinomial(softmax(logits/temperature), 1)` — the exact recipe
+`model.generate()` uses. The Top-k panel's own values are unaffected (still
+raw, unscaled softmax(logits) — that's model confidence, not the sampling
+knob) but the "selected" highlight in `Inspector.tsx` no longer assumes
+rank #1 was picked (`entry.rank === 1`) — now matches by `token_id ===
+generated_token.id`, with a fallback note when the sampled token falls
+outside the top 5 entirely (which sampling makes possible and is not an
+error).
+
+Removed the "greedy vs sampling, see caption" explanatory text added
+earlier the same day in `PausePrompt.tsx` — no longer true, so no longer
+needed.
+
+**Trainer-image note:** this touches `backend/training/diagnostics.py` and
+`backend/api/training.py` — both run inside the trainer container for real.
+Requires a rebuild + repush to take effect on serverless runs, unlike the
+frontend-only fixes earlier the same day.
+
+Tests: `test_diagnostics_start_reads_temperature_from_config`,
+`test_diagnostics_start_defaults_temperature_when_config_omits_it`,
+`test_diagnostic_step_samples_instead_of_greedy` (spies on
+`torch.multinomial`, asserts it's actually called), and
+`test_generate_samples_instead_of_greedy` (same, for `/generate`'s separate
+loop — 3 max_new_tokens → 3 multinomial calls). Backend suite: 156 passed
+(was 152, +4 new). Frontend: 35 passed, build clean.
+
+## §37: Inspector redesign — Block/Head moved into Inspector, bar chart, clearer LM head labels
+
+Several rounds of live UI feedback (2026-07-14), landed together since they
+all touch the same panels:
+
+**Block/Head/Q-K-V-detail moved from Prompt Model into the Inspector pane.**
+Previously "Layer"/"Head" number inputs lived in `PausePrompt.tsx`,
+disconnected from the Architecture diagram where you actually pick which
+block you care about — user had to keep two mental models of "block" in
+sync (the diagram's "Block 4 of 4" labeling vs. a separate 0-indexed
+"Layer" number field), and initial live testing suggested attention data
+"wasn't coming through" when in fact it was a workflow gap (verified by
+directly driving the real API in-process — `POST diagnostics/start` →
+`POST .../step` with `attention_layer=0, attention_head=0` returned a
+correct, full 14x14 weight matrix — the backend was never the problem).
+
+Fix: **Block is no longer a separate input at all.** `App.tsx` derives it
+from whichever attention node is currently selected in the diagram
+(`selectedNodeId.match(/^block\.(\d+)\.attention$/)`) — selecting the node
+in the diagram *is* selecting the block. Only **Head** remains a manual
+input (the diagram can't show which head), now rendered inside
+`Inspector.tsx`'s Runtime tab, only when an attention node is selected —
+contextual to where the data actually appears. `PausePrompt.tsx` no longer
+owns any attention-selection state; `attentionBlock`/`attentionHead`/
+`showQKVDetail` are lifted to `App.tsx` and passed down to both components.
+This also fixes the actual root confusion in the original bug report: the
+"one little grey square" the user saw was the QKV-detail checkbox rendering
+unstyled (native browser widget, no theming) — likely still there in older
+screenshots, but with Head/QKV now living in the Inspector next to the data
+they configure, disconnected placement is no longer possible by
+construction, not just prevented by better labeling.
+
+**Top-k Tokens got a bar chart** (probability-proportional width, green for
+whichever token was actually selected by sampling) — was plain text, per
+explicit ask ("much more visual").
+
+**Removed "Top Absolute Components" entirely**, rather than relabeling it.
+It ranked the same `logits_last` vector Top-k already shows, but by
+`|logit|` (magnitude, sign ignored) instead of probability — a genuinely
+different criterion that pulls in strongly *negative* (very unlikely)
+logits alongside likely ones, producing a different order than Top-k for no
+clear pedagogical reason. Two overlapping "top 5" lists from the same
+vector with different orderings was the actual confusion, not just a
+labeling problem — relabeling would have left that intact.
+
+**"Value Slice (first 8)" renamed and clarified.** It's `logits_last[:8]`
+— the LM head's own logits, first 8 vocab-index positions, in vocab-index
+order (not ranked). Easy to misread as the hidden dim (192, the number
+shown everywhere else in this panel) when it's actually vocab_size (65).
+Now reads "LM Head Logits (first 8 of {vocab_size}, raw — vocab index
+order, not ranked)", with the count read live from
+`snapshot.lm_head.logits_shape` rather than hardcoded.
+
+**"Not captured" messages made actionable**, replacing a single generic
+string reused for several different actual states: no diagnostic step run
+yet ("enter a prompt and click > below"), attention not requested for this
+step ("pick a head above, then click > again").
+
+All frontend-only — `PausePrompt.tsx`, `Inspector.tsx`, `App.tsx`. No
+trainer-image impact. Build clean, 35/35 frontend tests pass (no test
+covered the removed/relabeled Inspector internals directly, so none needed
+updating).
+
+## §38: >> ignored both attention params and config's max_new_tokens
+
+Two related, now-fixed gaps in `generateDiagnosticStream()`
+(`frontend/src/hooks/useApi.ts`) / its call site in `PausePrompt.tsx`'s
+`handleContinueGeneration`:
+
+**Attention/Q-K-V never sent.** The request body only ever included
+`max_new_tokens` — `attention_layer`, `attention_head`, `qkv_detail` were
+never sent at all, even though `>` correctly sent them and the backend
+route (`DiagnosticsGenerateRequest`) always accepted them. Whatever was
+picked in Inspector (§37) was silently dropped for `>>`. User asked
+directly whether Inspector's selection genuinely drove both `>` and `>>` —
+it didn't, for `>>`. Fixed: `generateDiagnosticStream()` gained an optional
+4th param (`DiagnosticStepRequest`, reusing the existing type), spread into
+the request body; `PausePrompt.tsx` now passes
+`attentionBlock`/`attentionHead`/`showQKVDetail` through. Verified two ways,
+not just asserted: a unit test on the actual `fetch` call body, and a live
+in-process API call (real `httpx` client, real model, no mocking) through
+the real `/generate` route with `attention_layer=2, attention_head=3,
+qkv_detail=true` → confirmed real attention data + qkv_detail in the
+response.
+
+**`max_new_tokens` hardcoded to 50, ignoring `config.inference.max_new_tokens`.**
+User caught this directly (dashboard showed 100). Confirmed via `git log
+-p` that the `50` predates this session — not something introduced while
+fixing the attention-params gap above, just sitting on the same line I was
+already editing and worth fixing while there. Unlike temperature (§36,
+which is session-level — applies to every token in both `>` and `>>`, so
+it's read once into `DiagnosticSession` at `diagnostics_start()`),
+`max_new_tokens` only matters for `>>`'s burst size and is already a
+per-request parameter on the `/generate` route — no backend/session change
+needed. Fixed frontend-only: `App.tsx` passes
+`config?.inference?.max_new_tokens` (falling back to 50 if the config
+lacks it) down to `PausePrompt` as a `maxNewTokens` prop, replacing the
+hardcoded literal — same value the Generate button's `/prompt` route
+already reads server-side via `inference_cfg.get("max_new_tokens", ...)`
+in `runner.py`.
+
+Both fixes are frontend-only (`useApi.ts`, `App.tsx`, `PausePrompt.tsx`) —
+no trainer-image impact. Tests: `useApi.test.ts` (new, 2 tests) — asserts
+the real request body sent to `fetch`, both with and without attention
+params. Frontend suite: 37 passed (was 35, +2 new). Build clean.
+
+## §39: Inspector overhaul — per-position capture, heatmap color scale, 1-indexing, dropdown
+
+Large batch (2026-07-14), scoped via explicit back-and-forth before coding
+per the user's request — plan converged over several exchanges (table vs.
+stepper per section, position-window cap, backend cost) before any code
+was written.
+
+**Backend (`diagnostics.py`, trainer-image change):**
+- `DIAGNOSTIC_POSITION_WINDOW = 12` — caps both new per-position datasets to
+  the most recent 12 positions, regardless of how long the session's
+  sequence has grown (directly guards against the earlier "82 tokens
+  accumulated silently" scenario, §36/37).
+- `lm_head.top_k_by_position` (new, additive — existing `top_k` untouched):
+  per-position top-5, free in compute terms since `logits` already covers
+  every position in the one forward pass already being done — previously
+  only the last position's top-k was kept, the rest silently discarded.
+- `attention.qkv_detail` (restructured, breaking change to that field only
+  — low blast radius, no other consumers): was one vector per Q/K/V for the
+  *last* token only; now `positions`/`tokens`/`q`/`k`/`v` arrays, one entry
+  per position in the window.
+- **Documented, not "fixed"**: `top_k_by_position`'s window ends one
+  position earlier than `qkv_detail`'s, because `top_k_by_position` is
+  computed before this step's new token is appended to `token_history`,
+  and `qkv_detail` (via `_compute_attention_weights`) after. That's
+  correct, not misaligned — the just-generated token has real Q/K/V (it's
+  part of the sequence now) but no "what comes next" prediction yet (that
+  needs another forward pass, which is exactly what the next step
+  produces). Each dataset carries its own explicit `position` labels for
+  this reason, not a shared implicit index.
+
+**Frontend — two different UI patterns for two different data shapes,**
+decided via direct back-and-forth (a Colab Variable Inspector screenshot
+prompted the pivot from an initial single stepper plan):
+- **Q/K/V → `QKVTable`**: all positions in the window as table rows (Position/Token/Q/K/V), each vector cell truncated (first 4 values) with the full vector on hover (native `title` tooltip — same lightweight mechanism the heatmap cells already used, no new UI dependency). Whole window visible at once.
+- **LM Head → `LmHeadStepper`**: explicit ◀ position N of T ▶ control, full ranked top-5 + bars for the selected position — user explicitly rejected the table pattern here ("too much to see at once" — a 5-entry ranked list with bars doesn't compress into one truncated cell usefully). Defaults to the most recent position, numerically identical to the old fixed single-position view.
+
+**Attention heatmap color scale, real fix not just relabeling:**
+normalization moved from global min/max to **per-row** (each row is its own
+probability distribution — the meaningful comparison), added a minimum
+opacity floor so no real value is literally invisible, and causally-masked
+cells (`j > i`, structurally always exactly 0) get a distinct hatched style
+instead of being mixed into the same color scale as genuine low-attention
+values. Root cause of "one white cell and nothing else," reported three
+times before finally being traced instead of explained around: `(0,0)` is
+mathematically guaranteed to be exactly `1.0` for any layer/head (first
+token can only attend to itself under causal masking) — confirmed live —
+so it dominated the old global max and pushed almost every other cell's
+opacity near zero. Also added an explicit "Q\K" label to the table's corner
+cell, which was blank/ambiguous before and looked like a data cell.
+
+**Stale-data indicator (real bug report, "Layer/Head not updating"):**
+changing Head (or clicking a different block's node) only updates local
+selection state — it's never retroactively applied to an already-captured
+snapshot, only the *next* `>`/`>>` click. Added a visible banner comparing
+currently-selected Block/Head against what the displayed snapshot actually
+captured (`snapshot.attention.layer`/`.head`), telling the user to
+re-click `>` rather than silently showing stale data with no explanation.
+
+**1-indexed display, 0-indexed everywhere internal:** Head is now a
+`<select>` (bounded to `1..config.model.n_head`, sourced live not
+hardcoded) instead of a number spinner with barely-visible native arrows —
+fixes both the indexing complaint and the "poor quality widget" complaint
+in one change, since a dropdown for a small bounded set is the correct
+widget choice independent of the indexing issue. Block is still never a
+separate input (derived from `selectedNodeId`, per §37) — just displayed
+as `+1` everywhere a human reads it (Inspector heatmap header, PausePrompt
+status line). Internal state, request payloads, and array indexing stay
+0-indexed throughout — this is a display-layer conversion only.
+
+Frontend suite: 37 passed (unchanged — no existing test asserted the old
+Inspector internals being replaced). Backend suite: 157 passed (unchanged
+from the per-position-capture work in §38... this section — no backend
+logic changed further in the frontend-only portion of this batch). Build
+clean.
+
+## §40: Auto-refresh attention on Head/Block change + LM head stepper tracks current step
+
+Two follow-ups from live use of §39's Inspector overhaul.
+
+**LM head stepper now auto-advances.** `LmHeadStepper`'s position `index`
+was local `useState`, initialized once — after the user manually stepped
+the ◀/▶ control, it never moved again on its own, so clicking `>` in Prompt
+Model (a genuinely new step, new snapshot) left the stepper pointing at a
+stale index instead of following the newest position. Added a `useEffect`
+keyed on `snapshot.generation_step` that resets to the latest position
+whenever a new step actually happens — manual navigation between steps
+still works, it just re-syncs to "latest" each time the model actually
+advances.
+
+**Real fix, not cosmetic: changing Head in Inspector now actually refreshes
+the heatmap**, instead of requiring a `>` click. Root cause was structural,
+not a missing event handler: attention data only ever got (re)computed as
+part of `run_diagnostic_step()`, which always samples and appends a new
+token — there was no way to ask "recompute attention for a different
+head, same position" without also advancing the model. The fix reuses
+`run_diagnostic_step_internal` (already existed, built for `/generate`'s
+final-frame capture, `skip_token_generation=True` → no token sampled,
+`session.generation_step`/`token_history` untouched) via a new route,
+`POST /{run_id}/diagnostics/{session_id}/peek` — same local/remote
+`_is_remote`/`_proxy` dual-path structure every other diagnostics route
+uses. Frontend: `App.tsx` now tracks the active session id (surfaced by
+`PausePrompt` via a new `onSessionIdChange` callback — previously private
+to that component) and a `useEffect` calls `peekDiagnostic()` automatically
+whenever `attentionBlock`/`attentionHead`/`showQKVDetail` change, updating
+`diagnosticSnapshot` without touching `diagnosticStep` (a peek is not a
+step). The stale-data banner from §39 stays as a fallback — if a peek
+request fails (network error, or a serverless run whose trainer container
+predates this change and 404s), the banner still correctly flags the
+mismatch instead of silently showing wrong data.
+
+**Trainer-image note:** `/peek` is a new route in `backend/api/training.py`
+— needs a rebuild+repush for serverless runs. Same category as §36/§38.
+
+Tests: `test_peek_recomputes_attention_for_a_new_head_without_advancing`
+(confirms `generation_step` and token count both stay unchanged across two
+different peeks), `test_peek_before_any_step_still_works` (works on a
+fresh session with no prior `>` click). Backend suite: 159 passed (was
+157, +2). Frontend: `useApi.test.ts` gained a `peekDiagnostic` request-body
+test — 38 passed (was 37, +1). Build clean.
+
+## §41: Generic per-node vectors + LM head stepper "X of Y" fix + a real MoE bug found along the way
+
+**Generic node vectors** — the "generalize hover-inspection to every node"
+feature explicitly deferred earlier is now built, scoped via direct
+confirmation before coding (capture-every-node-every-step over
+capture-only-selected, accepting the larger response size; same
+Colab-style table as Q/K/V). Every hook (embedding, ln1, attention-out,
+ln2, mlp/moe, final_norm) previously discarded its raw output right after
+computing shape+summary stats — `NodeCapture` gained a `position_vectors`
+field (`{positions, vectors}`, capped to `DIAGNOSTIC_POSITION_WINDOW`, same
+shape convention as `qkv_detail`), populated in the shared hook closure in
+both `transformer/model.py` and `moe/model.py` for any 3D `[B, T, *]`
+output. Frontend: `NodeVectorTable` — one column instead of QKVTable's
+three, no token-text column (position numbers alone correlate against the
+heatmap/top-k tables already shown; re-decoding tokens at ~18 nodes every
+step for a column shown elsewhere already wasn't worth the payload).
+
+**A real, separate bug found while implementing this** — not something I
+went looking for. The MoE template's diagnostic hooks
+(`moe/model.py::register_diagnostic_hooks`) only ever branched on
+`isinstance(output, tuple)`, true only for the `.moe` node itself (which
+genuinely returns `(x, drop_rate)`). Every other node in the MoE template —
+embedding, ln1, attention, ln2, final_norm, lm_head, i.e. 6 of 7 node types
+— returns a plain tensor, fell into the `else` branch, and silently got
+`output_shape=[]`, `summary={}`. This has presumably been true since the
+MoE template's diagnostics were first built; nothing caught it because no
+test exercised MoE diagnostic capture at all. Fixed by adding the missing
+`elif isinstance(output, torch.Tensor)` branch, mirroring the transformer
+template's (correct) handling.
+
+**LM head stepper "X of Y" was showing two contradictory numbers.** Real
+bug report with a screenshot: a 15-token sequence's last position correctly
+labeled "Position 14," but right next to it "12 of 12" — because
+`entries.length` is the *windowed* array size (capped to
+`DIAGNOSTIC_POSITION_WINDOW`=12), not the true sequence length, and the
+label never said so. Fixed: now reads "12 of 12 shown (last 12 of 15
+total)" when windowed, computing the true total from
+`generated_token.position + 1` (same value used for the §36 token-count
+fix) rather than a second, uncontextualized count.
+
+Tests: `test_generic_node_captures_position_vectors` (all non-lm_head
+nodes get real per-position vectors, correct `n_embd` width),
+`test_moe_template_captures_all_nodes_not_just_moe_block` (regression test
+for the MoE bug — asserts every node has non-empty shape/summary, not just
+`.moe`). Backend suite: 161 passed (was 159, +2). Frontend: 38 passed
+(unchanged — no test asserted the fixed stepper label). Build clean.
+
+**Trainer-image note:** both `transformer/model.py` and `moe/model.py`
+changed — needs a rebuild+repush, same category as every backend change
+this session.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

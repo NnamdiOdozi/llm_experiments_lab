@@ -270,6 +270,11 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
     inference_cfg = config.get("inference", {})
     max_tokens = inference_cfg.get("max_new_tokens", max_new_tokens)
     temperature = inference_cfg.get("temperature", 0.8)
+    # "greedy" or "sample" (default) — same setting used everywhere decoding
+    # happens (this Generate path, and step-through > / >> via
+    # DiagnosticSession.decoding_mode), so behavior is consistent across
+    # the whole app rather than diagnostics-only. See docs/DESIGN_DECISIONS.md.
+    greedy = inference_cfg.get("decoding_mode", "sample") == "greedy"
 
     import torch
     from backend.training.templates import TEMPLATE_REGISTRY
@@ -295,7 +300,7 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
         encoded = dataset.encode(prompt_text)
         idx = torch.tensor([encoded], dtype=torch.long, device=device)
         with torch.no_grad():
-            output = model.generate(idx, max_new_tokens=max_tokens, temperature=temperature)
+            output = model.generate(idx, max_new_tokens=max_tokens, temperature=temperature, greedy=greedy)
         result = dataset.decode(output[0].tolist())
 
     elif template_key == "rnn":
@@ -309,6 +314,7 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
                 max_new_tokens=max_tokens,
                 device=device,
                 temperature=temperature,
+                greedy=greedy,
             )
         except KeyError:
             result = "[Error: prompt contains characters not in vocabulary. Use lowercase letters only.]"
@@ -321,8 +327,8 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
         import torch
         torch.cuda.empty_cache()
     training_log.info(
-        "PROMPT run_id=%d template=%s prompt='%s' max_tokens=%d temperature=%.2f",
-        run_id, template_key, prompt_text[:50], max_tokens, temperature,
+        "PROMPT run_id=%d template=%s prompt='%s' max_tokens=%d temperature=%.2f decoding_mode=%s",
+        run_id, template_key, prompt_text[:50], max_tokens, temperature, "greedy" if greedy else "sample",
     )
     return result
 

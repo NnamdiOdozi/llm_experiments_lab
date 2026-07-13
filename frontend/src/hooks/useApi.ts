@@ -242,10 +242,23 @@ const FIXTURE_SNAPSHOT_WITH_ATTENTION: import("../types").DiagnosticSnapshot = {
     ],
     token_labels: ["The", " king", " said"],
     qkv_detail: {
-      position: 2,
-      q: [0.12, -0.34, 0.08, 0.51, -0.09, 0.22, -0.44, 0.03, 0.15, -0.27, 0.19, 0.41, -0.06, 0.33, -0.12, 0.28, 0.11, -0.39, 0.25, -0.14, 0.31, -0.23, 0.18, -0.29, 0.37, -0.10, 0.26, 0.05, -0.35, 0.16, 0.09, -0.21],
-      k: [0.08, 0.21, -0.17, 0.24, 0.10, -0.38, 0.13, 0.19, -0.28, 0.22, 0.15, -0.31, 0.09, 0.26, -0.12, 0.18, 0.32, -0.14, 0.20, 0.06, -0.25, 0.11, 0.29, -0.19, 0.23, 0.08, -0.33, 0.17, 0.12, -0.27, 0.14, 0.21],
-      v: [-0.15, 0.42, 0.05, -0.29, 0.18, 0.31, -0.22, 0.13, 0.26, -0.10, 0.35, 0.07, -0.24, 0.19, 0.11, -0.37, 0.16, 0.28, -0.08, 0.32, 0.09, -0.25, 0.20, 0.14, -0.30, 0.23, 0.06, -0.17, 0.27, -0.12, 0.21, -0.33]
+      positions: [0, 1, 2],
+      tokens: ["The", " king", " said"],
+      q: [
+        [0.12, -0.34, 0.08, 0.51, -0.09, 0.22, -0.44, 0.03],
+        [0.14, -0.30, 0.10, 0.48, -0.11, 0.20, -0.40, 0.05],
+        [0.12, -0.34, 0.08, 0.51, -0.09, 0.22, -0.44, 0.03],
+      ],
+      k: [
+        [0.08, 0.21, -0.17, 0.24, 0.10, -0.38, 0.13, 0.19],
+        [0.09, 0.19, -0.15, 0.22, 0.12, -0.35, 0.14, 0.17],
+        [0.08, 0.21, -0.17, 0.24, 0.10, -0.38, 0.13, 0.19],
+      ],
+      v: [
+        [-0.15, 0.42, 0.05, -0.29, 0.18, 0.31, -0.22, 0.13],
+        [-0.13, 0.39, 0.07, -0.27, 0.16, 0.29, -0.20, 0.11],
+        [-0.15, 0.42, 0.05, -0.29, 0.18, 0.31, -0.22, 0.13],
+      ],
     }
   },
   activation_summaries: {
@@ -266,6 +279,23 @@ const FIXTURE_SNAPSHOT_WITH_ATTENTION: import("../types").DiagnosticSnapshot = {
       { rank: 3, token_id: 33, token: " be", logit: 5.40, probability: 0.14 },
       { rank: 4, token_id: 7,  token: " see", logit: 5.02, probability: 0.09 },
       { rank: 5, token_id: 58, token: " go",  logit: 4.75, probability: 0.07 }
+    ],
+    top_k_by_position: [
+      { position: 0, token: "The", top_k: [
+        { rank: 1, token_id: 82, token: " king", logit: 5.10, probability: 0.28 },
+        { rank: 2, token_id: 44, token: " said", logit: 4.80, probability: 0.19 },
+      ] },
+      { position: 1, token: " king", top_k: [
+        { rank: 1, token_id: 44, token: " said", logit: 5.50, probability: 0.33 },
+        { rank: 2, token_id: 91, token: " to", logit: 4.90, probability: 0.20 },
+      ] },
+      { position: 2, token: " said", top_k: [
+        { rank: 1, token_id: 91, token: " to", logit: 6.21, probability: 0.31 },
+        { rank: 2, token_id: 12, token: " have", logit: 5.87, probability: 0.22 },
+        { rank: 3, token_id: 33, token: " be", logit: 5.40, probability: 0.14 },
+        { rank: 4, token_id: 7,  token: " see", logit: 5.02, probability: 0.09 },
+        { rank: 5, token_id: 58, token: " go",  logit: 4.75, probability: 0.07 }
+      ] },
     ]
   },
   complete: true
@@ -325,6 +355,12 @@ const FIXTURE_SNAPSHOT: import("../types").DiagnosticSnapshot = {
       { rank: 3, token_id: 33, token: " be", logit: 5.40, probability: 0.14 },
       { rank: 4, token_id: 7,  token: " see", logit: 5.02, probability: 0.09 },
       { rank: 5, token_id: 58, token: " go",  logit: 4.75, probability: 0.07 }
+    ],
+    top_k_by_position: [
+      { position: 2, token: " said", top_k: [
+        { rank: 1, token_id: 91, token: " to", logit: 6.21, probability: 0.31 },
+        { rank: 2, token_id: 12, token: " have", logit: 5.87, probability: 0.22 },
+      ] },
     ]
   },
   complete: true
@@ -368,6 +404,23 @@ export function stepDiagnostic(runId: number, sessionId: string, params?: import
   });
 }
 
+// Recomputes the CURRENT state's snapshot with different attention params —
+// no new token sampled, generation_step/token_history untouched. Lets the
+// UI refresh attention/Q-K-V immediately when Head changes in Inspector,
+// instead of requiring a full step click. See docs/DESIGN_DECISIONS.md.
+export function peekDiagnostic(runId: number, sessionId: string, params?: import("../types").DiagnosticStepRequest) {
+  if (useFixtures()) {
+    if (params?.attention_layer !== undefined && params.attention_head !== undefined) {
+      return Promise.resolve(FIXTURE_SNAPSHOT_WITH_ATTENTION);
+    }
+    return Promise.resolve(FIXTURE_SNAPSHOT);
+  }
+  return api<import("../types").DiagnosticSnapshot>(`/training/${runId}/diagnostics/${sessionId}/peek`, {
+    method: "POST",
+    body: JSON.stringify(params || {}),
+  });
+}
+
 export function getDiagnosticSession(runId: number, sessionId: string) {
   if (useFixtures()) {
     return Promise.resolve(FIXTURE_SNAPSHOT_WITH_ATTENTION);
@@ -380,7 +433,8 @@ export function getDiagnosticSession(runId: number, sessionId: string) {
 export async function* generateDiagnosticStream(
   runId: number,
   sessionId: string,
-  maxNewTokens: number = 50
+  maxNewTokens: number = 50,
+  params?: import("../types").DiagnosticStepRequest
 ): AsyncGenerator<import("../types").GenerateStreamToken | import("../types").GenerateStreamDone, void, unknown> {
   if (useFixtures()) {
     // Fixture: emit a few tokens then a final snapshot
@@ -395,7 +449,11 @@ export async function* generateDiagnosticStream(
   const res = await fetch(`${BASE}/training/${runId}/diagnostics/${sessionId}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_new_tokens: maxNewTokens }),
+    // attention_layer/attention_head/qkv_detail previously never sent here —
+    // >> silently ignored whatever was selected in Inspector even though the
+    // backend route (DiagnosticsGenerateRequest) always accepted them. See
+    // docs/DESIGN_DECISIONS.md.
+    body: JSON.stringify({ max_new_tokens: maxNewTokens, ...params }),
   });
 
   if (!res.ok || !res.body) {

@@ -910,8 +910,16 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
         # Encode prompt
         encoded = tokenizer.encode(req.prompt[:req.max_prompt_tokens])
 
-        # Create session
-        session_id = diagnostics.create_diagnostic_session(model, tokenizer, device, encoded, run_id=run_id)
+        # Create session — temperature/decoding_mode read once here, same
+        # source and values model.generate() (Generate button) uses, so
+        # > / >> decode identically to Generate. See docs/DESIGN_DECISIONS.md.
+        inference_cfg = config.get("inference", {})
+        temperature = inference_cfg.get("temperature", 0.8)
+        decoding_mode = inference_cfg.get("decoding_mode", "sample")
+        session_id = diagnostics.create_diagnostic_session(
+            model, tokenizer, device, encoded, run_id=run_id, temperature=temperature,
+            decoding_mode=decoding_mode,
+        )
 
         # Register hooks (delegates to model's register_diagnostic_hooks method)
         diagnostics.register_diagnostic_hooks(model, session_id)
@@ -972,6 +980,55 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
     snapshot = diagnostics.run_diagnostic_step(session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail)
     if snapshot is None:
         raise HTTPException(500, "Failed to run diagnostic step")
+
+    return snapshot.to_dict()
+
+
+@router.post("/{run_id}/diagnostics/{session_id}/peek")
+async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepRequest = None):
+    """Recompute the CURRENT state's snapshot with different attention
+    params — no new token sampled, session/token_history untouched. Lets
+    the UI refresh attention/Q-K-V immediately when the user changes Head
+    in Inspector, instead of requiring a full step click. Real bug report,
+    2026-07-14: "when I change head it should automatically show a
+    different head" — mirrors diagnostics_step's local/remote dual path
+    exactly, just calls run_diagnostic_step_internal (already existed, used
+    internally by /generate's final-frame capture) instead of
+    run_diagnostic_step. See docs/DESIGN_DECISIONS.md.
+    """
+    from backend.training import artifacts, diagnostics
+
+    attention_params = None
+    if req is not None and req.attention_layer is not None and req.attention_head is not None:
+        attention_params = (req.attention_layer, req.attention_head)
+    qkv_detail = req.qkv_detail if req is not None else False
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            body = {}
+            if attention_params is not None:
+                body = {"attention_layer": attention_params[0], "attention_head": attention_params[1], "qkv_detail": qkv_detail}
+            result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/peek", body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote diagnostics peek failed: {exc}")
+        await _touch_worker_for_run(db_run)
+        return result
+
+    status = artifacts.read_status(run_id)
+    if status is None or status.get("status") not in (RunStatus.PAUSED, RunStatus.COMPLETED):
+        raise HTTPException(400, "Run must be paused or completed for diagnostics")
+
+    session = diagnostics.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Diagnostic session not found")
+
+    snapshot = diagnostics.run_diagnostic_step_internal(
+        session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
+        skip_token_generation=True,
+    )
+    if snapshot is None:
+        raise HTTPException(500, "Failed to peek diagnostic state")
 
     return snapshot.to_dict()
 
@@ -1075,7 +1132,14 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
                         logits, _, _ = session.model(idx)
                     else:
                         logits, _ = session.model(idx)
-                    next_id = torch.argmax(torch.softmax(logits[0, -1, :], dim=-1)).item()
+                    # Same recipe and same decoding_mode setting as
+                    # model.generate() / _execute_forward_pass. See
+                    # docs/DESIGN_DECISIONS.md.
+                    if session.decoding_mode == "greedy":
+                        next_id = torch.argmax(logits[0, -1, :]).item()
+                    else:
+                        sample_probs = torch.softmax(logits[0, -1, :] / session.temperature, dim=-1)
+                        next_id = torch.multinomial(sample_probs, num_samples=1).item()
                     session.token_history.append(next_id)
                     session.generation_step += 1
 

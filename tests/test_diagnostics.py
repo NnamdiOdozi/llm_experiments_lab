@@ -448,6 +448,32 @@ TRANSFORMER_CONFIG = {
 }
 
 
+def test_model_generate_greedy_never_calls_multinomial():
+    """model.generate(greedy=True) — the Generate button's underlying call
+    — must select via torch.argmax, never torch.multinomial. Same
+    decoding_mode setting used by diagnostics.py's step-through path;
+    this is the direct model-level unit test for it. See
+    docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](TRANSFORMER_CONFIG)
+    idx = torch.tensor([[1, 2, 3]], dtype=torch.long)
+
+    calls = []
+    real_multinomial = torch.multinomial
+    with_patch = lambda *a, **k: (calls.append(1), real_multinomial(*a, **k))[1]
+    import unittest.mock
+    with unittest.mock.patch.object(torch, "multinomial", with_patch):
+        with torch.no_grad():
+            out1 = model.generate(idx, max_new_tokens=5, greedy=True)
+            out2 = model.generate(idx, max_new_tokens=5, greedy=True)
+
+    assert len(calls) == 0
+    # Deterministic — greedy on the same input always produces the same output.
+    assert out1.tolist() == out2.tolist()
+
+
 async def _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id: int) -> int:
     """Shared setup for Phase 2/3/4 tests — isolated data_dir, config, checkpoint,
     PAUSED status, and a REAL training_runs row (via create_training_run, not a
@@ -562,7 +588,8 @@ async def test_generate_streams_tokens_then_final_snapshot(temp_db, client, monk
 
 
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
-    """Phase 4: qkv_detail=True returns Q/K/V vectors for the last token position."""
+    """qkv_detail=True returns one Q/K/V vector per position (not just the
+    last token) — the frontend's position stepper needs one per position."""
     exp_id = temp_db
     run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
 
@@ -580,10 +607,58 @@ async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkey
     attn = resp.json()["attention"]
     assert attn["available"] is True
     qkv = attn["qkv_detail"]
-    assert "position" in qkv
-    assert isinstance(qkv["q"], list) and len(qkv["q"]) > 0
-    assert isinstance(qkv["k"], list) and len(qkv["k"]) > 0
-    assert isinstance(qkv["v"], list) and len(qkv["v"]) > 0
+    num_positions = len(qkv["positions"])
+    # +1: qkv_detail is computed after this step's new token is appended to
+    # token_history (prompt is under the 12-position cap either way).
+    assert num_positions == len("The king") + 1
+    assert qkv["positions"] == list(range(num_positions))
+    assert len(qkv["tokens"]) == num_positions
+    assert len(qkv["q"]) == num_positions
+    assert len(qkv["k"]) == num_positions
+    assert len(qkv["v"]) == num_positions
+    assert isinstance(qkv["q"][0], list) and len(qkv["q"][0]) > 0
+
+
+async def test_qkv_detail_capped_to_last_12_positions(temp_db, client, monkeypatch, tmp_path):
+    """A prompt longer than DIAGNOSTIC_POSITION_WINDOW (12) must only return
+    the most recent 12 positions' Q/K/V and top-k, not all of them —
+    payload-size cap confirmed live, not just a config value that's never
+    exercised. qkv_detail's window is one position further than
+    top_k_by_position's (see the comment in diagnostics.py's
+    _execute_forward_pass): qkv is computed after this step's new token is
+    appended to token_history, top_k_by_position before."""
+    from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    long_prompt = "The king said many words indeed"
+    assert len(long_prompt) > DIAGNOSTIC_POSITION_WINDOW
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": long_prompt, "top_k": 5, "max_prompt_tokens": len(long_prompt)},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/step",
+        json={"attention_layer": 0, "attention_head": 0, "qkv_detail": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    pre_append_len = len(long_prompt)  # sequence length used for top_k_by_position
+    post_append_len = pre_append_len + 1  # +1 for the token generated this step, used for qkv_detail
+
+    qkv = body["attention"]["qkv_detail"]
+    assert len(qkv["positions"]) == DIAGNOSTIC_POSITION_WINDOW
+    assert qkv["positions"] == list(range(post_append_len - DIAGNOSTIC_POSITION_WINDOW, post_append_len))
+
+    top_k_by_position = body["lm_head"]["top_k_by_position"]
+    assert len(top_k_by_position) == DIAGNOSTIC_POSITION_WINDOW
+    assert top_k_by_position[-1]["position"] == pre_append_len - 1
+    assert top_k_by_position[0]["position"] == pre_append_len - DIAGNOSTIC_POSITION_WINDOW
+    assert len(top_k_by_position[0]["top_k"]) == 5
 
 
 async def test_qkv_detail_omitted_when_not_requested(temp_db, client, monkeypatch, tmp_path):
@@ -655,3 +730,353 @@ async def test_get_diagnostic_snapshot_for_run_tracks_run_to_session(temp_db, cl
     assert snapshot is not None
     assert snapshot["diagnostic_session_id"] == session_id
     assert snapshot["generation_step"] == stepped["generation_step"]
+
+
+async def test_diagnostics_start_reads_temperature_from_config(temp_db, client, monkeypatch, tmp_path):
+    """> / >> must sample with the same temperature the Generate button uses
+    (config.inference.temperature) — not a hardcoded/greedy default. See
+    docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    config = {**TRANSFORMER_CONFIG, "inference": {"temperature": 1.5}}
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    session = diagnostics.get_session(session_id)
+    assert session.temperature == 1.5
+
+
+async def test_diagnostics_start_defaults_temperature_when_config_omits_it(temp_db, client, monkeypatch, tmp_path):
+    """TRANSFORMER_CONFIG (shared fixture) has no "inference" key — must fall
+    back to the same 0.8 default model.generate() uses, not error."""
+    from backend.training import diagnostics
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    assert diagnostics.get_session(session_id).temperature == 0.8
+
+
+async def test_diagnostics_start_reads_decoding_mode_from_config(temp_db, client, monkeypatch, tmp_path):
+    """decoding_mode is a new config.inference setting (2026-07-15), same
+    source Generate uses via prompt_paused_model — > / >> must pick it up
+    too. See docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    config = {**TRANSFORMER_CONFIG, "inference": {"decoding_mode": "greedy"}}
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    assert diagnostics.get_session(session_id).decoding_mode == "greedy"
+
+
+async def test_diagnostics_start_defaults_decoding_mode_to_sample(temp_db, client, monkeypatch, tmp_path):
+    from backend.training import diagnostics
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    assert diagnostics.get_session(session_id).decoding_mode == "sample"
+
+
+async def test_diagnostic_step_uses_argmax_in_greedy_mode(temp_db, client, monkeypatch, tmp_path):
+    """When decoding_mode=greedy, step-through must select via torch.argmax
+    and never call torch.multinomial — the selected token must always be
+    the top-k list's #1 entry (deterministic). See docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    config = {**TRANSFORMER_CONFIG, "inference": {"decoding_mode": "greedy"}}
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    multinomial_calls = []
+    real_multinomial = torch.multinomial
+    monkeypatch.setattr(torch, "multinomial", lambda *a, **k: (multinomial_calls.append(1), real_multinomial(*a, **k))[1])
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert len(multinomial_calls) == 0
+    assert body["generated_token"]["id"] == body["lm_head"]["top_k"][0]["token_id"]
+
+
+async def test_diagnostic_step_samples_instead_of_greedy(temp_db, client, monkeypatch, tmp_path):
+    """Step-through must call torch.multinomial (real sampling), not
+    torch.argmax/topk[0] (greedy) — regression test for the >  / >> vs
+    Generate behavior mismatch. See docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training import diagnostics as diag_module
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    real_multinomial = torch.multinomial
+    calls = []
+
+    def spy_multinomial(probs, *args, **kwargs):
+        calls.append(probs)
+        return real_multinomial(probs, *args, **kwargs)
+
+    monkeypatch.setattr(diag_module.torch, "multinomial", spy_multinomial)
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+
+
+async def test_generate_samples_instead_of_greedy(temp_db, client, monkeypatch, tmp_path):
+    """/generate (>>) must also sample with torch.multinomial per token, not
+    torch.argmax — its token-selection loop lives separately from
+    _execute_forward_pass's, in backend/api/training.py. See
+    docs/DESIGN_DECISIONS.md."""
+    import torch
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    real_multinomial = torch.multinomial
+    calls = []
+
+    def spy_multinomial(probs, *args, **kwargs):
+        calls.append(probs)
+        return real_multinomial(probs, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "multinomial", spy_multinomial)
+
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 3},
+    ) as resp:
+        assert resp.status_code == 200
+        async for _ in resp.aiter_text():
+            pass
+
+    assert len(calls) == 3
+
+
+async def test_peek_recomputes_attention_for_a_new_head_without_advancing(temp_db, client, monkeypatch, tmp_path):
+    """/peek lets the UI refresh attention for a newly-selected head without
+    a full step — must NOT sample a new token or advance generation_step.
+    Real bug report, 2026-07-14: changing Head in Inspector did nothing
+    until the next > click. See docs/DESIGN_DECISIONS.md."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # A real step, head 0 — establishes generation_step=1 and a token count baseline.
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/step",
+        json={"attention_layer": 0, "attention_head": 0},
+    )
+    stepped = resp.json()
+    assert stepped["attention"]["head"] == 0
+    assert stepped["generation_step"] == 1
+    token_count_after_step = stepped["generated_token"]["position"] + 1
+
+    # Peek at a different head — must return that head's real weights,
+    # without sampling a new token or advancing generation_step.
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+        json={"attention_layer": 0, "attention_head": 1},
+    )
+    assert resp.status_code == 200
+    peeked = resp.json()
+    assert peeked["attention"]["available"] is True
+    assert peeked["attention"]["head"] == 1
+    assert peeked["generation_step"] == 1  # unchanged — peek doesn't advance
+    assert peeked["generated_token"]["position"] + 1 == token_count_after_step  # no new token appended
+
+    # A second peek, back to head 0, still doesn't advance — confirms peek
+    # is idempotent/non-mutating, not just "didn't advance once."
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+        json={"attention_layer": 0, "attention_head": 0},
+    )
+    peeked_again = resp.json()
+    assert peeked_again["generation_step"] == 1
+    assert peeked_again["generated_token"]["position"] + 1 == token_count_after_step
+
+
+async def test_peek_before_any_step_still_works(temp_db, client, monkeypatch, tmp_path):
+    """Peek must work even if the user changes Head before ever clicking >
+    — a fresh session has no prior step, only the prompt."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+        json={"attention_layer": 0, "attention_head": 0},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["attention"]["available"] is True
+    assert body["generation_step"] == 0
+
+
+async def test_generic_node_captures_position_vectors(temp_db, client, monkeypatch, tmp_path):
+    """Every node (not just attention/lm_head) now retains raw per-position
+    vectors, capped to DIAGNOSTIC_POSITION_WINDOW, so the Inspector can show
+    real values instead of just shape+summary stats. See
+    docs/DESIGN_DECISIONS.md."""
+    from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king said", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+
+    for node_id in ["embedding", "block.0.ln1", "block.0.attention", "block.0.ln2", "block.0.mlp", "final_norm"]:
+        pv = nodes[node_id]["position_vectors"]
+        assert pv is not None, f"{node_id} missing position_vectors"
+        assert len(pv["positions"]) <= DIAGNOSTIC_POSITION_WINDOW
+        assert len(pv["vectors"]) == len(pv["positions"])
+        assert len(pv["vectors"][0]) == TRANSFORMER_CONFIG["model"]["n_embd"]
+
+
+async def test_moe_template_captures_all_nodes_not_just_moe_block(temp_db, client, monkeypatch, tmp_path):
+    """Regression test: the MoE template's diagnostic hooks only ever
+    branched on isinstance(output, tuple) — true only for the .moe node
+    itself (which returns (x, drop_rate)). Every other node (embedding,
+    ln1, attention, ln2, final_norm, lm_head) returns a plain tensor and
+    fell into the else branch, silently getting empty shape/summary/no
+    vectors. Found live while adding position_vectors capture, 2026-07-14.
+    See docs/DESIGN_DECISIONS.md."""
+    import torch
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    moe_config = {
+        "template": "moe",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 2, "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+            "num_experts": 8, "top_k": 2, "capacity_factor": 1.25,
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(moe_config))
+    model = TEMPLATE_REGISTRY["moe"]["build_model"](moe_config)
+    torch.save({"model_state": model.state_dict(), "config": moe_config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+
+    # Before the fix, all of these had output_shape=[] and empty summary.
+    for node_id in ["embedding", "block.0.ln1", "block.0.attention", "block.0.ln2", "final_norm"]:
+        assert nodes[node_id]["output_shape"] != [], f"{node_id} has empty output_shape (pre-fix bug)"
+        assert nodes[node_id]["summary"] != {}, f"{node_id} has empty summary (pre-fix bug)"
+        assert nodes[node_id]["position_vectors"] is not None
+
+    # The .moe node itself always worked (its output genuinely is a tuple).
+    assert nodes["block.0.moe"]["output_shape"] != []

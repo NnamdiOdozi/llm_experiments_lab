@@ -1,6 +1,7 @@
 """Tiny Transformer LM — adapted from course notebook for configurable use."""
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -200,7 +201,22 @@ class TinyTransformerLM(nn.Module):
         are not unregistered per-layer — they stay live for the lifetime
         of the model. Session cleanup will remove model references entirely.
         """
-        from backend.training.diagnostics import _compute_summary
+        from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
+
+        def _windowed_position_vectors(tensor: torch.Tensor) -> Optional[dict]:
+            """Raw per-position vectors, last DIAGNOSTIC_POSITION_WINDOW
+            positions — any 3D [B, T, *] tensor (2D inputs like embedding's
+            token-id lookup aren't per-position float vectors, so this
+            correctly returns None for those — embedding only ever gets an
+            OUTPUT vector, matching the fact there's no meaningful "input
+            vector" for a token id). See docs/DESIGN_DECISIONS.md."""
+            if tensor.dim() != 3:
+                return None
+            with torch.no_grad():
+                T = tensor.shape[1]
+                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+                start = T - window
+                return {"positions": list(range(start, T)), "vectors": tensor[0, start:T, :].tolist()}
 
         def make_hook(node_id: str):
             def hook(module, input_tuple, output):
@@ -209,17 +225,25 @@ class TinyTransformerLM(nn.Module):
                 if session is None:
                     return
 
-                input_shape = list(input_tuple[0].shape) if input_tuple else []
+                input_tensor = input_tuple[0] if input_tuple else None
+                input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
                 output_shape = list(output.shape) if isinstance(output, torch.Tensor) else []
                 summary = {}
+                position_vectors = None
+                input_position_vectors = None
                 if isinstance(output, torch.Tensor):
                     summary = _compute_summary(output)
+                    position_vectors = _windowed_position_vectors(output)
+                if isinstance(input_tensor, torch.Tensor):
+                    input_position_vectors = _windowed_position_vectors(input_tensor)
 
                 from backend.training.diagnostics import NodeCapture
                 session.captured_tensors[node_id] = NodeCapture(
                     input_shape=input_shape,
                     output_shape=output_shape,
                     summary=summary,
+                    position_vectors=position_vectors,
+                    input_position_vectors=input_position_vectors,
                 )
             return hook
 
@@ -238,16 +262,26 @@ class TinyTransformerLM(nn.Module):
         self.lm_head.register_forward_hook(make_hook("lm_head"))
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8) -> torch.Tensor:
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8, greedy: bool = False) -> torch.Tensor:
         """Autoregressive generation.  temperature < 1 → sharper (more greedy),
-        temperature > 1 → flatter (more random)."""
+        temperature > 1 → flatter (more random).
+
+        greedy=True always picks the single highest-probability token
+        (argmax) — temperature has no effect in this mode: scaling logits
+        by any positive temperature preserves their relative order, so
+        argmax(logits/T) == argmax(logits) for every T. See
+        docs/DESIGN_DECISIONS.md.
+        """
         self.train(False)
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size :]
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature  # scale logits before softmax
-            probs = F.softmax(logits, dim=-1)
-            next_idx = torch.multinomial(probs, num_samples=1)
+            logits = logits[:, -1, :]
+            if greedy:
+                next_idx = torch.argmax(logits, dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(logits / temperature, dim=-1)  # scale before softmax
+                next_idx = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_idx], dim=1)
         return idx
 
