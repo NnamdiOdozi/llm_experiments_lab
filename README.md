@@ -31,7 +31,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 ## What It Does
 
-You select from preset experiments (tiny transformers, RNNs), optionally adjust config (layers, heads, learning rate, etc.), hit "Start", and watch training happen with live loss charts. You can pause training mid-run, prompt the model with text to see current output quality, then resume or stop. When done, export your experiment as a standalone `.py` script or Jupyter notebook.
+You select from preset experiments (tiny transformers,MoE variant, RNNs), optionally adjust config (layers, heads, learning rate, etc.), hit "Start", and watch training happen with live loss charts. You can pause training mid-run, prompt the model with text to see current output quality, then resume or stop. When done, export your experiment as a standalone `.py` script or Jupyter notebook.
 
 **Available presets:**
 
