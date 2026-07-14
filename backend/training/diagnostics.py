@@ -200,6 +200,19 @@ def create_diagnostic_session(
     )
     _diagnostic_sessions[session_id] = session
     if run_id is not None:
+        # Evict this run's PREVIOUS session (if any) — each session holds a
+        # full model loaded from checkpoint, and nothing else ever pruned
+        # the registry (delete_session had zero callers), so every prompt
+        # session leaked a model's worth of RAM until process restart.
+        # Per-run eviction on new-session start, NOT a TTL, is deliberate:
+        # the frontend relies on a closed session staying peekable
+        # (PausePrompt.closeSession keeps the id alive for Inspector's
+        # post-close peeks) right up until a new prompt replaces it — which
+        # is exactly this moment. Fable review, 2026-07-14. See
+        # docs/DESIGN_DECISIONS.md §66.
+        previous = _run_to_session.get(run_id)
+        if previous is not None and previous != session_id:
+            delete_session(previous)
         record_session_for_run(run_id, session_id)
     training_log.info("Created diagnostic session %s for run_id=%s", session_id, run_id)
     return session_id
@@ -237,14 +250,20 @@ def register_diagnostic_hooks(model: torch.nn.Module, session_id: str) -> None:
     """Register forward hooks at diagnostic node points.
 
     Delegates to the model's register_diagnostic_hooks method, which knows
-    about the model's internal structure.
+    about the model's internal structure. The returned handles are stored
+    on the session so delete_session() can actually deregister them —
+    previously both templates discarded the handles, so hook_handles was
+    always empty. Fable review, 2026-07-14 — see docs/DESIGN_DECISIONS.md §66.
 
     Args:
         model: The loaded model (must have register_diagnostic_hooks method)
         session_id: Session to receive captures
     """
     if hasattr(model, 'register_diagnostic_hooks'):
-        model.register_diagnostic_hooks(session_id)
+        handles = model.register_diagnostic_hooks(session_id)
+        session = get_session(session_id)
+        if session is not None and handles:
+            session.hook_handles.extend(handles)
 
 
 def _compute_attention_weights(

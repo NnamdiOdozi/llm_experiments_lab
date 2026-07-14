@@ -254,19 +254,29 @@ class TinyTransformerLM(nn.Module):
                 )
             return hook
 
+        # Collect and return the hook handles — previously the
+        # register_forward_hook return values were discarded, so
+        # session.hook_handles stayed empty and delete_session() had
+        # nothing to deregister. The diagnostics-side wrapper
+        # (diagnostics.register_diagnostic_hooks) stores these on the
+        # session so eviction can actually detach them. Fable review,
+        # 2026-07-14 — see docs/DESIGN_DECISIONS.md §66.
+        handles = []
+
         # Register embedding hook
-        self.token_emb.register_forward_hook(make_hook("embedding"))
+        handles.append(self.token_emb.register_forward_hook(make_hook("embedding")))
 
         # Register block hooks
         for i, block in enumerate(self.blocks):
-            block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1"))
-            block.attn.register_forward_hook(make_hook(f"block.{i}.attention"))
-            block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2"))
-            block.ffn.register_forward_hook(make_hook(f"block.{i}.mlp"))
+            handles.append(block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1")))
+            handles.append(block.attn.register_forward_hook(make_hook(f"block.{i}.attention")))
+            handles.append(block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2")))
+            handles.append(block.ffn.register_forward_hook(make_hook(f"block.{i}.mlp")))
 
         # Register final norm and lm_head hooks
-        self.ln_f.register_forward_hook(make_hook("final_norm"))
-        self.lm_head.register_forward_hook(make_hook("lm_head"))
+        handles.append(self.ln_f.register_forward_hook(make_hook("final_norm")))
+        handles.append(self.lm_head.register_forward_hook(make_hook("lm_head")))
+        return handles
 
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.8, greedy: bool = False) -> torch.Tensor:

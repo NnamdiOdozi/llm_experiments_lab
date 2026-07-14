@@ -3304,6 +3304,41 @@ Verified: 2 new tests in `frontend/src/components/ArchSchematic.test.tsx` —
 remap fires with the re-indexed node id; no remap when a non-block node is
 selected. Frontend suite 54 passed (was 52).
 
+## §66: Diagnostic sessions leaked a full model each — registry never pruned, hook handles never stored
+
+**Problem (Fable review, 2026-07-14):** every `/diagnostics/start` loads a
+checkpoint into a fresh model and registers it in `_diagnostic_sessions` —
+and nothing ever removed it. `delete_session()` existed but had **zero
+callers**. Worse, both templates' `register_diagnostic_hooks` discarded the
+`register_forward_hook` return values, so `session.hook_handles` was always
+empty — even a call to `delete_session()` would have detached nothing.
+Net effect: one leaked model's worth of RAM per prompt session, forever,
+until process restart.
+
+**Fix, two parts:**
+- Both templates now collect and return their hook handles;
+  `diagnostics.register_diagnostic_hooks` stores them on
+  `session.hook_handles`, making `delete_session()`'s deregistration real.
+- `create_diagnostic_session` now evicts the run's *previous* session
+  (looked up via the existing `_run_to_session` map) when a new one starts
+  for the same run.
+
+**Why per-run eviction and NOT a TTL:** the frontend deliberately relies on
+a "closed" session staying peekable — `PausePrompt.closeSession()` keeps the
+session id alive so the Inspector can still peek attention for the final
+reached state long after generation finished (see the 2026-07-14 note in
+PausePrompt.tsx). The only moment that stops mattering is when a new prompt
+replaces it — which is exactly when eviction now happens. A TTL would have
+re-broken that flow. Remote sessions are unaffected: `_run_to_session` holds
+their ids too, but they don't exist in the local registry, so
+`delete_session` is a no-op for them (the leak lives in whichever process
+owns the model — the trainer container has this same fix via the shared
+image).
+
+Verified: new test `test_new_session_for_same_run_evicts_previous_and_detaches_hooks`
+(handles stored; eviction detaches hooks from the old model; other runs'
+sessions untouched). Full suite 206 passed (was 205).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

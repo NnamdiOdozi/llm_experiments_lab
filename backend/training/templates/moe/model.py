@@ -281,19 +281,26 @@ class TinyMoeLM(nn.Module):
                 )
             return hook
 
+        # Collect and return the hook handles — same reason as the
+        # transformer template: discarded handles meant delete_session()
+        # could never detach hooks. Fable review, 2026-07-14 — see
+        # docs/DESIGN_DECISIONS.md §66.
+        handles = []
+
         # Register embedding hook
-        self.token_emb.register_forward_hook(make_hook("embedding"))
+        handles.append(self.token_emb.register_forward_hook(make_hook("embedding")))
 
         # Register block hooks
         for i, block in enumerate(self.blocks):
-            block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1"))
-            block.attn.register_forward_hook(make_hook(f"block.{i}.attention"))
-            block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2"))
-            block.moe.register_forward_hook(make_hook(f"block.{i}.moe"))
+            handles.append(block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1")))
+            handles.append(block.attn.register_forward_hook(make_hook(f"block.{i}.attention")))
+            handles.append(block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2")))
+            handles.append(block.moe.register_forward_hook(make_hook(f"block.{i}.moe")))
 
         # Register final norm and lm_head hooks
-        self.ln_f.register_forward_hook(make_hook("final_norm"))
-        self.lm_head.register_forward_hook(make_hook("lm_head"))
+        handles.append(self.ln_f.register_forward_hook(make_hook("final_norm")))
+        handles.append(self.lm_head.register_forward_hook(make_hook("lm_head")))
+        return handles
 
 
 def build_model_from_config(config: dict) -> TinyMoeLM:

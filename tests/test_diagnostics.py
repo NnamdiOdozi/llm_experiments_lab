@@ -659,6 +659,57 @@ def test_execute_forward_pass_uses_pre_generation_logits_not_next_token_predicti
     assert snapshot.lm_head["top_k_by_position"][-1]["position"] == 1  # T-2, not T-1
 
 
+def _tiny_transformer():
+    from backend.training.templates.transformer.model import TinyTransformerLM
+    return TinyTransformerLM(
+        vocab_size=10, n_embd=8, n_head=2, n_layer=1, block_size=8, dropout=0.0,
+    )
+
+
+def test_new_session_for_same_run_evicts_previous_and_detaches_hooks():
+    """Memory-leak fix (Fable review, 2026-07-14 — DESIGN_DECISIONS §66):
+    the session registry was never pruned (delete_session had zero callers)
+    and both templates discarded their register_forward_hook handles, so
+    every /diagnostics/start leaked a full checkpoint-loaded model until
+    process restart. Starting a NEW session for the same run must (a) evict
+    the previous session, (b) actually detach its hooks, and (c) leave
+    other runs' sessions alone."""
+    from backend.training import diagnostics
+
+    model1, model2, model_other = _tiny_transformer(), _tiny_transformer(), _tiny_transformer()
+    tok = _IdentityTokenizer()
+    s1 = diagnostics.create_diagnostic_session(
+        model=model1, tokenizer=tok, device="cpu", prompt_tokens=[0, 1], run_id=424242,
+    )
+    diagnostics.register_diagnostic_hooks(model1, s1)
+    s_other = diagnostics.create_diagnostic_session(
+        model=model_other, tokenizer=tok, device="cpu", prompt_tokens=[0], run_id=424243,
+    )
+    try:
+        # Handles now actually stored (previously always empty)
+        assert len(diagnostics.get_session(s1).hook_handles) > 0
+        assert len(model1.token_emb._forward_hooks) == 1
+
+        s2 = diagnostics.create_diagnostic_session(
+            model=model2, tokenizer=tok, device="cpu", prompt_tokens=[0, 1], run_id=424242,
+        )
+        # Previous session for this run evicted, hooks detached
+        assert diagnostics.get_session(s1) is None
+        assert len(model1.token_emb._forward_hooks) == 0
+        # New session live and recorded as the run's latest
+        assert diagnostics.get_session(s2) is not None
+        assert diagnostics.get_latest_session_id_for_run(424242) == s2
+        # Unrelated run untouched
+        assert diagnostics.get_session(s_other) is not None
+    finally:
+        # Cleanup — don't leak test sessions into the process-wide registry
+        for sid in (s1, s_other, diagnostics.get_latest_session_id_for_run(424242)):
+            if sid:
+                diagnostics.delete_session(sid)
+        diagnostics._run_to_session.pop(424242, None)
+        diagnostics._run_to_session.pop(424243, None)
+
+
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
     """qkv_detail=True returns one Q/K/V vector per position (not just the
     last token) — the frontend's position stepper needs one per position."""
