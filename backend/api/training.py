@@ -74,6 +74,20 @@ class DiagnosticsStepRequest(BaseModel):
     # (real user report, 2026-07-13: heatmap "gets very busy very quickly").
     # See docs/DESIGN_DECISIONS.md.
     attention_window_offset: int = 0
+    # Live override for the session's decoding settings — omit to keep
+    # whatever the session already has (session default comes from
+    # config.inference at /start time). Direct user request, 2026-07-15:
+    # wants to adjust temperature/decoding mode mid-prompting without
+    # restarting the session (which would lose token_history). See
+    # docs/DESIGN_DECISIONS.md.
+    temperature: float | None = None
+    decoding_mode: str | None = None
+    # Same semantics as attention_window_offset, but for every node's
+    # position_vectors/input_position_vectors (LayerNorm, MLP, embedding,
+    # final_norm — anything with a Runtime position_vectors view), not just
+    # attention. Direct user request, 2026-07-15. See
+    # docs/DESIGN_DECISIONS.md.
+    node_window_offset: int = 0
 
 
 class DiagnosticsGenerateRequest(BaseModel):
@@ -82,6 +96,10 @@ class DiagnosticsGenerateRequest(BaseModel):
     attention_layer: int | None = None
     attention_head: int | None = None
     qkv_detail: bool = False
+    # See DiagnosticsStepRequest.temperature/decoding_mode above.
+    temperature: float | None = None
+    decoding_mode: str | None = None
+    node_window_offset: int = 0
 
 
 def _count_active_runs(device_filter: str | None = None) -> int:
@@ -400,11 +418,27 @@ async def stop_training(run_id: int):
     if _is_remote(db_run):
         try:
             await _proxy(db_run, "POST", "/api/training/{run_id}/stop")
+            training_log.info("STOP (remote) run_id=%d", run_id)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote stop failed: {exc}")
-        training_log.info("STOP (remote) run_id=%d", run_id)
+            # Real incident, 2026-07-14: user deleted the Nebius endpoint
+            # manually (outside the app) after finishing with it. Any run
+            # still pointing at that endpoint had no way to ever be
+            # stopped — the proxy call always failed (dead URL/404/
+            # timeout), a bare 502 went back to the frontend, and the run
+            # stayed "paused" in Open Runs forever with no way to clear
+            # it. The remote process, if it's even still there at all, is
+            # unreachable either way — mark the run CANCELLED locally
+            # regardless, matching stop_run()'s own existing fallback for
+            # a local run whose process has already exited. Direct user
+            # request: "I should be able to stop any of these things to
+            # kind of flush them." See docs/DESIGN_DECISIONS.md.
+            await db.update_training_run(run_id, status=RunStatus.CANCELLED)
+            training_log.warning(
+                "STOP (remote) run_id=%d — proxy failed, marking cancelled locally anyway: %s",
+                run_id, exc,
+            )
         return {"run_id": run_id, "status": "stopping"}
-    if not stop_run(run_id):
+    if not stop_run(run_id, db_status=db_run["status"]):
         raise HTTPException(400, "Run not found")
     training_log.info("STOP run_id=%d", run_id)
     return {"run_id": run_id, "status": "stopping"}
@@ -469,6 +503,11 @@ async def run_status(run_id: int):
         # controller's perspective this run is remote. Override, don't trust
         # whatever the proxied response says. See docs/DESIGN_DECISIONS.md §10.
         result["execution_backend"] = "nebius_endpoint"
+        # Backfill from our own DB row if the proxied trainer container is
+        # running an image from before "device" was added to status.json —
+        # avoids a hard dependency on a trainer-image rebuild for this fix
+        # to take effect. See docs/DESIGN_DECISIONS.md.
+        result.setdefault("device", db_run.get("device") or "cpu")
         live_status = result.get("status")
         if live_status is not None and live_status != db_run["status"]:
             # Keep the local row in sync with whatever's actually happening
@@ -1047,16 +1086,28 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
     attention_window_offset = req.attention_window_offset if req is not None else 0
+    temperature = req.temperature if req is not None else None
+    decoding_mode = req.decoding_mode if req is not None else None
+    node_window_offset = req.node_window_offset if req is not None else 0
 
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
         try:
-            body = {}
+            body: dict = {}
             if attention_params is not None:
-                body = {
-                    "attention_layer": attention_params[0], "attention_head": attention_params[1],
-                    "qkv_detail": qkv_detail, "attention_window_offset": attention_window_offset,
-                }
+                body["attention_layer"] = attention_params[0]
+                body["attention_head"] = attention_params[1]
+                body["qkv_detail"] = qkv_detail
+                body["attention_window_offset"] = attention_window_offset
+            # Previously bundled only under the attention_params branch above
+            # — temperature/decoding_mode overrides would have been silently
+            # dropped for remote runs whenever attention wasn't also
+            # selected. See docs/DESIGN_DECISIONS.md.
+            if temperature is not None:
+                body["temperature"] = temperature
+            if decoding_mode is not None:
+                body["decoding_mode"] = decoding_mode
+            body["node_window_offset"] = node_window_offset
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/step", body)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics step failed: {exc}")
@@ -1072,6 +1123,15 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
     session = diagnostics.get_session(session_id)
     if session is None:
         raise HTTPException(404, "Diagnostic session not found")
+
+    # Live override, if given — takes effect on this step and persists for
+    # subsequent ones too (mutates the session, not a one-shot arg). See
+    # DiagnosticsStepRequest.temperature/decoding_mode above.
+    if temperature is not None:
+        session.temperature = temperature
+    if decoding_mode is not None:
+        session.decoding_mode = decoding_mode
+    session.node_window_offset = node_window_offset
 
     # Run step
     snapshot = diagnostics.run_diagnostic_step(
@@ -1103,16 +1163,17 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
     attention_window_offset = req.attention_window_offset if req is not None else 0
+    node_window_offset = req.node_window_offset if req is not None else 0
 
     db_run = await db.get_training_run(run_id)
     if _is_remote(db_run):
         try:
-            body = {}
+            body: dict = {"node_window_offset": node_window_offset}
             if attention_params is not None:
-                body = {
-                    "attention_layer": attention_params[0], "attention_head": attention_params[1],
-                    "qkv_detail": qkv_detail, "attention_window_offset": attention_window_offset,
-                }
+                body["attention_layer"] = attention_params[0]
+                body["attention_head"] = attention_params[1]
+                body["qkv_detail"] = qkv_detail
+                body["attention_window_offset"] = attention_window_offset
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/peek", body)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics peek failed: {exc}")
@@ -1127,6 +1188,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
     if session is None:
         raise HTTPException(404, "Diagnostic session not found")
 
+    session.node_window_offset = node_window_offset
     snapshot = diagnostics.run_diagnostic_step_internal(
         session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
         skip_token_generation=True, attention_window_offset=attention_window_offset,
@@ -1226,12 +1288,28 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
             yield f"event: error\ndata: {json.dumps({'error': 'Diagnostic session not found'})}\n\n"
             return
 
+        # Live override, if given — the sampling loop just below reads
+        # session.temperature/decoding_mode directly, so mutating here
+        # before it starts is enough; no extra param plumbing needed. See
+        # DiagnosticsStepRequest.temperature/decoding_mode above.
+        if req.temperature is not None:
+            session.temperature = req.temperature
+        if req.decoding_mode is not None:
+            session.decoding_mode = req.decoding_mode
+        session.node_window_offset = req.node_window_offset
+
         try:
             import torch
             for _ in range(req.max_new_tokens):
                 with torch.inference_mode():
                     all_tokens = session.prompt_tokens + session.token_history
-                    idx = torch.tensor([all_tokens], dtype=torch.long, device=session.device)
+                    # Same window-to-block_size fix as _execute_forward_pass —
+                    # this loop has its own separate forward-pass code (not
+                    # shared with diagnostics.py), so it needed the identical
+                    # fix applied twice. See docs/DESIGN_DECISIONS.md.
+                    idx = torch.tensor(
+                        [all_tokens[-session.model.block_size:]], dtype=torch.long, device=session.device
+                    )
                     if "Moe" in session.model.__class__.__name__:
                         logits, _, _ = session.model(idx)
                     else:
@@ -1242,7 +1320,8 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
                     if session.decoding_mode == "greedy":
                         next_id = torch.argmax(logits[0, -1, :]).item()
                     else:
-                        sample_probs = torch.softmax(logits[0, -1, :] / session.temperature, dim=-1)
+                        temp = max(session.temperature, diagnostics.MIN_TEMPERATURE)
+                        sample_probs = torch.softmax(logits[0, -1, :] / temp, dim=-1)
                         next_id = torch.multinomial(sample_probs, num_samples=1).item()
                     session.token_history.append(next_id)
                     session.generation_step += 1
@@ -1276,6 +1355,21 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
                 generated_output=generated_output,
                 generation_params=generation_params,
                 top_k_summary=final_snapshot.lm_head.get("top_k", []),
+            )
+
+            # Also log in the same format /prompt (the now-removed Generate
+            # button) used to — the chatbot's context builder
+            # (backend/chatbot/context.py::_get_prompt_history) only reads
+            # lab.prompt log lines, not the diagnostic_sessions table, so
+            # without this, prompts run via >> would stop being visible to
+            # the Lab Assistant entirely once Generate was removed from the
+            # UI. Direct user confirmation, 2026-07-14. See
+            # docs/DESIGN_DECISIONS.md.
+            status = artifacts.read_status(run_id) or {}
+            prompt_log.info(
+                "run_id=%d payload=%s",
+                run_id,
+                json.dumps({"step": status.get("current_step"), "prompt": prompt_text, "output": generated_output}),
             )
 
             yield f"event: done\ndata: {json.dumps({'final_snapshot': final_snapshot.to_dict()})}\n\n"

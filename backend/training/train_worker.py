@@ -164,6 +164,7 @@ class WorkerState:
             "template": self.template_key,
             "elapsed_seconds": round(elapsed, 1),
             "pid": os.getpid(),
+            "device": self.device,
         })
         updates: dict = {"status": status, "current_step": self.current_step}
         if status == RunStatus.RUNNING:
@@ -186,6 +187,7 @@ class WorkerState:
             "template": self.template_key,
             "elapsed_seconds": round(elapsed, 1),
             "pid": os.getpid(),
+            "device": self.device,
         })
 
     def write_metric(self, metric_row: dict):

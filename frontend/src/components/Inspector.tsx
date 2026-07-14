@@ -22,6 +22,11 @@ interface Props {
   // — 0 = most recent. See docs/DESIGN_DECISIONS.md.
   attentionWindowOffset: number;
   onAttentionWindowOffsetChange: (offset: number) => void;
+  // Same idea, for every other node's position_vectors window (LayerNorm,
+  // MLP, embedding, final_norm) — direct user request, 2026-07-15. See
+  // docs/DESIGN_DECISIONS.md.
+  nodeWindowOffset: number;
+  onNodeWindowOffsetChange: (offset: number) => void;
   // config.model.n_head — bounds the Head dropdown so it only ever lists
   // real options, never a value the model doesn't have.
   numHeads: number | null;
@@ -30,6 +35,13 @@ interface Props {
   // pattern, per direct user reference 2026-07-15). title identifies node +
   // position + block/head; content is the full-precision vector text.
   onOpenDataTab: (title: string, content: number[]) => void;
+  // Lifted to App.tsx — Inspector unmounts whenever a data tab opens (App.tsx
+  // conditionally renders it only when rightPaneTab === "inspector"), so a
+  // local useState here reset back to "overview" every time a data tab was
+  // closed, even if the user had been on Runtime (where data tabs are always
+  // opened from). Direct user report, 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  activeTab: SubTab;
+  onActiveTabChange: (tab: SubTab) => void;
 }
 
 // Hardcoded descriptions per node kind
@@ -70,7 +82,7 @@ const NODE_MATH: Record<string, { formula: string; explanation: string }> = {
   },
 };
 
-type SubTab = "overview" | "shapes" | "math" | "config" | "runtime";
+export type SubTab = "overview" | "shapes" | "math" | "config" | "runtime";
 
 const tabStyle: CSSProperties = {
   display: "flex",
@@ -221,12 +233,18 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
     return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No per-position data captured yet.</div>;
   }
 
-  // Highlighting "what actually got selected" only makes sense at the most
-  // recent position (generated_token is the one token this whole snapshot
-  // just sampled) — earlier positions' next tokens aren't reconstructed
-  // here (would need combining input_tokens/history in a way the response
-  // doesn't cleanly expose), kept simple deliberately.
-  const isMostRecent = clampedIndex === entries.length - 1;
+  // Direct user request, 2026-07-15: highlight "what actually got
+  // selected" at ANY browsable position, not just the most recent one —
+  // actual_next_token_id (backend-computed ground truth, see
+  // docs/DESIGN_DECISIONS.md) makes this a plain id comparison regardless
+  // of position. Text for the note below comes from the NEXT entry in
+  // this same list (its .token IS the decoded text of this position's
+  // actual-next id) — except at the very last entry, where the actual
+  // next token isn't itself in this windowed list, so fall back to
+  // snapshot.generated_token (the two are guaranteed to be the same
+  // token either way — see the backend comment on full_next_tokens).
+  const actualNextText =
+    clampedIndex < entries.length - 1 ? entries[clampedIndex + 1]?.token : snapshot.generated_token?.text;
 
   return (
     <div style={{ fontSize: 11 }}>
@@ -247,7 +265,7 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
         </button>
       </div>
       {entry.top_k.map((tk) => {
-        const isSelected = isMostRecent && tk.token_id === snapshot.generated_token?.id;
+        const isSelected = tk.token_id === entry.actual_next_token_id;
         return (
           <div
             key={tk.rank}
@@ -260,7 +278,12 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
           >
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
               <span>
-                <strong>#{tk.rank}</strong> {tk.token} (id={tk.token_id})
+                {/* Quoted — direct user request 2026-07-14: an
+                    unquoted space character rendered as visibly nothing,
+                    making it look like the row was empty/broken rather
+                    than a real, meaningful prediction. See
+                    docs/DESIGN_DECISIONS.md. */}
+                <strong>#{tk.rank}</strong> "{tk.token}" (id={tk.token_id})
                 {isSelected && <span style={{ color: "#4caf50", marginLeft: 6 }}>← selected</span>}
               </span>
               <span style={{ color: "var(--text-dim)" }}>
@@ -280,9 +303,9 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
           </div>
         );
       })}
-      {isMostRecent && !entry.top_k.some((tk) => tk.token_id === snapshot.generated_token?.id) && (
+      {entry.actual_next_token_id != null && !entry.top_k.some((tk) => tk.token_id === entry.actual_next_token_id) && (
         <div style={{ marginTop: 6, color: "var(--text-dim)" }}>
-          Selected token "{snapshot.generated_token?.text}" (id={snapshot.generated_token?.id}) fell outside the top 5 — temperature sampling can pick a lower-probability token.
+          Selected token "{actualNextText}" (id={entry.actual_next_token_id}) fell outside the top 5 — temperature sampling can pick a lower-probability token.
         </div>
       )}
     </div>
@@ -310,6 +333,37 @@ function truncatedVector(v: number[], edgeLen = 6): { preview: string; full: str
   };
 }
 
+// Icon button, not spelled-out text — direct user request, 2026-07-15
+// ("I think it looks better"). Same copy/checkmark glyph pair already
+// used in ChatPanel.tsx, reused here for icon consistency across the app
+// rather than inventing a new one. Brief checkmark confirmation on click,
+// same pattern as ChatPanel's own copy button. See docs/DESIGN_DECISIONS.md.
+function CopyIconButton({ getText, title }: { getText: () => string; title: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(getText());
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+      title={title}
+      style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", padding: 0, lineHeight: 0 }}
+    >
+      {copied ? (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 // Shared by QKVTable/NodeVectorTable — one vector-kind (Q, K, V, Input,
 // Output) rendered as its own Position(+Token)/Value table. Previously Q/K/V
 // and Input/Output were side-by-side columns in one table; direct user
@@ -325,9 +379,20 @@ function VectorPreviewTable({
   vectors: number[][];
   onOpenCell: (pos: number, vector: number[]) => void;
 }) {
+  // One button copies every row in this table at once — full-precision
+  // values (vectors[i] itself, not the truncated display string), tab-
+  // separated so it pastes into a spreadsheet as a real grid (one row per
+  // position). Deliberately not a per-row copy icon — double-click already
+  // opens any single vector in its own copyable tab, so a per-row icon
+  // here would just duplicate that path and clutter a table that can have
+  // many rows. Direct user request, 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  const tableText = () => positions.map((pos, i) => [pos + 1, ...vectors[i]].join("\t")).join("\n");
   return (
     <div style={{ marginBottom: 10 }}>
-      <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{label}</div>
+        <CopyIconButton getText={tableText} title={`Copy all ${label} vectors (full precision, tab-separated)`} />
+      </div>
       <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
         <thead>
           <tr>
@@ -450,6 +515,54 @@ function EmbeddingOneHotTable({
   );
 }
 
+// Direct user request, 2026-07-15: "a stepper that allows that window to
+// slide backwards in time" for every node with a position_vectors view —
+// same shape/stride-1 pattern as the attention heatmap's stepper. Shared
+// by every generic node (LayerNorm, MLP, embedding, final_norm) via
+// Runtime below — one stepper controls the shared node_window_offset,
+// same as attention's single stepper controlling both the heatmap and
+// qkv_detail. See docs/DESIGN_DECISIONS.md.
+function NodeWindowStepper({
+  pv, totalPositions, windowOffset, onWindowOffsetChange,
+}: {
+  pv: import("../types").NodePositionVectors;
+  totalPositions: number;
+  windowOffset: number;
+  onWindowOffsetChange: (offset: number) => void;
+}) {
+  const windowSize = pv.positions.length;
+  const windowStart = pv.positions[0] ?? 0;
+  const maxOffset = Math.max(0, totalPositions - windowSize);
+  const canShiftEarlier = windowOffset < maxOffset;
+  const canShiftLater = windowOffset > 0;
+
+  if (totalPositions <= windowSize) return null;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
+      <button
+        onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + 1))}
+        disabled={!canShiftEarlier}
+        title="Shift window one position earlier"
+        style={{ fontSize: 11, padding: "2px 6px" }}
+      >
+        ◀ Earlier
+      </button>
+      <span style={{ color: "var(--text-dim)" }}>
+        Positions {windowStart + 1}–{windowStart + windowSize} of {totalPositions}
+      </span>
+      <button
+        onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - 1))}
+        disabled={!canShiftLater}
+        title="Shift window one position later"
+        style={{ fontSize: 11, padding: "2px 6px" }}
+      >
+        Later ▶
+      </button>
+    </div>
+  );
+}
+
 // Same Colab-style table as QKVTable, generalized to any node's raw
 // input/output vectors (embedding, layernorm, mlp, etc.) — no token text
 // (position numbers alone are enough to correlate against the
@@ -551,13 +664,17 @@ function AttentionHeatmap({
           grows. Shows the same DIAGNOSTIC_POSITION_WINDOW-wide slice as
           qkv_detail below (shared window, one stepper controls both), and
           lets the user shift it earlier/later through the sequence instead
-          of only ever seeing the tail. See docs/DESIGN_DECISIONS.md. */}
+          of only ever seeing the tail. Stride 1 (smooth slide, one position
+          at a time) — previously stepped by the full window size at once
+          ("discontinuous", direct user report 2026-07-15). See
+          docs/DESIGN_DECISIONS.md. */}
       {totalPositions > windowSize && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
           <button
-            onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + windowSize))}
+            onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + 1))}
             disabled={!canShiftEarlier}
-            title="Shift window earlier"
+            title="Shift window one position earlier"
+            style={{ fontSize: 11, padding: "2px 6px" }}
           >
             ◀ Earlier
           </button>
@@ -565,9 +682,10 @@ function AttentionHeatmap({
             Positions {windowStart + 1}–{windowStart + windowSize} of {totalPositions}
           </span>
           <button
-            onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - windowSize))}
+            onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - 1))}
             disabled={!canShiftLater}
-            title="Shift window later"
+            title="Shift window one position later"
+            style={{ fontSize: 11, padding: "2px 6px" }}
           >
             Later ▶
           </button>
@@ -846,6 +964,8 @@ function Runtime({
   onShowQKVDetailChange,
   attentionWindowOffset,
   onAttentionWindowOffsetChange,
+  nodeWindowOffset,
+  onNodeWindowOffsetChange,
   numHeads,
   onOpenDataTab,
 }: {
@@ -859,6 +979,8 @@ function Runtime({
   onShowQKVDetailChange: (show: boolean) => void;
   attentionWindowOffset: number;
   onAttentionWindowOffsetChange: (offset: number) => void;
+  nodeWindowOffset: number;
+  onNodeWindowOffsetChange: (offset: number) => void;
   numHeads: number | null;
   onOpenDataTab: (title: string, content: number[]) => void;
 }) {
@@ -1016,7 +1138,13 @@ function Runtime({
       )}
       {runtimeData.summary && (
         <div>
-          <strong style={{ color: "var(--accent)" }}>Summary Stats:</strong>
+          {/* Confirmed against the backend hook (register_diagnostic_hooks
+              in each template's model.py): summary = _compute_summary(output)
+              — always the OUTPUT tensor, never input. Made explicit here,
+              direct user request 2026-07-14: "I think it's probably the
+              output you're showing, but just to make it clearer... so
+              people aren't having to guess." See docs/DESIGN_DECISIONS.md. */}
+          <strong style={{ color: "var(--accent)" }}>Output Summary Stats:</strong>
           <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 4 }}>
             <div>mean: {runtimeData.summary.mean.toFixed(4)}</div>
             <div>std: {runtimeData.summary.std.toFixed(4)}</div>
@@ -1025,6 +1153,21 @@ function Runtime({
             <div>max: {runtimeData.summary.max.toFixed(4)}</div>
           </div>
         </div>
+      )}
+      {/* Direct user request, 2026-07-15: "a stepper that allows that
+          window to slide backwards in time" for every node with a
+          position_vectors view (LayerNorm, MLP, embedding, final_norm) —
+          previously only the attention heatmap had this. Same shared
+          sequence length as everywhere else in this snapshot
+          (generated_token.position + 1) — one forward pass, one sequence
+          length, applies to every node in it. See docs/DESIGN_DECISIONS.md. */}
+      {runtimeData.position_vectors && (
+        <NodeWindowStepper
+          pv={runtimeData.position_vectors}
+          totalPositions={(snapshot.generated_token?.position ?? runtimeData.position_vectors.positions[runtimeData.position_vectors.positions.length - 1]) + 1}
+          windowOffset={nodeWindowOffset}
+          onWindowOffsetChange={onNodeWindowOffsetChange}
+        />
       )}
       {selectedNodeId === "embedding" ? (
         <>
@@ -1068,11 +1211,13 @@ export default function Inspector({
   onShowQKVDetailChange,
   attentionWindowOffset,
   onAttentionWindowOffsetChange,
+  nodeWindowOffset,
+  onNodeWindowOffsetChange,
   numHeads,
   onOpenDataTab,
+  activeTab,
+  onActiveTabChange,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<SubTab>("overview");
-
   if (!selectedNode) {
     return (
       <div className="panel">
@@ -1103,7 +1248,7 @@ export default function Inspector({
         {(["overview", "shapes", "math", "config", "runtime"] as SubTab[]).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => onActiveTabChange(tab)}
             style={tabButtonStyle(activeTab === tab)}
           >
             {tab}
@@ -1131,6 +1276,8 @@ export default function Inspector({
             onShowQKVDetailChange={onShowQKVDetailChange}
             attentionWindowOffset={attentionWindowOffset}
             onAttentionWindowOffsetChange={onAttentionWindowOffsetChange}
+            nodeWindowOffset={nodeWindowOffset}
+            onNodeWindowOffsetChange={onNodeWindowOffsetChange}
             numHeads={numHeads}
             onOpenDataTab={onOpenDataTab}
           />

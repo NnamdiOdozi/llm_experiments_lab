@@ -14,6 +14,13 @@ interface BoxProps {
   isSelected?: boolean;
   onClick?: () => void;
   small?: boolean;
+  // Renders 3 small internal stripes to signal "multiple experts inside"
+  // without making it look like 3 separately-clickable boxes — previously
+  // this was 3 literal NodeBoxes all wired to the same node id, which read
+  // as misleading (implies per-expert data that doesn't exist; MoE is
+  // captured as one opaque node). Direct user report, 2026-07-15. See
+  // docs/DESIGN_DECISIONS.md.
+  segmented?: boolean;
 }
 
 // MoE and dense MLP are the same color/kind of thing at a glance — MoE is
@@ -31,7 +38,7 @@ const COLOR_MAP: Record<string, { bg: string; border: string }> = {
   transformer_block_group: { bg: "#e0e7ff", border: "#4f46e5" },
 };
 
-function NodeBox({ label, kind, isSelected, onClick, small }: BoxProps) {
+function NodeBox({ label, kind, isSelected, onClick, small, segmented }: BoxProps) {
   const colors = COLOR_MAP[kind] || { bg: "#e5e7eb", border: "#6b7280" };
 
   return (
@@ -53,6 +60,16 @@ function NodeBox({ label, kind, isSelected, onClick, small }: BoxProps) {
         transition: "all 0.15s",
       }}
     >
+      {segmented && (
+        <div style={{ display: "flex", gap: 2, justifyContent: "center", marginBottom: 3 }}>
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              style={{ width: 6, height: 10, borderRadius: 2, backgroundColor: colors.border, opacity: 0.55 }}
+            />
+          ))}
+        </div>
+      )}
       {label}
     </div>
   );
@@ -208,10 +225,12 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
           docs/Model_Diagram.md: "Inside a selected transformer block, show
           a second-level diagram." Real node IDs (block.{i}.ln1 etc.) so
           clicks actually match captured diagnostic data, not just the
-          block-group placeholder id used above. MoE's expert layer renders
-          as a few small boxes instead of one — same color as a dense MLP,
-          "doesn't need to look very different" (user, 2026-07-13), just
-          more of them. */}
+          block-group placeholder id used above. MoE's expert layer is one
+          clickable box (segmented visual, not 3 separate boxes) — it's
+          captured diagnostically as a single opaque node, so 3 identical
+          clickable boxes was misleading (implied per-expert data that
+          doesn't exist). Direct user report, 2026-07-15. See
+          docs/DESIGN_DECISIONS.md. */}
       {(() => {
         const blockGroup = nodes.find((n) => n.kind === "transformer_block_group");
         if (!blockGroup?.children) return null;
@@ -226,18 +245,14 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
               return (
                 <div key={child.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   {isMoe ? (
-                    <div style={{ display: "flex", gap: 2 }}>
-                      {[0, 1, 2].map((expertIdx) => (
-                        <NodeBox
-                          key={expertIdx}
-                          small
-                          label={expertIdx === 1 ? "Experts" : ""}
-                          kind="moe"
-                          isSelected={selectedNodeId === nodeId}
-                          onClick={() => onNodeClick?.(nodeId, child)}
-                        />
-                      ))}
-                    </div>
+                    <NodeBox
+                      small
+                      segmented
+                      label="Experts"
+                      kind="moe"
+                      isSelected={selectedNodeId === nodeId}
+                      onClick={() => onNodeClick?.(nodeId, child)}
+                    />
                   ) : (
                     <NodeBox
                       small

@@ -3,11 +3,16 @@ import { fetchOpenRuns, stopTraining, OpenRun } from "../hooks/useApi";
 
 interface Props {
   onClose: () => void;
+  // Jumps straight back into a run's workspace — previously this page could
+  // only Stop a run, with no way back in at all. Direct user report,
+  // 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  onReopen: (run: OpenRun) => void;
 }
 
-export default function OpenRunsPage({ onClose }: Props) {
+export default function OpenRunsPage({ onClose, onReopen }: Props) {
   const [runs, setRuns] = useState<OpenRun[] | null>(null);
   const [stoppingId, setStoppingId] = useState<number | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
 
   function load() {
     fetchOpenRuns().then(setRuns);
@@ -19,8 +24,17 @@ export default function OpenRunsPage({ onClose }: Props) {
 
   async function handleStop(runId: number) {
     setStoppingId(runId);
+    setStopError(null);
     try {
       await stopTraining(runId);
+    } catch (err) {
+      // Real bug found 2026-07-14: this catch didn't exist — a failed
+      // stop (e.g. a run pointing at a Nebius endpoint the user had
+      // deleted outside the app) threw an unhandled promise rejection
+      // visible only in the browser console. The run just silently
+      // stayed in the list with no indication anything had gone wrong.
+      // See docs/DESIGN_DECISIONS.md.
+      setStopError(`Failed to stop run ${runId}: ` + (err instanceof Error ? err.message : String(err)));
     } finally {
       setStoppingId(null);
       load();
@@ -33,6 +47,12 @@ export default function OpenRunsPage({ onClose }: Props) {
         <h1 style={{ fontSize: 20 }}>Open Runs</h1>
         <button onClick={onClose}>← Back</button>
       </div>
+
+      {stopError && (
+        <div style={{ background: "var(--red, #dc2626)", color: "white", padding: "8px 12px", borderRadius: 6, marginBottom: 12, fontSize: 13 }}>
+          {stopError}
+        </div>
+      )}
 
       {runs == null ? (
         <p style={{ color: "var(--text-dim)" }}>Loading...</p>
@@ -64,6 +84,7 @@ export default function OpenRunsPage({ onClose }: Props) {
                 <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   Step {r.current_step} / {r.total_steps}
                 </span>
+                <button onClick={() => onReopen(r)}>Open</button>
                 <button onClick={() => handleStop(r.id)} disabled={stoppingId === r.id}>
                   {stoppingId === r.id ? "Stopping..." : "Stop"}
                 </button>

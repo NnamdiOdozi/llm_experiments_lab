@@ -35,6 +35,20 @@ async def get_messages(experiment_id: int):
     return await db.get_chat_messages(experiment_id)
 
 
+@router.delete("/{experiment_id}/messages")
+async def clear_messages(experiment_id: int):
+    """Clears all chat history for an experiment — lets the user reset a
+    stuck/confused Lab Assistant conversation without starting a new
+    experiment (which would also lose all its runs). Direct user request,
+    2026-07-14. See docs/DESIGN_DECISIONS.md."""
+    exp = await db.get_experiment(experiment_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+    deleted = await db.clear_chat_messages(experiment_id)
+    chatbot_log.info("Chat history cleared: experiment_id=%d deleted=%d", experiment_id, deleted)
+    return {"experiment_id": experiment_id, "deleted": deleted}
+
+
 @router.patch("/messages/{message_id}/feedback")
 async def set_feedback(message_id: int, req: FeedbackRequest):
     updated = await db.set_chat_message_feedback(message_id, req.feedback)

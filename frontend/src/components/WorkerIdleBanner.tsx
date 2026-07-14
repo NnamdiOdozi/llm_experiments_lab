@@ -17,10 +17,20 @@ export default function WorkerIdleBanner({ device }: Props) {
   const [status, setStatus] = useState<WorkerStatus | null>(null);
   const [stoppedDismissed, setStoppedDismissed] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Only show "stopped due to inactivity" if we actually watched it happen
+  // (saw the worker ready, then later stopped) during this page load — not
+  // on a cold/first load of the day, where the worker is already stopped
+  // before we ever polled it and the message reads as a stale alarm rather
+  // than the "you went idle" heads-up it's meant to be. Direct user
+  // report, 2026-07-14: "I've been the one who's done stuff... it's the
+  // first time this morning." See docs/DESIGN_DECISIONS.md.
+  const sawReadyRef = useRef(false);
 
   async function poll() {
     try {
-      setStatus(await getWorkerStatus(device));
+      const s = await getWorkerStatus(device);
+      if (s.worker_status === "ready") sawReadyRef.current = true;
+      setStatus(s);
     } catch {
       // Idle-status polling is best-effort — a transient failure just skips this tick
     }
@@ -28,6 +38,7 @@ export default function WorkerIdleBanner({ device }: Props) {
 
   useEffect(() => {
     setStoppedDismissed(false);
+    sawReadyRef.current = false;
     poll();
     pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
@@ -44,7 +55,7 @@ export default function WorkerIdleBanner({ device }: Props) {
   if (!status || status.worker_status === "none") return null;
 
   if (status.worker_status === "stopped") {
-    if (stoppedDismissed) return null;
+    if (stoppedDismissed || !sawReadyRef.current) return null;
     return (
       <div style={{
         background: "var(--text-dim)", color: "#1a1a1a", padding: "8px 16px",

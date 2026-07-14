@@ -216,7 +216,18 @@ def _force_stop_worker(run_id: int, process: subprocess.Popen):
     process.wait(timeout=5)
 
 
-def stop_run(run_id: int) -> bool:
+def stop_run(run_id: int, db_status: str | None = None) -> bool:
+    """db_status: the run's status per the DB row (caller already has it
+    from stop_training's own db.get_training_run call) — used as a
+    fallback when the on-disk status.json is missing or doesn't say
+    PAUSED. Real bug found 2026-07-14: two legacy run directories
+    (26, 27; predating status.json tracking, only had checkpoint.pt/
+    metrics.jsonl/run_meta.json) had no status.json at all, so
+    artifacts.read_status() returned None and this always fell through to
+    "Run not found" — the DB itself said paused (what the user actually
+    sees in Open Runs), but that was never consulted. See
+    docs/DESIGN_DECISIONS.md.
+    """
     run = active_runs.get(run_id)
     if run is not None:
         # Live process — signal via flag, then escalate in background
@@ -236,6 +247,12 @@ def stop_run(run_id: int) -> bool:
         artifacts.write_status(run_id, status)
         sync_update_training_run(run_id, status=RunStatus.CANCELLED)
         training_log.info("CANCELLED paused run_id=%d (no live process)", run_id)
+        return True
+
+    if status is None and db_status == RunStatus.PAUSED:
+        artifacts.write_status(run_id, {"status": RunStatus.CANCELLED})
+        sync_update_training_run(run_id, status=RunStatus.CANCELLED)
+        training_log.info("CANCELLED paused run_id=%d (no live process, no status.json — DB said paused)", run_id)
         return True
 
     return False
@@ -365,6 +382,7 @@ def get_run_status(run_id: int) -> dict | None:
             "template": run.template_key,
             "elapsed_seconds": 0,
             "execution_backend": "local",
+            "device": run.device,
         }
 
     return None

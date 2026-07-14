@@ -5,7 +5,7 @@ import ExperimentBrowser from "./components/ExperimentBrowser";
 import HardwareSpecs from "./components/HardwareSpecs";
 import ConfigPanel from "./components/ConfigPanel";
 import ArchSchematic from "./components/ArchSchematic";
-import Inspector from "./components/Inspector";
+import Inspector, { SubTab } from "./components/Inspector";
 import CodeView from "./components/CodeView";
 import LossChart from "./components/LossChart";
 import DropRateChart from "./components/DropRateChart";
@@ -28,6 +28,7 @@ import {
   fetchExperiment,
   fetchPresets,
   peekDiagnostic,
+  OpenRun,
 } from "./hooks/useApi";
 
 const SESSION_KEY = "llm_lab_session";
@@ -54,6 +55,36 @@ function loadSession(): { experimentId: number; runId: number | null; config: Ex
 // by double-clicking a vector, see DataTab below. Widened to string so
 // dynamic ids type-check without enumerating every possible id.
 type RightPaneTab = string;
+
+// Icon button, not spelled-out text — direct user request, 2026-07-15
+// ("I think it looks better"). Same copy/checkmark glyph pair used in
+// ChatPanel.tsx and Inspector.tsx's CopyIconButton, reused here for icon
+// consistency across the app. See docs/DESIGN_DECISIONS.md.
+function CopyIconButton({ getText, title }: { getText: () => string; title: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(getText());
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+      title={title}
+      style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", padding: 0, lineHeight: 0 }}
+    >
+      {copied ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 const positionTableCellStyle: CSSProperties = {
   border: "1px solid var(--border)",
@@ -89,11 +120,18 @@ export default function App() {
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
   const [showOpenRuns, setShowOpenRuns] = useState(false);
+  const [showExperiments, setShowExperiments] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
   const [lastPollSuccess, setLastPollSuccess] = useState<number | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
+  // Backend rejects max_new_tokens > block_size (see
+  // backend/api/experiments.py::update_config) — surfaced here since the
+  // debounced PATCH in handleConfigChange previously failed silently
+  // (fire-and-forget, no .catch at all). Direct user request, 2026-07-15.
+  // See docs/DESIGN_DECISIONS.md.
+  const [configError, setConfigError] = useState<string | null>(null);
 
   // Inspector/diagnostic state
   const [rightPaneTab, setRightPaneTab] = useState<RightPaneTab>("assistant");
@@ -125,12 +163,25 @@ export default function App() {
   // already says which block you mean. See docs/DESIGN_DECISIONS.md.
   const [attentionHead, setAttentionHead] = useState<number | null>(null);
   const [showQKVDetail, setShowQKVDetail] = useState(false);
+  // Lifted here (not local to Inspector) for the same reason as the state
+  // above — Inspector unmounts whenever a data tab is open, which would
+  // otherwise reset the sub-tab back on close. Direct user report,
+  // 2026-07-15. Defaults to "runtime" (not "overview") — direct user
+  // request, 2026-07-15: "that's where people are most likely to want to
+  // go" when they click a node. See docs/DESIGN_DECISIONS.md.
+  const [inspectorActiveTab, setInspectorActiveTab] = useState<SubTab>("runtime");
   // Shifts the attention heatmap/qkv_detail window earlier in the sequence
   // — 0 (default) shows the most recent DIAGNOSTIC_POSITION_WINDOW
   // positions. Real user report, 2026-07-13: the heatmap "gets very busy
   // very quickly" as a session grows, since it previously rendered the
   // *entire* T x T matrix with no cap at all. See docs/DESIGN_DECISIONS.md.
   const [attentionWindowOffset, setAttentionWindowOffset] = useState(0);
+  // Same idea as attentionWindowOffset, but for every OTHER node's
+  // position_vectors/input_position_vectors (LayerNorm, MLP, embedding,
+  // final_norm) — direct user request, 2026-07-15: "a stepper that allows
+  // that window to slide backwards in time" for these too, not just
+  // attention. See docs/DESIGN_DECISIONS.md.
+  const [nodeWindowOffset, setNodeWindowOffset] = useState(0);
   const attentionBlockMatch = selectedNodeId?.match(/^block\.(\d+)\.attention$/);
   const attentionBlock = attentionBlockMatch ? parseInt(attentionBlockMatch[1], 10) : null;
   // Set/cleared by PausePrompt as its diagnostic session starts/ends — used
@@ -155,15 +206,17 @@ export default function App() {
     setAttentionHead(null);
     setShowQKVDetail(false);
     setAttentionWindowOffset(0);
+    setNodeWindowOffset(0);
     setDiagnosticSessionId(null);
     setDiagnosticSnapshot(null);
   }, [runId]);
 
-  // Reset the window back to "most recent" whenever a different attention
-  // node is selected — a stale offset from a previously-viewed block/head
-  // would otherwise silently carry over and show the wrong slice.
+  // Reset the window back to "most recent" whenever a different node is
+  // selected — a stale offset from a previously-viewed node would
+  // otherwise silently carry over and show the wrong slice.
   useEffect(() => {
     setAttentionWindowOffset(0);
+    setNodeWindowOffset(0);
   }, [selectedNodeId]);
 
   // Real bug report, 2026-07-14: changing Head (or clicking a different
@@ -196,6 +249,32 @@ export default function App() {
     return () => { cancelled = true; };
   }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset]);
 
+  // Same idea as the attention peek effect above, for every OTHER node's
+  // position_vectors window (LayerNorm, MLP, embedding, final_norm) —
+  // stepping nodeWindowOffset refreshes immediately without requiring a
+  // fresh > click, matching the attention stepper's existing UX. Excludes
+  // attention nodes (handled by the effect above, which passes its own
+  // window offset) and lm_head (no windowed position_vectors there).
+  useEffect(() => {
+    if (diagnosticSessionId == null || runId == null) return;
+    if (selectedNodeId == null || selectedNodeId === "lm_head" || selectedNodeId.includes(".attention")) return;
+    let cancelled = false;
+    setDiagnosticLoading(true);
+    peekDiagnostic(runId, diagnosticSessionId, {
+      node_window_offset: nodeWindowOffset,
+    })
+      .then((snapshot) => {
+        if (!cancelled) setDiagnosticSnapshot(snapshot);
+      })
+      .catch((err) => {
+        console.error("Peek diagnostic failed:", err);
+      })
+      .finally(() => {
+        if (!cancelled) setDiagnosticLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [diagnosticSessionId, runId, selectedNodeId, nodeWindowOffset]);
+
   const failCountRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const configTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -206,10 +285,17 @@ export default function App() {
 
   function handleConfigChange(cfg: ExperimentConfig) {
     setConfig(cfg);
+    setConfigError(null);
     if (configTimerRef.current) clearTimeout(configTimerRef.current);
     if (experimentId != null) {
       configTimerRef.current = setTimeout(() => {
-        updateConfig(experimentId, cfg);
+        updateConfig(experimentId, cfg).catch((err) => {
+          // Previously fire-and-forget — a rejected PATCH (e.g.
+          // max_new_tokens > block_size) failed completely silently, the
+          // invalid value stayed shown as if it had saved. See
+          // docs/DESIGN_DECISIONS.md.
+          setConfigError(err instanceof Error ? err.message : String(err));
+        });
       }, 500);
     }
   }
@@ -240,11 +326,33 @@ export default function App() {
     saveSession(expId, null, cfg);
   }
 
+  // Reopening a specific run (paused/running) from Open Runs — previously
+  // that page could only Stop a run, with no way back into it at all.
+  // Direct user report, 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  async function handleReopenRun(run: OpenRun) {
+    const exp = await fetchExperiment(run.experiment_id);
+    setExperimentId(run.experiment_id);
+    setConfig(exp.config);
+    setRunId(run.id);
+    setRunStatus(null);
+    setMetrics([]);
+    setDevice(run.device);
+    setBackend(run.execution_backend);
+    saveSession(run.experiment_id, run.id, exp.config);
+    setShowOpenRuns(false);
+  }
+
   const pollStatus = useCallback(async () => {
     if (runId == null) return;
     try {
       const status = await fetchRunStatus(runId);
       setRunStatus(status);
+      // Real bug, 2026-07-15: device defaulted to hardcoded "cpu" and was
+      // never re-synced from the server, so HardwareSpecs showed CPU-only
+      // specs after a reload even when the actual connected run was GPU.
+      // Same bug class as the earlier config-staleness fix. See
+      // docs/DESIGN_DECISIONS.md.
+      if (status.device) setDevice(status.device);
       const m = await fetchMetrics(runId);
       setMetrics(m);
       failCountRef.current = 0;
@@ -274,6 +382,20 @@ export default function App() {
   // Diff-from-baseline: every experiment is created from a preset
   // (PresetPicker is the only creation path), so preset_key is always set.
   // Look it up to show the original values as shadow text in ConfigPanel.
+  //
+  // This is also the only place `config` ever gets refreshed from the
+  // server after initial load. Real bug found via a full API trace,
+  // 2026-07-14: `config` state is seeded once from sessionStorage (which
+  // survives a hard refresh — only cleared by closing the tab), and this
+  // effect used to fetch the live experiment only to compute the baseline,
+  // throwing away `exp.config` instead of using it to correct a stale
+  // cached copy. Confirmed live: max_new_tokens stayed frozen at a stale
+  // value (50) across a hard refresh AND a backend restart, while the
+  // Config panel showed the real, current server value (100) the whole
+  // time — because ConfigPanel computes its own display default
+  // separately and was never the actual source of truth being sent on >>.
+  // Now every experiment load re-syncs config to the server's real value.
+  // See docs/DESIGN_DECISIONS.md.
   useEffect(() => {
     if (experimentId == null) {
       setBaselineConfig(null);
@@ -283,6 +405,7 @@ export default function App() {
     (async () => {
       const [exp, presets] = await Promise.all([fetchExperiment(experimentId), fetchPresets()]);
       if (cancelled) return;
+      setConfig(exp.config);
       const preset = presets.find((p) => p.key === exp.preset_key);
       setBaselineConfig(
         preset ? { template: preset.template, model: preset.model, training: preset.training, inference: preset.inference } : null,
@@ -353,25 +476,47 @@ export default function App() {
   }
 
   if (showOpenRuns) {
-    return <OpenRunsPage onClose={() => setShowOpenRuns(false)} />;
+    return <OpenRunsPage onClose={() => setShowOpenRuns(false)} onReopen={handleReopenRun} />;
   }
 
-  // No experiment selected: show preset picker
+  if (showExperiments) {
+    return (
+      <div style={{ maxWidth: 700, margin: "40px auto", padding: "0 20px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h1 style={{ fontSize: 20 }}>Existing Experiments</h1>
+          <button onClick={() => setShowExperiments(false)}>← Back</button>
+        </div>
+        <ExperimentBrowser
+          onSelect={(expId, cfg) => { handleLoadExperiment(expId, cfg); setShowExperiments(false); }}
+        />
+      </div>
+    );
+  }
+
+  // No experiment selected: show preset picker. Bumped from 700 to 900 to
+  // give the ~50% bigger preset grid (see PresetPicker.tsx) room to
+  // breathe. HardwareSpecs (unlabeled "Serverless CPU/GPU: ... (live)"
+  // line) removed from here — it read as a live-status indicator but
+  // wasn't one (both entries always showed "live" together regardless of
+  // which worker, if any, was actually running), so it was just confusing
+  // rather than informative. Direct user reports, 2026-07-15. See
+  // docs/DESIGN_DECISIONS.md. Existing-experiments browsing moved behind
+  // its own page (matching the existing Open Runs pattern) instead of
+  // always-inline, to keep this landing view uncluttered.
   if (!experimentId || !config) {
     return (
-      <div style={{ maxWidth: 700, margin: "60px auto", padding: "0 20px" }}>
+      <div style={{ maxWidth: 900, margin: "60px auto", padding: "0 20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <h1 style={{ fontSize: 24 }}>LLM Experiments Lab</h1>
-          <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowExperiments(true)}>Existing Experiments</button>
+            <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
+          </div>
         </div>
-        <p style={{ color: "var(--text-dim)", marginBottom: 8, fontSize: 14 }}>
+        <p style={{ color: "var(--text-dim)", marginBottom: 20, fontSize: 14 }}>
           Pick a preset to create an experiment. Tweak the config, train, and watch loss curves.
         </p>
-        <div style={{ marginBottom: 24 }}>
-          <HardwareSpecs />
-        </div>
         <PresetPicker onSelect={handlePresetSelect} />
-        <ExperimentBrowser onSelect={handleLoadExperiment} />
       </div>
     );
   }
@@ -461,6 +606,7 @@ export default function App() {
             onChange={handleConfigChange}
             disabled={runStatus?.status === "running"}
             baseline={baselineConfig}
+            error={configError}
           />
           <TrainingControls
             runId={runId}
@@ -513,12 +659,15 @@ export default function App() {
               attentionHead={attentionHead}
               showQKVDetail={showQKVDetail}
               attentionWindowOffset={attentionWindowOffset}
+              nodeWindowOffset={nodeWindowOffset}
               // Same config.inference.max_new_tokens the ConfigPanel already
               // shows and Generate already uses (server-side, via
               // prompt_paused_model's inference_cfg.get(...)) — >> was
               // hardcoding 50 regardless of this value. See
               // docs/DESIGN_DECISIONS.md.
               maxNewTokens={typeof config?.inference?.max_new_tokens === "number" ? config.inference.max_new_tokens : 50}
+              temperature={typeof config?.inference?.temperature === "number" ? config.inference.temperature : 0.8}
+              decodingMode={typeof config?.inference?.decoding_mode === "string" ? config.inference.decoding_mode : "sample"}
               onDiagnosticSnapshot={(snapshot) => {
                 setDiagnosticSnapshot(snapshot);
                 setDiagnosticLoading(false);
@@ -615,8 +764,12 @@ export default function App() {
                 onShowQKVDetailChange={setShowQKVDetail}
                 attentionWindowOffset={attentionWindowOffset}
                 onAttentionWindowOffsetChange={setAttentionWindowOffset}
+                nodeWindowOffset={nodeWindowOffset}
+                onNodeWindowOffsetChange={setNodeWindowOffset}
                 numHeads={typeof config?.model?.n_head === "number" ? config.model.n_head : null}
                 onOpenDataTab={openDataTab}
+                activeTab={inspectorActiveTab}
+                onActiveTabChange={setInspectorActiveTab}
               />
             )}
             {/* {rightPaneTab === "events" && (
@@ -629,7 +782,15 @@ export default function App() {
               <div key={t.id} className="panel">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <h3 style={{ margin: 0 }}>{t.title}</h3>
-                  <button onClick={() => closeDataTab(t.id)}>Close</button>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {/* Full-precision values (t.content itself, not the
+                        .toFixed(6) truncated display below) — one per line,
+                        matching this tab's single-column layout, pastes as
+                        a single spreadsheet column. Direct user request,
+                        2026-07-15. See docs/DESIGN_DECISIONS.md. */}
+                    <CopyIconButton getText={() => t.content.join("\n")} title="Copy full vector" />
+                    <button onClick={() => closeDataTab(t.id)}>Close</button>
+                  </div>
                 </div>
                 {/* Single-column dataframe/series style — index running down
                     the left, one value per row — not a flat bracketed

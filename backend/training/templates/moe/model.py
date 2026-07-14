@@ -228,16 +228,20 @@ class TinyMoeLM(nn.Module):
         """
         from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
 
-        def _position_vectors(tensor: torch.Tensor) -> Optional[dict]:
-            """Raw per-position vectors, last DIAGNOSTIC_POSITION_WINDOW
-            positions — any 3D [B, T, *] tensor. See docs/DESIGN_DECISIONS.md."""
+        def _position_vectors(tensor: torch.Tensor, offset: int = 0) -> Optional[dict]:
+            """Raw per-position vectors, DIAGNOSTIC_POSITION_WINDOW positions
+            wide — any 3D [B, T, *] tensor. `offset` shifts the window
+            earlier — same semantics as attention's window_offset (0 =
+            most recent, positive N = shift back N). Direct user request,
+            2026-07-15. See docs/DESIGN_DECISIONS.md."""
             if tensor.dim() != 3:
                 return None
             with torch.no_grad():
                 T = tensor.shape[1]
                 window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-                start = T - window
-                return {"positions": list(range(start, T)), "vectors": tensor[0, start:T, :].tolist()}
+                end = max(window, T - max(offset, 0))
+                start = end - window
+                return {"positions": list(range(start, end)), "vectors": tensor[0, start:end, :].tolist()}
 
         def make_hook(node_id: str):
             def hook(module, input_tuple, output):
@@ -246,21 +250,22 @@ class TinyMoeLM(nn.Module):
                 if session is None:
                     return
 
+                offset = session.node_window_offset
                 input_tensor = input_tuple[0] if input_tuple else None
                 input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
                 input_position_vectors = (
-                    _position_vectors(input_tensor) if isinstance(input_tensor, torch.Tensor) else None
+                    _position_vectors(input_tensor, offset) if isinstance(input_tensor, torch.Tensor) else None
                 )
                 # MoE block returns (x, drop_rate) tuple
                 if isinstance(output, tuple) and len(output) > 0:
                     x = output[0]
                     output_shape = list(x.shape) if isinstance(x, torch.Tensor) else []
                     summary = _compute_summary(x) if isinstance(x, torch.Tensor) else {}
-                    position_vectors = _position_vectors(x) if isinstance(x, torch.Tensor) else None
+                    position_vectors = _position_vectors(x, offset) if isinstance(x, torch.Tensor) else None
                 elif isinstance(output, torch.Tensor):
                     output_shape = list(output.shape)
                     summary = _compute_summary(output)
-                    position_vectors = _position_vectors(output)
+                    position_vectors = _position_vectors(output, offset)
                 else:
                     output_shape = []
                     summary = {}

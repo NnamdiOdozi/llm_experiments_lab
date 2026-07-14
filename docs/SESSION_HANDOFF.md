@@ -43,9 +43,9 @@ lab-assistant chatbot (Nebius Token Factory) grounded in the user's live experim
 
 **Nebius CLI:**
 - `scripts/install_nebius_cli.sh` — installer, non-interactive service-account auth
-- Active profile: `mlflow-sa`, default project: `project-your-project-id-here`
+- Active profile: `mlflow-sa`, default project: `project-<redacted>`
   (default-project-eu-north1). `llm_experiments_lab` project also exists:
-  `project-your-project-id-here` (not switched to — user chose to keep default).
+  `project-<redacted>` (not switched to — user chose to keep default).
 - `~/.bashrc` has `export PATH="$HOME/.nebius/bin:$PATH"` (line ~240)
 
 ## 4. Commands

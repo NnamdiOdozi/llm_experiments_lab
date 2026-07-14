@@ -17,11 +17,25 @@ const iconButtonStyle: CSSProperties = {
 };
 
 export default function ChatPanel({ experimentId }: Props) {
-  const { messages, sendMessage, loading, error, unavailable } = useChatStream(experimentId);
+  const { messages, sendMessage, loading, error, unavailable, clearMessages } = useChatStream(experimentId);
   const [input, setInput] = useState("");
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [feedbackOverrides, setFeedbackOverrides] = useState<Record<number, "up" | "down" | null>>({});
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Two-click confirm (not a native confirm() dialog, to match the rest of
+  // this app's UI) — resets a stuck/confused conversation without
+  // touching the experiment or any of its runs. Direct user request,
+  // 2026-07-14. See docs/DESIGN_DECISIONS.md.
+  async function handleClearChat() {
+    if (!confirmingClear) {
+      setConfirmingClear(true);
+      return;
+    }
+    setConfirmingClear(false);
+    await clearMessages();
+  }
 
   useEffect(() => {
     if (bottomRef.current?.scrollIntoView) {
@@ -68,7 +82,27 @@ export default function ChatPanel({ experimentId }: Props) {
 
   return (
     <div className="panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <h3>Lab Assistant</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <h3 style={{ margin: 0 }}>Lab Assistant</h3>
+        {messages.length > 0 && (
+          <button
+            onClick={handleClearChat}
+            onBlur={() => setConfirmingClear(false)}
+            title="Delete this conversation's history — the experiment and its runs are untouched"
+            style={{
+              fontSize: 11,
+              padding: "4px 8px",
+              background: confirmingClear ? "var(--red)" : "none",
+              color: confirmingClear ? "#fff" : "var(--text-dim)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              cursor: "pointer",
+            }}
+          >
+            {confirmingClear ? "Click to confirm" : "Clear chat"}
+          </button>
+        )}
+      </div>
       <div
         style={{
           flex: 1,

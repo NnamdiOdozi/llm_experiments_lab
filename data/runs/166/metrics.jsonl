@@ -1,0 +1,4 @@
+{"step": 10, "train_loss": 3.29, "val_loss": 3.3113, "learning_rate": 0.0003, "elapsed_seconds": 31.5, "param_count": 2271425, "timestamp": "2026-07-14T09:07:20.426293", "cpu_percent": 87.6, "ram_used_mb": 5399.6, "ram_total_mb": 15710.4}
+{"step": 20, "train_loss": 2.9874, "val_loss": 3.013, "learning_rate": 0.0003, "elapsed_seconds": 59.5, "param_count": 2271425, "timestamp": "2026-07-14T09:07:48.395406", "cpu_percent": 93.5, "ram_used_mb": 5432.7, "ram_total_mb": 15710.4}
+{"step": 30, "train_loss": 2.8255, "val_loss": 2.8272, "learning_rate": 0.0003, "elapsed_seconds": 89.6, "param_count": 2271425, "timestamp": "2026-07-14T09:08:18.564113", "cpu_percent": 93.1, "ram_used_mb": 5476.6, "ram_total_mb": 15710.4}
+{"step": 40, "train_loss": 2.7123, "val_loss": 2.7254, "learning_rate": 0.0003, "elapsed_seconds": 123.3, "param_count": 2271425, "timestamp": "2026-07-14T09:08:52.271561", "cpu_percent": 92.5, "ram_used_mb": 5370.3, "ram_total_mb": 15710.4}

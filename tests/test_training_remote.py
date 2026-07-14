@@ -385,6 +385,33 @@ async def test_get_status_translates_remote_run_id_back_to_local(temp_db, client
     assert body["execution_backend"] == "nebius_endpoint"
 
 
+async def test_get_status_backfills_device_from_local_row_when_proxy_omits_it(temp_db, client, monkeypatch):
+    """Real incident, 2026-07-15: "device" was added to status.json responses,
+    but a remote run's proxied response comes from the trainer container's
+    OWN status.json — which won't have the field until that image is
+    rebuilt and redeployed. Without a backfill, the frontend's hardware-info
+    display would silently show nothing (or the wrong default) for every
+    existing remote run until a rebuild happened. See
+    docs/DESIGN_DECISIONS.md."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-gpu", "cuda", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-gpu", endpoint_url="https://cuda.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([
+        # Old trainer image — no "device" key in its own status.json yet.
+        FakeResponse({"run_id": 7, "status": "running", "current_step": 5, "total_steps": 100}),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get(f"/api/training/{run_id}/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["device"] == "cuda"
+
+
 async def test_get_status_syncs_local_row_and_touches_worker_on_terminal_transition(temp_db, client, monkeypatch):
     """Regression test (2026-07-12): local status only ever advanced via
     explicit local pause/resume/prompt actions — a run that finishes

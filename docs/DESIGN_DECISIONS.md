@@ -2137,6 +2137,1058 @@ Tests: `test_get_embedding_table_includes_position_table_when_learned`,
 backend change this session. The `vocab_size` read-only change and the
 Runtime tab restructuring are frontend-only.
 
+## §46: Full front-to-back trace of Generate/>/>>, config staleness bug, Generate removed entirely
+
+2026-07-14. User reported three tangled symptoms — >> stopping around 50
+tokens instead of 100, Inspector showing stale/mismatched positions, and a
+confusing double-line "Output so far" box — and asked for a slow, careful
+trace rather than another guess. Did exactly that: direct API calls
+against the live backend (bypassing the browser entirely, using
+`urllib.request` against `localhost:8000`) to isolate backend behavior
+from frontend/browser behavior, plus reading `diagnostic_sessions` DB rows
+and the session log as ground truth for what actually happened in the
+user's own browser.
+
+**Root cause of the >> token-count bug: `config` never re-syncs from the
+server after page load.** `App.tsx` seeds `config` state once from
+`sessionStorage` (`saved.current?.config`), which survives a hard refresh
+— only clearing when the tab closes. An existing `useEffect` already
+fetched the live experiment on load, but only to compute the ConfigPanel
+baseline-diff display; it threw away `exp.config` instead of using it to
+correct a stale cached copy. Traced the *exact* request the user's browser
+sent (`diagnostic_sessions` row, timestamp cross-checked against the
+UTC/BST offset to confirm it was really their click): `max_new_tokens: 50`
+— sent even after a hard refresh and a backend restart, while the
+Config panel visibly showed 100 and the server's saved config genuinely
+was 100. ConfigPanel computes its own display value locally
+(`normalizedConfig` merges in `INFERENCE_DEFAULTS` for display purposes)
+— that's what showed 100 — but the actual `config` state feeding `>>`'s
+request body was a frozen, older copy. Fixed: the same experiment-load
+effect now calls `setConfig(exp.config)`, so every experiment load
+re-syncs to the server's real, current value rather than trusting
+whatever was cached.
+
+Also disproved two of my own earlier theories in the process, worth
+recording so they aren't re-investigated later: (1) "stale JS bundle from
+before a fix" — ruled out, since the bad value persisted through a
+confirmed-fresh hard refresh; (2) "browser abandoning the SSE stream
+early" — ruled out by direct API trace: a 100-token `>>` call, run
+directly against the backend, completed in ~24s with exactly 100 token
+events and zero drops. The suspicious "200 (200ms)" request-log lines for
+`/generate` calls turned out to be a red herring — `backend/main.py`'s
+logging middleware measures how fast the endpoint *returns a
+StreamingResponse object* (near-instant, since it just wraps a generator),
+not how long the stream takes to actually finish sending.
+
+**Generate button removed entirely — direct user decision, confirmed via
+AskUserQuestion.** Root design complaint: Generate hit a completely
+separate backend route (`/prompt` → `prompt_paused_model`) that never
+created a diagnostic session or captured any per-node data, so Inspector
+had structurally nothing to show after clicking it — not a bug to patch,
+a second, disconnected code path to remove. Now there are only `>` and
+`>>`, both driven through the same diagnostic-session machinery Inspector
+already reads from, so the "runtime doesn't match the prompt panel"
+complaint is gone by construction rather than patched over.
+
+- `>>` now auto-starts a session itself if none exists yet (confirmed via
+  AskUserQuestion) — new shared `ensureSession()` helper in
+  `PausePrompt.tsx`, used by both `>` and `>>`, replacing two copies of
+  near-identical start-or-continue logic. `startDiagnostic` only
+  tokenizes the prompt (no sampling happens there), so no redundant
+  extra step is needed before `>>` streams straight through.
+- `max_new_tokens` is now a single **total budget shared across `>` and
+  `>>`** within one session, not independently applied to each. Previously
+  `>>` always requested a fresh `maxNewTokens` on top of whatever `>` had
+  already generated — stepping twice then hitting `>>` would overshoot
+  past the configured cap. Now `>>` requests `maxNewTokens - diagnosticStep`
+  (the remaining budget), and both `>` and `>>` auto-close the session
+  once the total reaches `maxNewTokens` — direct user spec: "once we've
+  gone to the end, obviously you can't single-step again."
+- Session-close no longer resets the displayed step count to 0. Real bug
+  found while implementing this: the old `>>`-completion cleanup zeroed
+  `diagnosticStep` immediately, which is exactly what made the Inspector's
+  step counter look wrong/stale right after a completed generation — the
+  final reached count now stays visible until a new prompt's first real
+  step overwrites it.
+- Only one output line remains — direct user request ("don't try and keep
+  a history of previous prompts on the dashboard... there should only be
+  one output line"). The old unlabeled second `<pre>{output}</pre>` block
+  (Generate's own output, rendered with zero label directly under the
+  labeled step-through box — the literal cause of the "two lines, don't
+  know what either refers to" complaint) is gone along with Generate
+  itself.
+- Chatbot grounding preserved — confirmed via AskUserQuestion. The Lab
+  Assistant's "what have you tried" context
+  (`backend/chatbot/context.py::_get_prompt_history`) only ever read
+  `lab.prompt` log lines, which only `/prompt` wrote. `>>`'s completion in
+  `backend/api/training.py`'s `diagnostics_generate` now writes that same
+  log line, so removing Generate doesn't silently blind the chatbot to
+  future prompts.
+- `promptModel()` removed from `frontend/src/hooks/useApi.ts` (confirmed
+  unused anywhere else). The backend `/prompt` route and
+  `prompt_paused_model()` themselves were left in place — deleting a
+  working, self-contained, still-tested REST endpoint wasn't asked for and
+  is a larger, separately-riskier change than removing the frontend button.
+
+Tests: `test_generate_completion_logs_for_chatbot_grounding` (confirms the
+new log line's exact content). Backend suite: 176 passed (was 175, +1).
+Frontend: 38 passed, build clean.
+
+**Trainer-image note:** the chatbot-logging addition touches
+`backend/api/training.py` — same rebuild+repush requirement as every other
+backend change this session. Everything else in this batch (config
+staleness fix, PausePrompt redesign) is frontend-only.
+
+## §47: Attention pane permanently stuck on "click > to capture" after a session closes
+
+Direct fallout from §46, found immediately after: real bug report,
+2026-07-14 — selecting the Causal Self-Attention node in Inspector kept
+saying "click > to capture" even after stepping, prompting, pausing,
+stepping again.
+
+Root cause: `closeSession()` (added in §46) called
+`onSessionIdChange?.(null)` whenever a session ended — including `>>`'s
+now-automatic close on reaching `max_new_tokens`. App.tsx's
+`peekDiagnostic` effect (the thing that refreshes attention when a
+different node/head gets selected, *without* re-stepping) needs a live
+`diagnosticSessionId` to target; nulling it on every close meant that once
+`>>` finished (which, after §46, is most of the time — it always
+auto-closes), there was no session id left for peek to use. Selecting
+Causal Self-Attention *after* that point had no path to ever populate
+attention data — not intermittent, structurally impossible.
+
+Checked whether backend sessions expire and could safely be treated as
+gone once "closed": they don't — `backend/training/diagnostics.py`'s
+session registry (`_diagnostic_sessions`) is a plain dict with no
+cleanup/TTL logic anywhere in the file. A session stays fully queryable
+until the backend process itself restarts. So `closeSession()` no longer
+nulls the session id — only `setDiagnosticSession(null)` (unlocks the
+prompt box, PausePrompt's own local concept of "finished"). The peek
+effect keeps working against the last real session indefinitely, letting
+any node — including attention, with any head — be inspected retroactively
+after generation completes. Starting a genuinely new prompt still
+correctly overwrites the id via `ensureSession()`, so nothing stale can
+leak across separate prompts.
+
+Also removed the "No attention node selected — click a block's..." note
+from the Prompt Model panel entirely — direct user request: wrong
+location, duplicated Inspector's own contextual messaging, "I don't think
+it does anything."
+
+Frontend: 38 passed, build clean. Frontend-only change, no backend touched
+— no rebuild needed.
+
+## §48: "Worker stopped due to inactivity" banner firing on a cold morning load
+
+Direct user report, 2026-07-14: starting a fresh serverless GPU run first
+thing in the morning showed "This CUDA worker was stopped due to
+inactivity" alongside the (correct, wanted) cold-start banner. The user
+had actually stopped/deleted the endpoint manually via the Nebius console
+the night before — nothing about *this* session had gone idle.
+
+`WorkerIdleBanner.tsx` showed this message any time
+`status.worker_status === "stopped"`, regardless of whether the component
+had ever observed the worker in any other state. On a cold page load
+where the worker was already stopped before the very first poll, the
+banner fired anyway — technically not wrong (the DB row really did say
+"stopped", and confirmed via grep that `idle_monitor.py` is the only place
+in the backend that ever sets that status), but contextually backwards:
+from the user's side this was the first action of the day, not "you went
+idle mid-session." Direct user framing: fine when it's a session you were
+actually using and stepped away from; wrong when you're just starting
+fresh.
+
+Fix, kept intentionally small per direct instruction ("a few lines, not
+500"): a `sawReadyRef` flag, set the first time a poll observes
+`worker_status === "ready"`, reset on mount/device change. The "stopped"
+banner now only renders if this component actually witnessed the
+ready → stopped transition itself — not on a cold load where stopped was
+already the first thing polled. The warning countdown banner (unaffected)
+already covers the "heads up, about to go idle" in-session case.
+
+Tests: rewrote the old stopped-notice test to first mock a ready poll then
+a stopped poll (using fake timers to advance past `POLL_INTERVAL_MS` and
+trigger the real interval-driven poll, not just the initial mount poll),
+confirming the banner *does* still show for a genuine witnessed
+transition; added a new test confirming a cold load that only ever polls
+"stopped" shows nothing. Frontend: 39 passed (was 38, net +1). Frontend-only
+change, no backend touched — no rebuild needed.
+
+## §49: Investigated "Inspector doesn't snap after Step" — not reproducible in current source
+
+2026-07-14. User reported the Output box updates on `>` but Inspector
+doesn't reflect the new snapshot immediately, feeling like it needs a
+second click or a page refresh to catch up.
+
+Static reading of the relevant code (`PausePrompt.handleStepDiagnostic` →
+`onDiagnosticSnapshot` → `App.tsx`'s `setDiagnosticSnapshot` →
+`Inspector`'s `diagnosticSnapshot` prop) found no lag: all four state
+updates in `handleStepDiagnostic` (`setDiagnosticSnapshot`,
+`setDiagnosticStep`, `setGeneratedTokens`, `onDiagnosticSnapshot`) fire
+synchronously in the same tick after `stepDiagnostic` resolves — React 18
+batches them into one render, so Output and Inspector can't visibly
+diverge in timing.
+
+To verify rather than just trust that reading, wrote a real integration
+test suite (`frontend/src/test/pause-prompt-inspector-integration.test.tsx`)
+wiring `PausePrompt` and `Inspector` together exactly the way `App.tsx`
+does (same shared `diagnosticSnapshot` state, same
+`onDiagnosticSnapshot` callback), with only the network layer mocked —
+this is the one gap unit tests of either component alone can't catch,
+since a wiring bug only exists where the two meet. Four scenarios, all
+passing on the first try against current source: a generic node
+(embedding) after one Step click, Runtime already open before clicking
+Step, a second consecutive Step showing the second snapshot's data (not a
+lagging first one), and an attention node's heatmap after one Step click
+(tested separately given how much recent churn that area's had). None
+reproduce the reported lag.
+
+Conclusion: not a bug in the current source, as far as this could be
+verified without a live browser. Given how extensively
+`PausePrompt.tsx` has been rewritten this session (§46's Generate removal,
+§47's closeSession fix), the most likely explanation is the same class of
+issue hit repeatedly this session — a browser tab running a stale
+Vite-HMR-patched instance of a heavily-changed component. Recommended a
+hard refresh (or fresh tab) before assuming a live code bug; if it
+persists after a genuinely fresh load, that's the next real signal to
+chase, ideally with the exact repro sequence (which node selected, first
+step vs. later step, etc.).
+
+Frontend: 43 passed (was 39, +4 new integration tests). Build clean.
+Frontend-only investigation, no source changes made — nothing to
+rebuild.
+
+## §50: Real deadlock — >/>> permanently frozen after a mixed >-then->> session hit the cap
+
+2026-07-14, found immediately after §49's investigation (unrelated to
+it) — direct user report: single-stepped a few times, then hit `>>` to
+finish the rest of `max_new_tokens`. After that, typing a brand new
+prompt did nothing — `>` and `>>` stayed disabled, no "Finish" button
+either, no way forward short of a reload.
+
+Root cause: `atCap = diagnosticStep >= maxNewTokens` (§46), used to
+disable both buttons once the shared budget is reached.
+`diagnosticStep` is deliberately left at its final value once a session
+closes (§46's fix for the Inspector-step-counter-looking-stale bug) — the
+*only* code path that ever resets it back to 0 is `ensureSession()`,
+called from inside the very `>`/`>>` handlers `atCap` disables. Once a
+session finished exactly at the cap, there was no way to ever call
+`ensureSession()` again — a genuine deadlock, not just a stale display.
+Fixed: `atCap` now also requires `diagnosticSession !== null` — once
+`closeSession()` runs, `atCap` clears immediately regardless of what
+`diagnosticStep` still says, unfreezing both buttons for the next prompt.
+
+Verified as a real regression, not a guess: wrote
+`frontend/src/components/PausePrompt.test.tsx` reproducing the exact
+sequence (single-step once, `>>` to finish, type a new prompt, assert
+both buttons are enabled) — confirmed it **fails** against the pre-fix
+code (buttons genuinely `disabled`), then confirmed it passes with the
+fix applied.
+
+Tests: 1 new (`PausePrompt.test.tsx`). Frontend: 44 passed (was 43, +1).
+Build clean. Frontend-only, no backend touched — no rebuild needed.
+
+## §51: Paused runs permanently un-stoppable — three real bugs, all found with DB/disk evidence
+
+2026-07-14. Direct user report: four paused runs in Open Runs, none
+stoppable from the browser — 400s on some, a 502 on another. Traced each
+with direct DB/filesystem inspection rather than guessing (established
+pattern this session), found three distinct real bugs.
+
+**1. Idle monitor spam / silent worker-status desync.** The terminal
+message the user pasted (`Idle monitor scan failed: ... code = NotFound`)
+comes from `idle_monitor.py` trying to stop a Nebius endpoint the user had
+already deleted manually via the console. That exception propagated past
+the DB update, so `worker_sessions.worker_status` stayed `READY` forever
+— the app kept believing a long-gone endpoint was still alive, which is
+exactly what let `stop_training()` try to proxy a stop call to it later.
+Fixed: `stop_idle_workers()` now catches `NebiusEndpointError`, and if the
+message says "NotFound" specifically, treats it as already-stopped and
+proceeds to update the DB anyway. Any other CLI failure (real
+network/auth issue) still re-raises — only the "it's already gone" case
+is swallowed.
+
+**2. Remote-run stop had no fallback when the proxy call fails.**
+`stop_training()`'s remote branch raised a bare `HTTPException(502, ...)`
+on any proxy failure and never touched the local DB — so a run whose
+endpoint no longer exists (bug 1's exact scenario) stayed "paused" in Open
+Runs forever, no way to clear it. Fixed: on proxy failure, mark the run
+`CANCELLED` locally regardless — the remote process, if it's even still
+there, is unreachable either way. Direct user request: "I should be able
+to stop any of these things to kind of flush them."
+
+**3. Local `stop_run()` required a status.json that two of the actual
+stuck runs (26, 27) didn't have.** Checked their run directories directly:
+`checkpoint.pt`, `metrics.jsonl`, `run_meta.json` all present, dated
+2026-06-28 — but no `status.json` at all (legacy runs predating that
+file's introduction). `artifacts.read_status()` returned `None` for them,
+so the "process already exited, cancel it" fallback branch (which checks
+`status.get("status") == PAUSED`) never matched, always falling through to
+"Run not found" (400) — even though the DB itself said `paused`, which is
+what the user actually sees in Open Runs. Fixed: `stop_run()` now accepts
+the caller's already-fetched DB status as a fallback (`stop_training()`
+already has `db_run["status"]` from its own lookup) — if there's no
+status.json but the DB says paused, cancel anyway rather than requiring a
+file that may simply not exist for older runs.
+
+Also fixed the frontend silently swallowing stop failures entirely —
+`OpenRunsPage.tsx`'s `handleStop` had a `try/finally` with no `catch`, so
+any failure became an unhandled promise rejection visible only in the
+browser console, with the run just staying in the list with zero
+indication anything went wrong. Now shows a visible error banner.
+
+Tests: `test_stop_idle_workers_treats_already_deleted_endpoint_as_stopped`,
+`test_stop_idle_workers_still_raises_on_a_real_failure` (new
+`tests/test_idle_monitor.py` cases), and a new `tests/test_stop_run.py`
+with four cases covering the legacy-missing-status-file fallback (and its
+negative case — a genuinely non-paused run still 400s), the remote-proxy-
+failure fallback, and confirming the fallback doesn't mask a normally-
+working remote stop. Backend suite: 182 passed (was 176, +6). Frontend: 44
+passed (unchanged — no frontend logic changed, only added an error
+display). Build clean.
+
+**Trainer-image note:** none of these changes touch
+`backend/training/*` or the trainer image — `idle_monitor.py`,
+`backend/api/training.py`'s `/stop` route, and `runner.py`'s `stop_run()`
+all run in the main server process, not the trainer container. No
+rebuild needed. **A plain backend restart is required** for these fixes
+to take effect (uvicorn isn't running with `--reload`) — the runs the
+user was actually trying to stop (159, 27, 26) still 400/502'd against
+the old running process during this same investigation, confirming the
+fix wasn't live yet rather than being wrong.
+
+## §52: Chatbot's diagnostic-snapshot tool had no size cap — blew the model's context
+
+2026-07-14. Direct user report: second chatbot message ("comment on the
+lm_head and top_k logits... I just ran a hello prompt") errored with
+"error code: 400 — this model's maximum context length is 128000 tokens
+... your prompt contains at least 128001 input tokens." First message
+("how is it going") worked fine.
+
+Traced the whole chatbot request pipeline (`backend/chatbot/context.py`,
+`client.py`, `tools.py`) rather than guessing where the bloat came from.
+`get_diagnostic_snapshot()` in `tools.py` was the one tool with no output
+cap at all — every other tool in the file (`search_run_metrics`,
+`search_experiment_file`) enforces `MAX_OUTPUT_CHARS = 8192`; this one
+fetched the entire raw `DiagnosticSnapshot` and returned it to the model
+unfiltered. Every per-position field this session added to that
+schema — `position_vectors`/`input_position_vectors` on every node (up to
+`DIAGNOSTIC_POSITION_WINDOW`=12 positions × n_embd floats, per node, per
+input+output), `attention.qkv_detail`'s raw Q/K/V arrays — went straight
+into the tool result raw. A snapshot with ~18 nodes was easily enough to
+blow past 128k tokens on its own — none of those fields existed when this
+tool was originally built, and it was never revisited as they were added.
+
+Confirmed the trigger mechanism too: `client.py`'s `_LOOKUP_HINT_RE`
+keyword heuristic (gates the tool-calling preflight, since streaming +
+tools silently drops tool_calls on this model) matches "logit", "head",
+"top_k", "embedding", etc. — exactly the words in the user's second
+message, and *not* in the first ("how is it going"), which is why only
+the second message triggered a tool call and hit the bug.
+
+Also answered two related misconceptions surfaced by the same report:
+runtime/trainer data (tokens, vectors, attention) was never going through
+the safe grep-style tools — only `search_run_metrics`/
+`search_experiment_file` are search-capped; `get_diagnostic_snapshot` is a
+direct fetch, which was the actual bug. And the system prompt + README +
+architecture source code are *not* sent once at conversation start —
+`assemble_messages()` (`context.py`) rebuilds and resends all of that
+every single turn (normal for a stateless completions API with no prompt
+caching), stapled to a freshly-rebuilt volatile snapshot each time.
+
+Fix: new `_trim_diagnostic_snapshot()` strips `position_vectors`/
+`input_position_vectors` from every node and `qkv_detail` from attention
+before the tool result is built — keeps shapes, summary stats, top-k
+predictions, and attention weights (small, at most a 12x12 windowed
+grid), matching what the system prompt already describes this tool as
+providing. The tool's `note` field now tells the model to point the user
+at the Inspector's Runtime tab for exact raw vector values instead of
+inventing an explanation for their absence.
+
+Tests: `test_get_diagnostic_snapshot_strips_raw_vectors_to_avoid_context_blowup`.
+Backend suite: 183 passed (was 182, +1).
+
+**Trainer-image note:** `backend/chatbot/tools.py` runs in the main
+server process, not the trainer container — no rebuild needed. A plain
+backend restart is required for the fix to take effect.
+
+**Test prompt to verify the chatbot can see live trainer/runtime data**
+(direct user request): step through a prompt in the Inspector first (at
+least one `>` click, ideally with an attention node + head selected so
+`attention` data is populated too), then ask the Lab Assistant:
+
+> "Look at the current diagnostic snapshot — what's the output shape and
+> summary stats (mean/std) for the embedding node, and what are the top-3
+> next-token predictions from the LM head?"
+
+That phrasing hits multiple `_LOOKUP_HINT_RE` keywords ("shape", "node",
+"embedding", "top" via "top-3") to reliably trigger the tool-calling path,
+and asks for exactly what survives the trim (shapes, summary stats,
+top-k) — a good, cheap smoke test that both the tool fires and the fix
+didn't remove anything genuinely useful.
+
+## §53: "Clear chat" — reset a stuck Lab Assistant conversation without losing the experiment
+
+Direct user request, 2026-07-14: "what if I'm in one experiment with lots
+of runs and something's gone wrong with Lab Assistant and I need to reset
+that?" No clear/reset mechanism existed at all — the chatbot API only had
+`GET messages`, `POST message`, and the feedback PATCH.
+
+New `DELETE /api/chatbot/{experiment_id}/messages` route + `db.py`'s
+`clear_chat_messages()` — deletes only that experiment's `chat_messages`
+rows, leaving the experiment, its config, and every one of its runs
+completely untouched. Frontend: `useChatStream`'s `clearMessages()` calls
+it and resets local state to empty (raw `fetch`, matching the rest of
+that hook rather than the `api()` helper in `useApi.ts` — added a version
+there first, then removed it once unused, to avoid dead code). `ChatPanel`
+gained a "Clear chat" button in the header (only shown once there's
+actual history), requiring a second click ("Click to confirm") before it
+actually deletes anything — a real delete, so a one-click wipe felt too
+easy to trigger by accident.
+
+Separately investigated the same night: user reported saying "hello" to
+the Lab Assistant got no response after restarting both backend and
+frontend. Checked the live session log directly — zero request ever
+reached the backend, not even a failed attempt, and no code changes this
+session touched `ChatPanel.tsx`/`useChatStream.ts` at all. Matches the
+stale-browser-tab pattern hit repeatedly tonight: restarting the
+`npm run dev`/`uvicorn` *processes* doesn't refresh an already-open tab's
+loaded JS — recommended a hard refresh/new tab rather than guessing at a
+code bug that the evidence didn't support.
+
+Tests: `test_clear_messages_deletes_history_for_experiment`,
+`test_clear_messages_404_for_unknown_experiment` (backend); "shows no
+Clear chat button when there's no history yet", "Clear chat requires a
+second click to confirm before actually clearing" (frontend). Backend
+suite: 185 passed (was 183, +2). Frontend: 46 passed (was 44, +2). Build
+clean.
+
+**Trainer-image note:** `backend/api/chatbot.py` and `backend/db.py`
+changes only — chatbot never proxies to trainer containers (no reason
+to; it only needs the main server's own DB/logs). No rebuild needed, a
+plain backend restart is enough.
+
+## §54: Quoted LM Head tokens, "Output Summary Stats" label
+
+Two small clarity fixes, direct user requests, 2026-07-14.
+
+**LM Head bar chart now quotes the token character** (`"e"` instead of
+bare `e`). A space character rendered as visibly nothing before this —
+the row looked empty/broken rather than a real, meaningful top-k
+prediction, while punctuation like `,`/`.` was already easy to read since
+those characters aren't invisible.
+
+**Generic node Summary Stats relabeled to "Output Summary Stats."**
+Verified against the actual hook code first rather than assuming: every
+template's `register_diagnostic_hooks` computes
+`summary = _compute_summary(output)` — confirmed always the output
+tensor, never input. Previously just said "Summary Stats:" with no
+indication which tensor it described, requiring a guess.
+
+Frontend: 46 passed (unchanged — display-only text changes, nothing new
+to test). Build clean. Frontend-only, no backend touched — no rebuild
+needed.
+
+## §55: Chatbot fabricated a "logging inconsistency" for a remote run — `search_run_metrics` couldn't see remote data at all
+
+User asked the Lab Assistant for validation loss at step 500 on a
+completed run. It replied that no matching records existed for step 500
+and speculated this "may indicate a minor logging inconsistency,"
+citing nearby steps 490/530 instead.
+
+**Verified via direct DB query that this was false.** Run 167's
+`val_loss_history` column has all 100 entries, unbroken, including step
+500 exactly: `val_loss=2.0626`. There was no gap in the data anywhere
+near step 500 — the model invented the "inconsistency" narrative to
+explain an empty tool result it didn't understand.
+
+**Root cause:** `search_run_metrics` (the chatbot's exact-lookup tool)
+only ever read `data/runs/{run_id}/metrics.jsonl` — a file written by
+`train_worker.py` for **local** runs only. Run 167 is remote
+(`execution_backend='nebius_endpoint'`); `data/runs/167/` doesn't exist
+on disk at all. The tool's `_search_file` correctly reported "not
+found," but the query wrapper had no fallback and no way to signal
+"this run's data lives somewhere else" — so the model was handed an
+empty search with no explanation and filled the gap with a guess.
+Same class of bug as §52 (a tool silently degrading for remote runs
+instead of erroring loudly or falling back).
+
+**Fix:** confirmed both local (`train_worker.py::write_metric()`) and
+remote (`backend/api/training.py`'s `/metrics` route sync logic) paths
+write every metric row into `training_runs.train_loss_history` /
+`val_loss_history` (JSON columns) — this is a full-resolution, always
+populated, universal source for both execution backends, unlike the
+file which only exists locally. `search_run_metrics` now checks
+whether `metrics.jsonl` exists per run_id; if not, it falls back to a
+new `_search_remote_run_metrics()` that reads the two DB history
+columns, merges rows by `step`, and searches over the same JSON-line
+representation the file-based path already produces (`_search_file`
+and the new DB path both now share a `_search_lines()` core so the
+matching/truncation logic isn't duplicated). If a remote run somehow
+has no DB-synced history either, the tool now returns an explicit
+`"No synced metrics in the database for run {id}"` error instead of a
+silent empty result — so the model has something honest to relay
+instead of a blank slate to rationalize.
+
+This changed `search_run_metrics` from sync to async (DB access is
+async); `execute_tool_call`'s dispatch now `await`s it, matching the
+existing pattern already used for `get_diagnostic_snapshot`.
+
+Regression tests added: one reproduces the exact incident (remote run,
+no local file, DB has step 500 at `val_loss=2.0626`, query "500" must
+find it), one confirms the tool still reports a real error (not a
+silent empty result) when a remote run has no DB history at all
+either. Backend: 187 passed (was 185; +2 new tests, no regressions).
+Frontend untouched. Trainer-image rebuild **not needed** — this is a
+main-server-only chatbot-tool change; the chatbot itself never proxies
+to the trainer container.
+
+## §56: Five direct user reports — data-tab return location, MoE diagram honesty, hardware-info staleness, Open Runs missing a way back in, landing page decluttering
+
+**1. Closing a data tab always landed on Inspector's Overview sub-tab, not
+wherever the user actually was (almost always Runtime).** Root cause:
+Inspector's sub-tab (`activeTab`) was a local `useState`, but App.tsx only
+renders `<Inspector>` while `rightPaneTab === "inspector"` — opening a data
+tab switches `rightPaneTab` away, which unmounts Inspector; closing it
+remounts Inspector fresh, resetting `activeTab` to its default. Every other
+Inspector selection (`attentionHead`, `showQKVDetail`,
+`attentionWindowOffset`) was already lifted to App.tsx for exactly this
+reason — `activeTab` now follows the same pattern (`Inspector.tsx`,
+`App.tsx`). Since data tabs can only ever be opened from Runtime, this
+naturally always lands back on Runtime without hardcoding that assumption.
+
+**2. MoE input/output question (no code change) — confirmed correct.**
+`moe/model.py::register_diagnostic_hooks` registers exactly one hook per
+block, on the `MoE` module itself (`block.{i}.moe`) — not per-expert.
+Captured input = `ln2(x)` (the shared input to router + all experts).
+Captured output = the router-weighted, combined expert output
+(`moe_out`), post-combination, pre-residual-add. No per-expert breakdown
+exists anywhere in the diagnostic system — explicitly deferred ("Phase 2")
+per the code's own docstring.
+
+**3. MoE diagram showed 3 identically-wired clickable boxes for "Experts" —
+misleading, since they're all the same node.** Confirmed in
+`ArchSchematic.tsx`: all 3 `NodeBox`es were bound to the identical
+`nodeId` (`block.{i}.moe`); clicking any of them opened identical data.
+Replaced with a single clickable `NodeBox` carrying a new `segmented`
+prop — 3 small internal stripes signal "multiple experts inside" without
+implying 3 separately-inspectable data sources.
+
+**4. Hardware-info dashboard fell back to CPU-only display after a
+FastAPI+React restart, even for an active GPU run.** Confirmed real bug,
+same class as the earlier `config`-staleness fix: App.tsx's `device` state
+defaults to a hardcoded `"cpu"` and was **never re-synced from the
+server** after a reload. Deeper root cause: `device` wasn't even
+retrievable — it's a real `training_runs.device` column, but was absent
+from every `/status` response path (local status.json, the DB fallback
+`get_run_status_from_db`, the in-memory "just launched" fallback, and the
+remote-proxy passthrough). Fixed by: adding `device` to `train_worker.py`'s
+two `write_status()` calls, to `db.get_run_status_from_db`'s SELECT +
+return dict, to `runner.py`'s in-memory fallback dict, and backfilling it
+from the local DB row in `training.py`'s remote-proxy branch via
+`result.setdefault("device", db_run.get("device") or "cpu")` — the
+backfill means this works immediately for existing remote runs even
+before a trainer-image rebuild propagates the new status.json field into
+the container itself. Frontend: `RunStatus.device` added to `types.ts`;
+`pollStatus` in App.tsx now calls `setDevice(status.device)` on every
+poll. 2 new backend regression tests (DB fallback includes device;
+remote-proxy backfill works when the proxied response omits the field).
+
+**5a. "Open Runs" could only Stop a run, with no way back into it.**
+Direct user report, confirmed in code — `OpenRunsPage.tsx` had a Stop
+button and nothing else. Added an **Open** button that calls a new
+`handleReopenRun()` in App.tsx: fetches the experiment's config, then
+sets `experimentId`/`config`/`runId`/`device`/`backend` from the clicked
+run's own fields (not defaults) so the workspace immediately resumes
+polling that exact run. 1 new frontend regression test.
+
+**5b. The landing page's unlabeled "Serverless CPU: ... (live) · Serverless
+GPU: ... (live)" line was confusing and often wrong** — it always showed
+both CPU and GPU as "live" regardless of what was actually running, since
+it was a bare `<HardwareSpecs />` call with no run context to disambiguate
+(the component's own doc comment says it shows *both* generically when no
+`device`/`backend` props are given). Removed from the landing page
+entirely — the labeled, per-run version inside an active workspace
+(`<HardwareSpecs device={device} backend={...} />`) already shows the
+correct single value and was untouched.
+
+**5c. Preset grid too small; "Or Load an Existing Experiment" list always
+inline was a distraction.** `PresetPicker.tsx` boxes enlarged ~50%
+(padding 12→18, gap 10→16, name 14→17px, description 12→14px), landing
+page container widened 700→900px to fit. `ExperimentBrowser` moved behind
+a new "Existing Experiments" button/page (`showExperiments` state),
+mirroring the existing Open Runs button/page pattern already in the app,
+instead of always rendering inline on the landing view.
+
+Backend: 189 passed (was 187; +2 new tests). Frontend: 47 passed (was 46;
++1 new test), build clean. Trainer-image rebuild recommended (not
+strictly required, thanks to the backfill) for #4 — `train_worker.py`
+runs inside the trainer container for remote runs, so its own
+`status.json` won't include `device` natively until redeployed.
+
+## §57: `>>` silently failing for long/MoE generations — three real bugs, one root cause plus two real gaps found chasing it
+
+User reported `>>` (continue generation) not updating the Inspector or the
+step counter on a MoE run, while the same action worked correctly on a
+Tiny Transformer run. Investigation ruled out a MoE-specific bug (a direct
+repro against current code, local MoE checkpoint, `>>` for 20 tokens,
+worked perfectly — full node data, correct step count) and instead found
+three separate, real problems stacked on top of each other:
+
+**1. `event: error` SSE frames were silently dropped by the frontend.**
+`generateDiagnosticStream` (`useApi.ts`) only ever handled `event: token`
+and `event: done` — a real backend failure mid-`>>` looked identical to
+success: the stream just ended, nothing updated, no error surfaced. This
+alone explains "nothing happens, no explanation" for *any* underlying
+failure, not just this one. Fixed: `event: error` now `throw`s, caught by
+`PausePrompt.tsx`'s existing try/catch (already `alert()`s other errors —
+no consumer change needed). This fix is what let the user actually *see*
+finding #3 below instead of it failing invisibly.
+
+**2. `training_runs.device` wasn't live in the running backend process.**
+Confirmed via a direct DB query (`./lab.db` — note there are decoy empty
+`lab.db` files at `data/lab.db` and `frontend/lab.db`, the real one is
+repo-root) that the MoE run's `device` column was correctly `'cuda'` the
+whole time; the bug was that the backend process (checked via `ps aux`)
+had been running since before §56's device-sync backend changes landed —
+Python/uvicorn doesn't hot-reload code changes without `--reload`. Not a
+new code bug — the fix from §56 was correct, just not yet loaded into the
+live process. No code change; documented here since it consumed real
+investigation time and is a recurring class of "user reports bug, fix
+already exists, backend just needs a restart" — worth remembering as the
+first thing to check before assuming new code is broken.
+
+**3. The real bug: diagnostic generation never windowed the context to
+`block_size`, unlike real generation.** Both templates' own
+`model.generate()` (the actual training-time generation method) correctly
+slides the window every step — `idx_cond = idx[:, -self.block_size:]` —
+before every forward pass. The diagnostics code path, written separately
+(not sharing that method), never did this: `_execute_forward_pass()` in
+`diagnostics.py` (used by `/step`, `/peek`, and `/generate`'s final-frame
+capture) and `/generate`'s own inline per-token sampling loop in
+`training.py` both fed the full, ever-growing `prompt_tokens +
+token_history` straight into the model. Once total length exceeded
+`block_size` (confirmed live: `block_size=128`, `max_new_tokens=150` —
+guaranteed to cross it), RoPE's position-dependent buffers (or the causal
+mask, for `pos_encoding=learned`/other configs) raised a tensor-size
+mismatch — previously invisible due to bug #1, now surfaced correctly as
+"Error during generation: The size of tensor a (129) must match the size
+of tensor b (128)...". This is exactly the kind of split-implementation
+drift the user flagged directly: *"the code for MoE and Tiny Transformer
+should try and share as many methods as possible, just so to avoid this
+kind of bug"* — the diagnostics path duplicated `generate()`'s sampling
+loop without duplicating its windowing, and the duplication was never
+template-specific in the first place (both templates hit the identical
+bug, since the fix lives in shared `diagnostics.py`/`training.py` code,
+not per-template code). Fixed by reassigning `all_tokens =
+all_tokens[-session.model.block_size:]` right after building it in both
+locations — reassigning the variable itself (not just a separate slice
+fed to the model) keeps every downstream use in `_execute_forward_pass`
+(`top_k_by_position`, `position_tokens`, node capture) consistent with
+the same window the model actually saw.
+
+**4. Live temperature/decoding_mode override, mid-prompting.** Direct
+user request: adjust `temperature`/`decoding_mode` while paused and
+partway through a diagnostic session, without restarting it (which would
+lose `token_history`). `max_new_tokens` already worked this way — the
+`maxNewTokens` prop reads `config.inference.max_new_tokens` live on every
+render, and ConfigPanel isn't disabled while paused, so editing it there
+already took effect on the next `>`/`>>` with no code change needed.
+`temperature`/`decoding_mode` were not: `DiagnosticSession.temperature`/
+`decoding_mode` were read once from config at `/start` and permanently
+fixed for the session's life. Fixed by adding optional `temperature`/
+`decoding_mode` fields to `DiagnosticsStepRequest`/
+`DiagnosticsGenerateRequest`; when present, the `/step` and `/generate`
+routes mutate `session.temperature`/`decoding_mode` in place before
+running — the mutation persists for subsequent clicks too, not just a
+one-shot override. Also fixed a latent bug found while wiring the remote
+proxy body for `/step`: it was only ever populated inside the
+`if attention_params is not None` branch, so *any* override (including
+this new one) would have been silently dropped for remote runs whenever
+attention wasn't also selected — rewritten to build the body field by
+field.
+
+**First attempt at the frontend for #4 was wrong — corrected on direct
+user feedback.** Initially added a second, duplicate set of
+temperature/decoding-mode controls directly under the Prompt Model box.
+User immediately flagged this as redundant with the *already-existing*,
+already-live-editable Inference section in ConfigPanel (left sidebar) —
+correct call. Removed the new controls entirely; `PausePrompt` now just
+takes `temperature`/`decodingMode` as live props sourced from
+`config.inference.*`, exactly the same pattern `maxNewTokens` already
+used — no new UI, no local state, single source of truth. **Lesson: when
+adding a control for a setting that might already be configurable
+elsewhere, check for an existing home for it before adding a new one.**
+
+Regression tests added: SSE `event: error` now throws (frontend);
+`search`... n/a; block_size windowing for both `/step` (looped past
+block_size) and `/generate` (streamed past block_size) — both verified to
+actually fail without the fix (reverted temporarily, confirmed the exact
+same `RuntimeError` class the user's screenshot showed, restored); live
+temperature/decoding_mode override for both `/step` and `/generate`,
+persisting across omitted-field calls; remote-proxy body forwarding
+without attention params. Backend: 194 passed (was 189; +5 new tests).
+Frontend: 48 passed (was 47; +1 new test), build clean.
+
+**Trainer-image rebuild note:** #3 (block_size windowing) and #4 (live
+overrides) are both in `diagnostics.py`/`training.py` — code that runs
+*inside* the trainer container for remote/serverless runs (proxied calls
+execute there). Both need a trainer-image rebuild+push to take effect for
+existing remote runs, unlike §56's items which were mostly main-server-only.
+
+## §58: max_new_tokens/block_size validation cap, and a general decimal-typing bug found while adding it
+
+User's MoE run kept crashing at `max_new_tokens=150` even after restarting
+the main backend — traced to the run being **remote** (`nebius_endpoint`):
+§57's fixes live in `diagnostics.py`/`training.py`, which for a remote run
+execute *inside the Nebius trainer container*, not the local process a
+`uvicorn` restart touches. Confirmed via the same live `ps aux` check used
+in §57 (`ps` timestamp predates the code) plus the run's own
+`execution_backend` column. Explained clearly to the user rather than
+continuing to debug already-fixed-and-tested code.
+
+Given the trainer-image rebuild is a separate manual step outside this
+conversation's control, user asked for a defensive guard on top of the
+already-fixed sliding-window generation, regardless: **reject any config
+where `inference.max_new_tokens > model.block_size`**, applying identically
+to every template — no template-specific code, single validation point.
+
+Added a check to `PATCH /experiments/{id}/config` (`backend/api/
+experiments.py::update_config`) — the only route that can ever change
+either field — comparing `req.config["inference"]["max_new_tokens"]`
+against `req.config["model"]["block_size"]` and returning `400` with a
+specific message (`"max_new_tokens (150) cannot exceed block_size
+(128)"`) if violated. No separate check needed at `/training/start`: every
+built-in preset already satisfies the constraint (checked directly), and
+this PATCH route is the only reachable way to end up violating it.
+
+**Found and fixed two more real bugs while wiring the error through to
+the UI, both were silent before this:**
+
+1. **`handleConfigChange`'s debounced config PATCH was pure
+   fire-and-forget** — no `.catch` at all. A rejected PATCH (this new
+   validation, or any other 400) failed completely silently: the invalid
+   value stayed shown in the UI as if it had saved, with zero indication
+   anything was wrong. Fixed: `.catch()` now sets a new `configError`
+   state, rendered in `ConfigPanel` the same way `TrainingControls`
+   already renders `startError`/`controlError` (existing pattern, reused
+   rather than inventing a new one).
+2. **The shared `api()` fetch helper (`useApi.ts`) discarded the actual
+   error message on every single failed request in the app** — it threw
+   `"{status} {statusText}"` (e.g. `"400 Bad Request"`) without ever
+   reading the response body, so FastAPI's specific `HTTPException`
+   detail (the actual useful part) was always lost. Fixed generally, not
+   just for this one call site: `api()` now reads `body.detail` when
+   present and uses that as the error message, falling back to the
+   status line only if the body isn't JSON or has no `detail` field. This
+   improves every existing error message across the app for free.
+
+**Separately, while building the decimal-typing test for ConfigPanel's
+`temperature` field to verify the cap's error message rendered correctly,
+found a real, general, pre-existing bug: typing a decimal into ANY
+numeric config field was broken.** The plain `<input>` in
+`ConfigPanel.tsx`'s `renderSection` fed `Number(e.target.value)` straight
+back into the controlled `value` on every keystroke.
+`Number("0.")` evaluates to `0` (a valid, non-NaN number) — so the instant
+a user typed the decimal point after "0", the controlled input's
+displayed value snapped back to `"0"`, permanently erasing the "." before
+a second digit could ever be typed. Affected every decimal field in the
+app (temperature, dropout, learning_rate, capacity_factor), not just
+temperature — user reported it specifically for temperature, but it was
+never temperature-specific. Fixed with a new `NumericField` component:
+buffers the raw typed text in local state, decoupled from the numeric
+config value on every keystroke; a `useEffect` only re-syncs the local
+text from the external value when they actually diverge for a reason
+other than the field's own typing (guarded by `Number(text) !== value`,
+so the component's own round-trip through `onChange` never clobbers a
+mid-typing state).
+
+Regression tests added: PATCH rejects `max_new_tokens > block_size` with
+both numbers named in the error message and confirms the rejected value
+was never persisted; PATCH allows the boundary case (`==`) and a normal
+in-range case for MoE specifically (per the "applies to every template"
+requirement); ConfigPanel test simulates typing `"0."` then `"0.5"` into
+the temperature field and asserts the displayed value is never clobbered,
+plus the final `onChange` call carries the correct parsed number; a
+second test confirms the new `error` prop renders. Backend: 197 passed
+(was 194; +3 new tests). Frontend: 50 passed (was 48; +2 new tests),
+build clean. Frontend-only changes for the decimal-input fix and error
+surfacing — no rebuild needed; the validation cap is main-server-only
+(`update_config` never proxies to the trainer) — no rebuild needed either.
+
+## §59: LM Head "selected" highlight never showed after `>>`, temperature=0 crashed generation
+
+**1. LM Head Inspector panel never highlighted the generated token green
+after `>>` — only after single `>` steps.** Confirmed as a real, general
+bug (not MoE-specific — same root cause affects every template, since the
+capture logic is fully shared). `_execute_forward_pass`'s
+`append_token=False` branch — used both by `>>`'s final-frame capture and
+by `/peek` — always computed `lm_head.top_k` from `logits[0, -1, :]`. By
+that point in the branch, `all_tokens` already ends in the just-generated
+token (`>>`'s own loop appended it before calling this), so position -1
+predicts what comes *next* — one token ahead of `generated_token`, which
+Inspector's frontend compares `top_k` entries against to decide the
+highlight. They could never match. The `append_token=True` branch (single
+`>`) was correct all along: there, the forward pass runs *before* the new
+token is appended, so position -1 genuinely is the distribution
+`generated_token` gets sampled from.
+
+Fixed by reusing position -2's logits (already computed in the same
+forward pass, no extra cost) for the `append_token=False` case — a causal
+model's output at index i is always "prediction after seeing
+input[0..i]", so position T-2 (predicting T-1) is exactly the
+distribution that produced `all_tokens[T-1]` (== `generated_token.id`).
+Falls back to position -1 if the sequence has fewer than 2 tokens total
+(no prior position to reuse).
+
+**Testing this needed two attempts.** First test drove `/generate` over
+HTTP against a real (randomly-initialized, untrained) checkpoint and
+asserted `generated_token.id in top_k_ids` — it passed even with the bug
+still present, reverted to confirm. Root cause: an untrained model's
+argmax frequently coincides across adjacent positions purely from
+initialization, not learned structure, so the test couldn't actually
+discriminate fixed-vs-broken for that model/seed. Replaced with a
+deterministic unit test using a fake model whose per-position argmax is
+an explicit, controlled function of position index
+(`token_id = position % vocab_size`) — this reliably fails without the
+fix (`2 == 1` assertion, i.e. position -1's value vs the expected
+position -2's value) and passes with it. **Lesson: a test built around a
+real, untrained model's output can pass by chance regardless of whether
+the underlying bug is fixed — prefer a small deterministic fixture when
+testing "which specific tensor position got used," not "does the overall
+pipeline run."**
+
+**2. Temperature=0 crashed generation.** `torch.softmax(logits /
+temperature, ...)` divides directly by `session.temperature` under
+sample-mode decoding — 0 produces inf/nan, and `torch.multinomial` then
+raises `"probability tensor contains either inf, nan or element < 0"`.
+First implementation rejected `temperature <= 0` at `update_config`
+save-time (matching the `max_new_tokens`/`block_size` pattern from §58).
+**Direct user correction:** don't reject — clamp to a tiny epsilon
+(`1e-6`) at the point of use instead, so 0 (or a stray negative value)
+just saves fine and behaves as "as sharp as sampling allows" rather than
+erroring. Replaced the `update_config` rejection with a new
+`diagnostics.MIN_TEMPERATURE = 1e-6` constant, applied via
+`max(session.temperature, MIN_TEMPERATURE)` at both softmax-divide call
+sites (`diagnostics.py`'s `append_token=True` branch, and
+`training.py`'s `/generate` inline sampling loop — same two sites §57
+fixed for block_size windowing, still not sharing one implementation).
+Verified both call sites actually crash without the clamp (reverted,
+confirmed the exact `RuntimeError` above, restored) rather than assuming
+the fix was needed.
+
+Regression tests: `/step` and `/generate` both complete successfully
+(200, no `error` SSE event) with `temperature=0` under sample decoding;
+`update_config` allows saving `temperature=0` (replaces the earlier
+reject-based tests from the abandoned first attempt). Backend: 201
+passed (was 197; +4 new tests). Frontend: 52 passed (was 50; +2 new
+tests covering `api()`'s error-detail extraction from §58, which hadn't
+had direct test coverage yet), build clean.
+
+**Trainer-image rebuild needed for both** — `diagnostics.py`/`training.py`
+run inside the trainer container for remote/serverless runs, same as
+§57's fixes.
+
+**Addendum, same day: the LM Head fix above was deployed (local run,
+confirmed backend process restarted after the fix) and still didn't
+work.** User tested on local CPU with `>>`, no green highlight. Root
+cause: fixed the wrong field. `DiagnosticSnapshot.lm_head` carries *two*
+top-k fields — a flat `top_k` (single list, for the final position) and
+`top_k_by_position` (one list per position, for Inspector's stepper).
+`Inspector.tsx`'s `LmHeadStepper` — the component that actually renders
+the LM Head panel and decides the green highlight — reads
+`lm_head.top_k_by_position` exclusively and defaults to that array's
+*last* entry (`isMostRecent = clampedIndex === entries.length - 1`). It
+never reads the flat `top_k` field at all. The original fix only
+corrected the flat field's source position; `top_k_by_position`'s loop
+(`for pos in range(pos_start, T_total)`) still unconditionally ran all
+the way to `T_total` regardless of branch, so its last entry was still
+the same one-ahead position for the `append_token=False` case. Fixed with
+the same `T-2` logic, applied to this loop's own end boundary instead
+(`top_k_end = T_total if (append_token or T_total < 2) else T_total - 1`,
+with a correspondingly shifted window start) — deliberately kept
+independent from the `pos_start`/`T_total` pair still used by
+`position_tokens`, which describes *input* tokens (correct at every
+position regardless of branch, no off-by-one there) and must not shrink.
+
+Extended the existing deterministic unit test (rather than writing a new
+one) to also assert on `top_k_by_position[-1]` — confirmed it fails
+without this second fix (`2 == 1`, same wrong-position signature as the
+first bug) and passes with it, same revert/restore verification as
+every other fix this session. **Lesson: when a bug report says a fix
+"didn't work" after a verified backend restart, don't assume the fix was
+wrong — check whether the frontend is even reading the field that got
+fixed.** Backend: 201 passed (unchanged count — extended an existing
+test rather than adding a new one). Same trainer-image rebuild
+requirement as above.
+
+## §60: LM Head highlight for every position, temperature/decoding_mode transmission verified correct, a real crash bug, and window removed
+
+Direct user report: green "selected" highlight worked on the most recent
+LM Head position, but not when browsing back to earlier positions with
+◀. Separately, suspected `decoding_mode`/`temperature` weren't being
+freshly read on every `>`/`>>` click.
+
+**1. Highlight now works at every position, not just the latest.**
+Previously `isSelected` required `isMostRecent` and compared against the
+single `snapshot.generated_token.id` — meaningless at any position other
+than the newest, since that's the only one that token describes. Backend
+now computes and attaches `actual_next_token_id` to every
+`top_k_by_position` entry — the real token id that occupied the next
+position, reconstructed from `all_tokens` (already available server-side)
+for historical positions, or from `next_token_id` for the newest position
+under `append_token=True` (not yet appended to `all_tokens` at that
+point). Frontend now does a plain `tk.token_id === entry.actual_next_token_id`
+comparison, position-agnostic — no more `isMostRecent` special case.
+
+**2. Live temperature/decoding_mode transmission verified correct, not
+broken.** Extensive back-and-forth chasing a suspected transmission bug —
+checked prop wiring (no stale closures, both call sites read fresh props
+every render), wrote a passing backend test proving the mutation logic
+works. User's own DevTools capture of the actual `/generate` request
+body confirmed `decoding_mode: "greedy"`, `temperature: 0` were both
+correctly present. The earlier "I didn't see greedy anywhere" report was
+a misread (self-corrected: "that was an accident"). **The real issue was
+downstream**: with correct greedy decoding confirmed, a "selected" token
+showing outside top-5 or below rank #1 is mathematically impossible
+(argmax is always rank 1 in its own top-k list) — so what looked like a
+decoding-mode bug was actually visible fallout from the SAME
+`top_k_by_position` position-mismatch bug fixed in §59/above, not a
+separate transmission problem. Also clarified `max_new_tokens: 28` seen
+in a request (vs. `30` in config) is correct, deliberate behavior —
+total budget minus tokens already generated earlier in the same session,
+not a stale/cached value.
+
+**3. Real regression, found by the user as a runtime crash ("isMostRecent
+is not defined").** While implementing #1 above, two usages of the old
+`isMostRecent` variable were left behind when its declaration was
+replaced — a genuine `ReferenceError` on every single `>`/`>>` click,
+crashing the whole LM Head render. Both usages fixed (the highlight
+condition and the "fell outside top 5" note, which now also uses
+`actual_next_token_id`/looks up its display text from the adjacent
+`top_k_by_position` entry rather than always `snapshot.generated_token`).
+**Lesson: when replacing a variable used in multiple places, grep for
+every usage before considering the edit done — a partial edit that still
+type-checks (JS/TS won't catch a `ReferenceError` at build time for a
+`const` used only at runtime inside a render path with no static
+analysis catching it) can still crash at runtime.**
+
+**4. LM Head position stepper's window removed entirely.** Direct user
+request: "no window on that LM head runtime." Previously
+`top_k_by_position` was capped to the last `DIAGNOSTIC_POSITION_WINDOW`
+(12) positions, same as `position_vectors`/`qkv_detail` — but unlike
+those (real per-position vectors, genuinely expensive), each
+`top_k_by_position` entry is just a top-5 list of small scalars, cheap
+enough to return uncapped back to the very start of the captured
+sequence. `qkv_detail`/`position_vectors`/`position_tokens` remain
+windowed — their cost justification is real and unchanged.
+
+Updated an existing test whose assertions had gone stale
+(`len(top_k_by_position) == DIAGNOSTIC_POSITION_WINDOW`) to assert the
+opposite (every position present, from 0 to the end) — kept its
+`qkv_detail`-capping assertions unchanged, since that field's window is
+untouched by this change. Backend: 202 passed (was 201; net +1 after
+rewriting the stale test in place rather than duplicating it). Frontend:
+52 passed, build clean.
+
+## §61: Smooth per-position window stepping for every node, not just attention
+
+Direct user request, with a fair process complaint attached: the
+attention heatmap already had a window stepper (◀/▶, shifts which
+DIAGNOSTIC_POSITION_WINDOW-wide slice of history is shown), but it
+stepped by the full window size (12) per click — a "discontinuous" jump,
+not a smooth slide — and no other node (LayerNorm, MLP, embedding,
+final_norm) had any stepper at all, only ever showing the last 12
+positions with no way to see further back. Also: I'd built the backend
+half of node-level windowing in an earlier response this session without
+ever adding a frontend control for it, and didn't flag that gap —
+confirmed directly as a real process failure ("you didn't brief me in
+advance").
+
+**Stride fixed everywhere.** Both the attention/qkv stepper and the new
+node stepper now shift by 1 position per click, not by the window size.
+
+**New per-node stepper.** `DiagnosticSession` gained `node_window_offset`
+(mirrors `attention_window_offset`'s exact semantics: 0 = most recent
+window, positive N = shift back N) — has to be session-level mutable
+state, not a plain function argument like `attention_window_offset` is,
+because node capture happens inside PyTorch forward hooks
+(`register_forward_hook`, registered once at session start), which have
+no mechanism to receive extra per-call arguments beyond the standard
+`(module, input, output)` signature. The `/step`, `/peek`, and `/generate`
+routes all mutate `session.node_window_offset` right before the forward
+pass; each hook closure reads it back via `get_session(session_id)` at
+capture time — same pattern already used for live temperature/
+decoding_mode overrides. `_windowed_position_vectors`/`_position_vectors`
+(the hook-capture helpers, one copy per template — transformer and MoE
+model.py — matches the existing per-template hook duplication, not a
+new inconsistency) now take an `offset` param and apply the identical
+clamped-window formula attention's `window_offset` already used
+(`end = max(window, T - max(offset, 0)); start = end - window`) — copied
+deliberately for consistency, not reinvented.
+
+Frontend: new `NodeWindowStepper` component, visually identical to the
+attention heatmap's own stepper, rendered above `NodeVectorTable` for
+any node with a `position_vectors` field. Reuses the snapshot's shared
+sequence length (`generated_token.position + 1` — one forward pass, one
+sequence length, applies identically to every node captured in it) as
+`totalPositions`. Wired through a new `nodeWindowOffset` state in
+App.tsx: reset on run/node change (same as `attentionWindowOffset`), and
+a new peek effect (parallel to the existing attention one, mutually
+exclusive — attention nodes use their own effect/offset, everything else
+uses this one) refreshes the snapshot immediately on a stepper click
+without requiring a fresh `>`.
+
+Backend: 203 passed (was 202; +1 new test proving the offset actually
+shifts `position_vectors.positions`, verified fail-without/pass-with via
+the same revert/restore discipline as every other fix this session).
+Frontend: 52 passed (unchanged — new component/wiring not yet covered by
+a dedicated test), build clean. Needs a backend restart (session/hook
+changes) to take effect; frontend-only stride/UI changes are picked up
+by Vite automatically, no restart needed for those.
+
+## §62: Small frontend polish — stepper font size, Inspector default tab, copy-to-clipboard for vectors
+
+Three direct, small user requests, all frontend-only (no backend
+restart needed for any of these):
+
+**Stepper buttons too large.** Both the attention heatmap's stepper and
+§61's new node stepper used plain, unstyled `<button>` elements inside a
+`fontSize: 11` container — buttons/inputs don't inherit `font-size` from
+ancestors in CSS (a common gotcha; form controls use the platform's own
+UA-stylesheet font by default), so they rendered at the browser's larger
+default button font regardless of the surrounding text size. Added
+explicit `fontSize: 11` to all four buttons (both ◀/▶ pairs) — the
+arrow glyphs shrink proportionally as a natural consequence, no separate
+fix needed for "the triangle sign."
+
+**Inspector now defaults to Runtime, not Overview.** One-line change
+(`useState<SubTab>("overview")` → `useState<SubTab>("runtime")` in
+App.tsx) — direct request: "that's where people are most likely to want
+to go" when clicking any node. No reset-on-node-change effect exists for
+this state (confirmed), so this only changes the very first tab shown
+per session, not behavior when switching between already-inspected nodes.
+
+**Copy-to-clipboard for vectors**, two places, deliberately not a
+per-row copy icon in Runtime tables (discussed first — "I don't know if
+that copy for the vectors... is overwhelming"): agreed a per-row icon
+would duplicate the existing double-click-to-open-in-a-tab path and
+clutter tables that can have many rows.
+- Data tab (opened via double-click): a **Copy** button next to Close —
+  copies the full-precision vector, one value per line (matches the
+  tab's existing single-column layout, pastes as one spreadsheet column).
+- Runtime's per-node vector tables (`VectorPreviewTable`, used for both
+  Input and Output): one **Copy** button per table — copies every row at
+  once as tab-separated values, one row per position (`position\tv0\tv1\t...`),
+  full precision (`vectors[i]` itself, not the truncated hover-preview
+  string) — pastes into a spreadsheet as a proper grid, per direct user
+  preference over a flat comma-separated blob.
+
+Frontend: 52 passed (unchanged — no new tests added for these; all three
+are small, low-risk UI-only changes using the standard Clipboard API,
+consistent with how trivial verified-by-inspection changes have been
+handled elsewhere this session), build clean.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

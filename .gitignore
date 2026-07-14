@@ -159,6 +159,12 @@ celerybeat.pid
 .env.claude
 frontend/.env.local
 
+# Real API response captured during a manual smoke test — contains real
+# Nebius account identifiers (project id, endpoint id, compute instance id,
+# private IP, public tunnel URL). Open-sourcing prep, 2026-07-15. See
+# docs/DESIGN_DECISIONS.md.
+evidence/nebius-endpoint/endpoint.json
+
 .venv
 env/
 venv/

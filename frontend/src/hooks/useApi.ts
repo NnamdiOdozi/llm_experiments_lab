@@ -10,7 +10,21 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // Previously threw only "{status} {statusText}" (e.g. "400 Bad
+    // Request"), discarding FastAPI's actual HTTPException detail message
+    // — every rejected call in the app lost its specific reason. Found
+    // while wiring the max_new_tokens/block_size validation error through
+    // to the UI. See docs/DESIGN_DECISIONS.md.
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = body.detail;
+    } catch {
+      // Response body wasn't JSON — keep the status-line fallback.
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -49,13 +63,6 @@ export function resumeTraining(runId: number) {
 
 export function stopTraining(runId: number) {
   return api<{ run_id: number }>(`/training/${runId}/stop`, { method: "POST" });
-}
-
-export function promptModel(runId: number, prompt: string) {
-  return api<{ output: string }>(`/training/${runId}/prompt`, {
-    method: "POST",
-    body: JSON.stringify({ prompt }),
-  });
 }
 
 export interface WorkerStatus {
@@ -128,6 +135,7 @@ export function setChatMessageFeedback(messageId: number, feedback: "up" | "down
     body: JSON.stringify({ feedback }),
   });
 }
+
 
 export function fetchCode(experimentId: number) {
   return api<import("../types").CodeFiles>(`/code/${experimentId}`);
@@ -281,15 +289,15 @@ const FIXTURE_SNAPSHOT_WITH_ATTENTION: import("../types").DiagnosticSnapshot = {
       { rank: 5, token_id: 58, token: " go",  logit: 4.75, probability: 0.07 }
     ],
     top_k_by_position: [
-      { position: 0, token: "The", top_k: [
+      { position: 0, token: "The", actual_next_token_id: 82, top_k: [
         { rank: 1, token_id: 82, token: " king", logit: 5.10, probability: 0.28 },
         { rank: 2, token_id: 44, token: " said", logit: 4.80, probability: 0.19 },
       ] },
-      { position: 1, token: " king", top_k: [
+      { position: 1, token: " king", actual_next_token_id: 44, top_k: [
         { rank: 1, token_id: 44, token: " said", logit: 5.50, probability: 0.33 },
         { rank: 2, token_id: 91, token: " to", logit: 4.90, probability: 0.20 },
       ] },
-      { position: 2, token: " said", top_k: [
+      { position: 2, token: " said", actual_next_token_id: 91, top_k: [
         { rank: 1, token_id: 91, token: " to", logit: 6.21, probability: 0.31 },
         { rank: 2, token_id: 12, token: " have", logit: 5.87, probability: 0.22 },
         { rank: 3, token_id: 33, token: " be", logit: 5.40, probability: 0.14 },
@@ -358,7 +366,7 @@ const FIXTURE_SNAPSHOT: import("../types").DiagnosticSnapshot = {
       { rank: 5, token_id: 58, token: " go",  logit: 4.75, probability: 0.07 }
     ],
     top_k_by_position: [
-      { position: 2, token: " said", top_k: [
+      { position: 2, token: " said", actual_next_token_id: 91, top_k: [
         { rank: 1, token_id: 91, token: " to", logit: 6.21, probability: 0.31 },
         { rank: 2, token_id: 12, token: " have", logit: 5.87, probability: 0.22 },
       ] },
@@ -494,6 +502,12 @@ export async function* generateDiagnosticStream(
           yield parsed as import("../types").GenerateStreamToken;
         } else if (event === "done") {
           yield { final_snapshot: parsed.final_snapshot } as import("../types").GenerateStreamDone;
+        } else if (event === "error") {
+          // Previously silently dropped — a real mid->> failure looked
+          // identical to success (loop just ended, nothing updated, no
+          // explanation). Direct user report, 2026-07-15. See
+          // docs/DESIGN_DECISIONS.md.
+          throw new Error(parsed.error || "Generation failed");
         }
       }
     }

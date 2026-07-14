@@ -587,6 +587,78 @@ async def test_generate_streams_tokens_then_final_snapshot(temp_db, client, monk
     assert "lm_head" in final_snapshot
 
 
+class _PositionalArgmaxModel:
+    """Deterministic fake model (not a real nn.Module — just needs to be
+    callable): the argmax at sequence position i is always token id
+    (i % vocab_size), completely independent of the actual input tokens.
+    Lets a test assert exactly which position's logits a code path used,
+    without depending on a real (randomly-initialized) model's behavior —
+    the HTTP-level version of this test using a real checkpoint passed
+    even with the bug still present, because an untrained model's argmax
+    frequently coincides across adjacent positions by chance, making it a
+    non-discriminating test. See docs/DESIGN_DECISIONS.md."""
+
+    def __init__(self, vocab_size: int = 10, block_size: int = 32):
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.__class__.__name__ = "PositionalArgmaxModel"  # not "Moe..."
+
+    def __call__(self, idx):
+        import torch
+        B, T = idx.shape
+        logits = torch.zeros(B, T, self.vocab_size)
+        for t in range(T):
+            logits[0, t, t % self.vocab_size] = 10.0
+        return logits, None  # (logits, loss) — matches transformer signature
+
+
+class _IdentityTokenizer:
+    def decode(self, ids):
+        return "".join(str(i) for i in ids)
+
+
+def test_execute_forward_pass_uses_pre_generation_logits_not_next_token_prediction():
+    """Real bug, 2026-07-15: after >> (continue generation), the Inspector's
+    LM Head panel never highlighted the generated token green. Root cause:
+    _execute_forward_pass's append_token=False branch (used by >>'s
+    final-frame capture and by /peek) computed top_k from logits[0, -1, :]
+    — but by that point all_tokens already ends in the just-generated
+    token, so position -1 predicts what comes NEXT (one token ahead), not
+    the distribution that produced it. A plain single > step was
+    unaffected (append_token=True computes logits before the new token is
+    appended, so position -1 there IS the right distribution). Fix reuses
+    position -2's logits (already computed in the same forward pass) —
+    the distribution that actually produced all_tokens[-1]. See
+    docs/DESIGN_DECISIONS.md."""
+    from backend.training import diagnostics
+
+    model = _PositionalArgmaxModel(vocab_size=10)
+    session_id = diagnostics.create_diagnostic_session(
+        model=model, tokenizer=_IdentityTokenizer(), device="cpu",
+        prompt_tokens=[0, 1],
+    )
+    session = diagnostics.get_session(session_id)
+    # all_tokens = [0, 1] + [1] = [0, 1, 1], T=3 (0-indexed positions 0,1,2).
+    # Position T-1=2's argmax = 2 % 10 = 2 (the WRONG, "predict next" value).
+    # Position T-2=1's argmax = 1 % 10 = 1 — matches this token_history[-1]
+    # (last_id=1) exactly, proving the fix picked T-2, not T-1.
+    session.token_history = [1]
+
+    snapshot = diagnostics.run_diagnostic_step_internal(session_id, top_k=3, skip_token_generation=True)
+
+    assert snapshot.generated_token["id"] == 1
+    assert snapshot.lm_head["top_k"][0]["token_id"] == 1
+    # Real bug, 2026-07-15 (found live after this exact fix was already
+    # deployed and still didn't work): Inspector.tsx's LM Head panel
+    # (LmHeadStepper) doesn't read lm_head.top_k at all — it reads
+    # lm_head.top_k_by_position and defaults to that list's LAST entry.
+    # The fix above only touched the flat top_k field; top_k_by_position's
+    # loop still always ran through the full range, so its last entry was
+    # still the wrong, one-ahead position. Both fields must agree.
+    assert snapshot.lm_head["top_k_by_position"][-1]["top_k"][0]["token_id"] == 1
+    assert snapshot.lm_head["top_k_by_position"][-1]["position"] == 1  # T-2, not T-1
+
+
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
     """qkv_detail=True returns one Q/K/V vector per position (not just the
     last token) — the frontend's position stepper needs one per position."""
@@ -619,14 +691,16 @@ async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkey
     assert isinstance(qkv["q"][0], list) and len(qkv["q"][0]) > 0
 
 
-async def test_qkv_detail_capped_to_last_12_positions(temp_db, client, monkeypatch, tmp_path):
-    """A prompt longer than DIAGNOSTIC_POSITION_WINDOW (12) must only return
-    the most recent 12 positions' Q/K/V and top-k, not all of them —
-    payload-size cap confirmed live, not just a config value that's never
-    exercised. qkv_detail's window is one position further than
-    top_k_by_position's (see the comment in diagnostics.py's
-    _execute_forward_pass): qkv is computed after this step's new token is
-    appended to token_history, top_k_by_position before."""
+async def test_qkv_detail_capped_but_top_k_by_position_is_not(temp_db, client, monkeypatch, tmp_path):
+    """qkv_detail (real per-position Q/K/V vectors) must only return the
+    most recent 12 positions, not all of them — payload-size cap confirmed
+    live, not just a config value that's never exercised.
+
+    top_k_by_position is deliberately NOT capped (direct user request,
+    2026-07-15: "there shouldn't be any window on that") — unlike qkv, each
+    entry is just a small top-5 list of scalars, cheap enough to return in
+    full back to the start of the captured sequence. See
+    docs/DESIGN_DECISIONS.md."""
     from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
 
     exp_id = temp_db
@@ -655,10 +729,51 @@ async def test_qkv_detail_capped_to_last_12_positions(temp_db, client, monkeypat
     assert qkv["positions"] == list(range(post_append_len - DIAGNOSTIC_POSITION_WINDOW, post_append_len))
 
     top_k_by_position = body["lm_head"]["top_k_by_position"]
-    assert len(top_k_by_position) == DIAGNOSTIC_POSITION_WINDOW
+    assert len(top_k_by_position) == pre_append_len  # every position, not just the last 12
+    assert top_k_by_position[0]["position"] == 0
     assert top_k_by_position[-1]["position"] == pre_append_len - 1
-    assert top_k_by_position[0]["position"] == pre_append_len - DIAGNOSTIC_POSITION_WINDOW
     assert len(top_k_by_position[0]["top_k"]) == 5
+
+
+async def test_node_window_offset_slides_position_vectors_backward(temp_db, client, monkeypatch, tmp_path):
+    """Direct user request, 2026-07-15: "a stepper that allows that window
+    to slide backwards in time" for generic nodes (LayerNorm, MLP,
+    embedding, final_norm) — previously only the attention heatmap had
+    this (attention_window_offset); node position_vectors always showed
+    only the last DIAGNOSTIC_POSITION_WINDOW positions with no way to see
+    further back. See docs/DESIGN_DECISIONS.md."""
+    from backend.training.diagnostics import DIAGNOSTIC_POSITION_WINDOW
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    long_prompt = "The king said many words indeed"
+    assert len(long_prompt) > DIAGNOSTIC_POSITION_WINDOW
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": long_prompt, "top_k": 5, "max_prompt_tokens": len(long_prompt)},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+
+    # Both peeks below recompute over the SAME (post-step) sequence length —
+    # only node_window_offset differs, so positions must shift by exactly
+    # that amount, nothing else in play.
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/peek", json={})
+    assert resp.status_code == 200
+    default_positions = resp.json()["nodes"]["embedding"]["position_vectors"]["positions"]
+    assert len(default_positions) == DIAGNOSTIC_POSITION_WINDOW
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+        json={"node_window_offset": 5},
+    )
+    assert resp.status_code == 200
+    shifted_positions = resp.json()["nodes"]["embedding"]["position_vectors"]["positions"]
+    assert len(shifted_positions) == DIAGNOSTIC_POSITION_WINDOW
+    assert [p - 5 for p in default_positions] == shifted_positions
 
 
 async def test_attention_heatmap_windowed_not_full_matrix(temp_db, client, monkeypatch, tmp_path):
@@ -806,6 +921,43 @@ async def test_diagnostic_session_persisted_after_generate(temp_db, client, monk
     assert count == 1
 
 
+async def test_generate_completion_logs_for_chatbot_grounding(temp_db, client, monkeypatch, tmp_path):
+    """Direct user request, 2026-07-14: the Generate button was removed
+    from the UI entirely (replaced by >/>> only, both driven through the
+    diagnostic-session machinery Inspector already reads from). The
+    chatbot's "what have you tried" grounding
+    (backend/chatbot/context.py::_get_prompt_history) only ever reads
+    lab.prompt log lines, which only the old /prompt route wrote — without
+    this, >> completions would go invisible to the Lab Assistant. >>'s
+    completion must write the same log line /prompt used to. See
+    docs/DESIGN_DECISIONS.md."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    logged = []
+    monkeypatch.setattr(
+        training_module.prompt_log, "info",
+        lambda msg, *args: logged.append(msg % args),
+    )
+
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 2},
+    ) as resp:
+        async for _ in resp.aiter_text():
+            pass
+
+    assert len(logged) == 1
+    assert f"run_id={run_id}" in logged[0]
+    assert '"prompt": "The king"' in logged[0]
+
+
 async def test_get_diagnostic_snapshot_for_run_tracks_run_to_session(temp_db, client, monkeypatch, tmp_path):
     """Chatbot grounding accessor: after starting a session and stepping,
     get_diagnostic_snapshot_for_run(run_id) finds it without a session_id."""
@@ -920,6 +1072,192 @@ async def test_diagnostics_start_defaults_decoding_mode_to_sample(temp_db, clien
     assert diagnostics.get_session(session_id).decoding_mode == "sample"
 
 
+async def test_diagnostics_step_overrides_temperature_and_decoding_mode_live(
+    temp_db, client, monkeypatch, tmp_path
+):
+    """Direct user request, 2026-07-15: adjust temperature/decoding mode
+    mid-prompting (session paused, part-way through generating) without
+    restarting the session — restarting would lose token_history. The
+    override must mutate the session in place (persist for subsequent
+    steps too), not just apply once. See docs/DESIGN_DECISIONS.md."""
+    from backend.training import diagnostics
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+    session = diagnostics.get_session(session_id)
+    assert session.temperature == 0.8  # TRANSFORMER_CONFIG has no inference key
+    assert session.decoding_mode == "sample"
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/{session_id}/step",
+        json={"temperature": 1.7, "decoding_mode": "greedy"},
+    )
+    assert resp.status_code == 200
+    assert session.temperature == 1.7
+    assert session.decoding_mode == "greedy"
+
+    # Omitting the fields on a later call must not reset them back to
+    # whatever /start originally read from config.
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200
+    assert session.temperature == 1.7
+    assert session.decoding_mode == "greedy"
+
+
+async def test_diagnostics_generate_overrides_temperature_and_decoding_mode_live(
+    temp_db, client, monkeypatch, tmp_path
+):
+    from backend.training import diagnostics
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+    session = diagnostics.get_session(session_id)
+
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 2, "temperature": 1.7, "decoding_mode": "greedy"},
+    ) as resp:
+        async for _ in resp.aiter_lines():
+            pass
+
+    assert session.temperature == 1.7
+    assert session.decoding_mode == "greedy"
+
+
+async def test_diagnostics_step_remote_proxy_forwards_temperature_without_attention_params(
+    temp_db, client, monkeypatch
+):
+    """Real bug found while adding this feature: the remote-proxy body was
+    only ever populated inside the `if attention_params is not None` branch
+    — a temperature/decoding_mode override with no attention selected would
+    have been silently dropped for remote runs. See docs/DESIGN_DECISIONS.md."""
+    import backend.api.training as training_module
+    from tests.test_training_remote import FakeAsyncClient, FakeResponse
+
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([FakeResponse({"schema_version": 1, "nodes": {}})])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/diag-test/step",
+        json={"temperature": 1.7, "decoding_mode": "greedy"},
+    )
+
+    assert resp.status_code == 200
+    _, _, sent_body = fake_client.calls[0]
+    assert sent_body == {"temperature": 1.7, "decoding_mode": "greedy", "node_window_offset": 0}
+
+
+async def test_diagnostic_step_windows_context_past_block_size(temp_db, client, monkeypatch, tmp_path):
+    """Real incident, 2026-07-15: prompt + token_history growing past
+    block_size crashed with a tensor-size mismatch (RoPE table / causal
+    mask sized for exactly block_size) — both templates' own
+    model.generate() already windows via `idx[:, -self.block_size:]`, but
+    _execute_forward_pass (used by /step, /peek, and /generate's final-frame
+    capture) never did. See docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    config = {
+        "template": "transformer", "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 8, "n_embd": 32, "n_head": 2,
+            "n_layer": 2, "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    # "The king" is exactly 8 characters/tokens — already at block_size.
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # Each step appends one token — pushes well past block_size=8.
+    for _ in range(5):
+        resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+        assert resp.status_code == 200, resp.json()
+
+
+async def test_diagnostics_generate_windows_context_past_block_size(temp_db, client, monkeypatch, tmp_path):
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    config = {
+        "template": "transformer", "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 8, "n_embd": 32, "n_head": 2,
+            "n_layer": 2, "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+    }
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    events = []
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 20},
+    ) as resp:
+        async for line in resp.aiter_lines():
+            if line.startswith("event: "):
+                events.append(line[len("event: "):])
+
+    assert "error" not in events
+    assert "done" in events
+
+
 async def test_diagnostic_step_uses_argmax_in_greedy_mode(temp_db, client, monkeypatch, tmp_path):
     """When decoding_mode=greedy, step-through must select via torch.argmax
     and never call torch.multinomial — the selected token must always be
@@ -956,6 +1294,131 @@ async def test_diagnostic_step_uses_argmax_in_greedy_mode(temp_db, client, monke
 
     assert len(multinomial_calls) == 0
     assert body["generated_token"]["id"] == body["lm_head"]["top_k"][0]["token_id"]
+
+
+async def test_generate_live_decoding_mode_override_actually_used_for_sampling(temp_db, client, monkeypatch, tmp_path):
+    """Direct user report, 2026-07-15: session started under sample decoding
+    (config default), then decoding_mode switched to greedy in ConfigPanel
+    mid-session, then >>. User observed a non-rank-1 token reported as
+    "selected" — impossible under real greedy decoding (argmax is always
+    rank 1) — meaning the override wasn't actually taking effect for the
+    generate loop's OWN per-token sampling (as opposed to session-start-time
+    decoding_mode, already covered by test_diagnostic_step_uses_argmax_in_
+    greedy_mode above). Asserts torch.multinomial is never called during
+    >>'s own token loop when decoding_mode="greedy" is passed as a live
+    override on the /generate request itself, on a session that started
+    under sample. See docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    config = {**TRANSFORMER_CONFIG, "inference": {"decoding_mode": "sample"}}
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    multinomial_calls = []
+    real_multinomial = torch.multinomial
+    monkeypatch.setattr(torch, "multinomial", lambda *a, **k: (multinomial_calls.append(1), real_multinomial(*a, **k))[1])
+
+    events = []
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 5, "decoding_mode": "greedy"},
+    ) as resp:
+        body = ""
+        async for chunk in resp.aiter_text():
+            body += chunk
+    for frame in [f for f in body.split("\n\n") if f.strip()]:
+        lines = frame.strip().split("\n")
+        events.append((lines[0].removeprefix("event: "), json.loads(lines[1].removeprefix("data: "))))
+
+    assert len(multinomial_calls) == 0, "torch.multinomial was called — live decoding_mode override was ignored"
+    final_snapshot = [d for t, d in events if t == "done"][0]["final_snapshot"]
+    assert final_snapshot["generated_token"]["id"] == final_snapshot["lm_head"]["top_k"][0]["token_id"]
+
+
+async def test_diagnostic_step_clamps_zero_temperature_instead_of_crashing(temp_db, client, monkeypatch, tmp_path):
+    """Direct user request, 2026-07-15: temperature=0 divides by zero in
+    torch.softmax(logits / temperature, ...) under sample decoding —
+    produces inf/nan and crashes torch.multinomial ("probability tensor
+    contains either inf, nan or element < 0"). Clamped to a tiny epsilon
+    (diagnostics.MIN_TEMPERATURE) at the point of use rather than rejected
+    at config-save time — the step must succeed, not error. See
+    docs/DESIGN_DECISIONS.md."""
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    config = {**TRANSFORMER_CONFIG, "inference": {"decoding_mode": "sample", "temperature": 0}}
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    assert resp.status_code == 200, resp.json()
+
+
+async def test_diagnostics_generate_clamps_zero_temperature_instead_of_crashing(temp_db, client, monkeypatch, tmp_path):
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+    import torch
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    config = {**TRANSFORMER_CONFIG, "inference": {"decoding_mode": "sample", "temperature": 0}}
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    events = []
+    async with client.stream(
+        "POST", f"/api/training/{run_id}/diagnostics/{session_id}/generate",
+        json={"max_new_tokens": 3},
+    ) as resp:
+        async for line in resp.aiter_lines():
+            if line.startswith("event: "):
+                events.append(line[len("event: "):])
+
+    assert "error" not in events
+    assert "done" in events
 
 
 async def test_diagnostic_step_samples_instead_of_greedy(temp_db, client, monkeypatch, tmp_path):

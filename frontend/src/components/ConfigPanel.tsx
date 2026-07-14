@@ -1,3 +1,4 @@
+import { useState, useEffect, CSSProperties } from "react";
 import { ExperimentConfig } from "../types";
 
 interface Props {
@@ -7,6 +8,9 @@ interface Props {
   // Preset this experiment was created from — used to show "baseline: X"
   // shadow text under any field the user has changed. Null if unresolved yet.
   baseline?: ExperimentConfig | null;
+  // Surfaces a rejected config PATCH (e.g. max_new_tokens > block_size) —
+  // previously failed completely silently. See docs/DESIGN_DECISIONS.md.
+  error?: string | null;
 }
 
 const DROPDOWN_FIELDS: Record<string, string[]> = {
@@ -21,6 +25,45 @@ const DROPDOWN_FIELDS: Record<string, string[]> = {
 // confusion. Shown for information only. Direct user request, 2026-07-13.
 // See docs/DESIGN_DECISIONS.md.
 const READ_ONLY_FIELDS = new Set(["vocab_size"]);
+
+// Real bug, 2026-07-15: a plain controlled <input> feeding straight
+// Number(e.target.value) back into `value` snapped decimals back to an
+// integer mid-typing — Number("0.") is 0, so typing "0" then "." erased
+// the "." the instant it appeared, making it impossible to type any
+// decimal at all (temperature, dropout, learning_rate, capacity_factor —
+// every numeric field here, not just temperature). Fix: buffer the raw
+// text locally, only re-sync from the external numeric value when it
+// changes for a reason OTHER than this field's own typing (guarded by
+// comparing Number(text) against value, so our own onChange round-trip
+// doesn't clobber what's still being typed). See docs/DESIGN_DECISIONS.md.
+function NumericField({
+  value, onChange, disabled, title, style,
+}: {
+  value: number | string;
+  onChange: (v: number) => void;
+  disabled: boolean;
+  title?: string;
+  style: CSSProperties;
+}) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    if (Number(text) !== value) setText(String(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      style={style}
+      value={text}
+      disabled={disabled}
+      title={title}
+      onChange={(e) => {
+        const v = e.target.value;
+        setText(v);
+        if (v !== "" && v !== "-" && !isNaN(Number(v))) onChange(Number(v));
+      }}
+    />
+  );
+}
 
 function renderSection(
   title: string,
@@ -76,7 +119,7 @@ function renderSection(
                 ))}
               </select>
             ) : (
-              <input
+              <NumericField
                 style={{ width: 100, textAlign: "right" }}
                 value={val}
                 disabled={fieldDisabled}
@@ -87,10 +130,7 @@ function renderSection(
                       ? "No effect under greedy decoding"
                       : undefined
                 }
-                onChange={(e) => {
-                  const v = e.target.value;
-                  handleChange(isNaN(Number(v)) ? v : Number(v));
-                }}
+                onChange={handleChange}
               />
             )}
           </div>
@@ -125,7 +165,7 @@ const INFERENCE_DEFAULTS: Record<string, number | string> = {
   decoding_mode: "sample",
 };
 
-export default function ConfigPanel({ config, onChange, disabled = false, baseline = null }: Props) {
+export default function ConfigPanel({ config, onChange, disabled = false, baseline = null, error = null }: Props) {
   // Normalize inference section so onChange always has all fields,
   // even for experiments created before inference config existed.
   const normalizedConfig: ExperimentConfig = {
@@ -140,6 +180,11 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
         style={{ marginBottom: 12 }}>
         {normalizedConfig.template}
       </div>
+      {error && (
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 12 }}>
+          {error}
+        </div>
+      )}
       {renderSection("Model", normalizedConfig.model, "model", normalizedConfig, onChange, disabled, baseline?.model)}
       {renderSection("Training", normalizedConfig.training, "training", normalizedConfig, onChange, disabled, baseline?.training)}
       {/* Inference section controls generation params (temperature, max_new_tokens)

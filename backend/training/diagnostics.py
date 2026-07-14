@@ -21,6 +21,15 @@ from backend.logging_config import training_log
 # docs/DESIGN_DECISIONS.md.
 DIAGNOSTIC_POSITION_WINDOW = 12
 
+# torch.softmax(logits / temperature, ...) divides by this directly —
+# temperature=0 produces inf/nan and crashes torch.multinomial mid-
+# generation. Direct user request, 2026-07-15: clamp to a tiny epsilon at
+# the point of use rather than rejecting the config value outright — 0 (or
+# a negative value, from e.g. a stray minus key) is silently treated as
+# "as sharp/greedy-like as sampling allows" instead of erroring. See
+# docs/DESIGN_DECISIONS.md.
+MIN_TEMPERATURE = 1e-6
+
 
 @dataclass
 class NodeCapture:
@@ -87,15 +96,35 @@ class DiagnosticSession:
     device: str
     prompt_tokens: list[int]  # initial prompt encoded
     run_id: Optional[int] = None  # training run this session belongs to
-    # Read once from config.inference.temperature at session start — same
-    # source and value model.generate() (the Generate button) uses. Fixed
-    # for the life of the session, matching the fact that nothing in this
-    # app changes temperature mid-run. See docs/DESIGN_DECISIONS.md.
+    # Read from config.inference.temperature at session start — same source
+    # and value model.generate() (the Generate button) uses. Live-overridable
+    # afterward: the /step and /generate routes mutate this in place when
+    # the request includes an explicit temperature/decoding_mode, so the
+    # user can adjust mid-prompting without losing token_history by
+    # restarting the session. Direct user request, 2026-07-15. See
+    # docs/DESIGN_DECISIONS.md.
     temperature: float = 0.8
-    # "greedy" or "sample" — read once from config.inference.decoding_mode
-    # at session start, same setting model.generate() (Generate button)
-    # uses. See docs/DESIGN_DECISIONS.md.
+    # "greedy" or "sample" — read from config.inference.decoding_mode at
+    # session start, same setting model.generate() (Generate button) uses.
+    # Live-overridable — see temperature above.
     decoding_mode: str = "sample"
+    # Shifts the position_vectors/input_position_vectors window captured by
+    # every node's forward hook — same semantics as attention_window_offset
+    # (0 = most recent DIAGNOSTIC_POSITION_WINDOW positions, positive N
+    # shifts back N). Unlike attention_window_offset (a plain function
+    # parameter threaded through _execute_forward_pass, since attention is
+    # computed by an explicit separate call, not a hook), node capture
+    # happens inside forward hooks — registered once at session start, with
+    # no way to receive per-call arguments beyond PyTorch's (module, input,
+    # output) signature. Session-level mutable state is the only way to
+    # reach them: the /step, /peek, and /generate routes mutate this in
+    # place right before calling session.model(...), and each hook closure
+    # reads it back via get_session(session_id) at capture time. Direct
+    # user request, 2026-07-15: "there should be a stepper that allows that
+    # window to slide backwards in time" for generic nodes (LayerNorm,
+    # MLP, embedding, final_norm), not just attention. See
+    # docs/DESIGN_DECISIONS.md.
+    node_window_offset: int = 0
     token_history: list[int] = field(default_factory=list)  # tokens generated so far
     captured_tensors: dict = field(default_factory=dict)  # node_id -> NodeCapture
     generation_step: int = 0
@@ -351,6 +380,16 @@ def _execute_forward_pass(
 
     with torch.inference_mode():
         all_tokens = session.prompt_tokens + session.token_history
+        # Real bug, 2026-07-15: this path never windowed to block_size, unlike
+        # both templates' own model.generate() (`idx[:, -self.block_size:]`)
+        # — a long diagnostic session (prompt + token_history > block_size)
+        # crashed inside the model with a tensor-size mismatch on whichever
+        # buffer is sized for exactly block_size (RoPE table / causal mask).
+        # Reassigning all_tokens itself (not just a separate slice for idx)
+        # keeps every downstream use in this function — top_k_by_position,
+        # position_tokens, node capture — consistent with the same window
+        # the model actually saw. See docs/DESIGN_DECISIONS.md.
+        all_tokens = all_tokens[-session.model.block_size:]
         idx = torch.tensor([all_tokens], dtype=torch.long, device=session.device)
 
         if "Moe" in session.model.__class__.__name__:
@@ -358,11 +397,14 @@ def _execute_forward_pass(
         else:
             logits, _ = session.model(idx)
 
-        logits_last = logits[0, -1, :]
-        probs = torch.softmax(logits_last, dim=-1)
-        topk_probs, topk_ids = torch.topk(probs, k=min(top_k, logits_last.shape[0]))
-
         if append_token:
+            # Pre-append distribution — all_tokens/idx above do NOT yet
+            # include the token being sampled here, so this IS the exact
+            # distribution generated_token gets drawn from. See the
+            # top_k_by_position comment below for why this pre-append
+            # timing is deliberate, not incidental.
+            logits_last = logits[0, -1, :]
+            probs = torch.softmax(logits_last, dim=-1)
             # Same recipe as model.generate() (the Generate button), and
             # same decoding_mode setting — greedy always picks the single
             # highest-probability token (temperature has no effect, order
@@ -373,7 +415,7 @@ def _execute_forward_pass(
             if session.decoding_mode == "greedy":
                 next_token_id = torch.argmax(logits_last).item()
             else:
-                sample_probs = torch.softmax(logits_last / session.temperature, dim=-1)
+                sample_probs = torch.softmax(logits_last / max(session.temperature, MIN_TEMPERATURE), dim=-1)
                 next_token_id = torch.multinomial(sample_probs, num_samples=1).item()
             session.token_history.append(next_token_id)
             generated_token = {
@@ -383,11 +425,33 @@ def _execute_forward_pass(
             }
         else:
             last_id = session.token_history[-1] if session.token_history else session.prompt_tokens[-1]
+            # Real bug, 2026-07-15: this branch is used for >>'s final-frame
+            # capture (called AFTER >>'s own loop already appended last_id
+            # to token_history/all_tokens) and for /peek. Previously reused
+            # logits[0, -1, :] here too — but by this point all_tokens
+            # already ends in last_id, so that position predicts what comes
+            # NEXT (one token ahead of last_id), not the distribution that
+            # actually produced last_id. Inspector's LM Head "selected"
+            # highlight compares top_k's token ids against
+            # generated_token.id — with the wrong position, they could
+            # never match, so nothing ever highlighted green after >>
+            # (single-step > was unaffected — see the append_token branch
+            # above). logits[0, -2, :] is the fix: a causal model's output
+            # at index i is always "prediction after seeing input[0..i]", so
+            # position T-2 (predicting position T-1) is exactly the
+            # distribution all_tokens[T-1] (== last_id) was actually drawn
+            # from — already computed in this same forward pass, no extra
+            # cost. See docs/DESIGN_DECISIONS.md.
+            source_position = -2 if logits.shape[1] >= 2 else -1
+            logits_last = logits[0, source_position, :]
+            probs = torch.softmax(logits_last, dim=-1)
             generated_token = {
                 "position": len(session.prompt_tokens) + len(session.token_history) - 1,
                 "id": last_id,
                 "text": session.tokenizer.decode([last_id]),
             }
+
+        topk_probs, topk_ids = torch.topk(probs, k=min(top_k, logits_last.shape[0]))
 
         input_tokens = [
             {"position": pos, "id": tid, "text": session.tokenizer.decode([tid])}
@@ -397,7 +461,9 @@ def _execute_forward_pass(
         # Per-position top-k for the frontend's position stepper — reuses
         # `logits` (already computed above for every position, `top_k`
         # above only ever kept the last one) rather than a second forward
-        # pass. Capped to the last DIAGNOSTIC_POSITION_WINDOW positions.
+        # pass. NOT capped to DIAGNOSTIC_POSITION_WINDOW (unlike
+        # position_vectors/qkv_detail below) — see the top_k_pos_start
+        # comment a few lines down for why.
         #
         # Note: this uses the PRE-append `all_tokens`/`logits` (computed
         # above, before token_history gets the new token appended a few
@@ -415,14 +481,59 @@ def _execute_forward_pass(
         T_total = logits.shape[1]
         pos_window = min(T_total, DIAGNOSTIC_POSITION_WINDOW)
         pos_start = T_total - pos_window
+
+        # Real bug, 2026-07-15: the fix a few lines up (source_position)
+        # only corrected the FLAT lm_head.top_k field — Inspector's LM Head
+        # panel actually reads top_k_by_position instead (LmHeadStepper in
+        # Inspector.tsx defaults to its LAST entry to decide the "selected/
+        # generated" highlight). That loop always ran through the full
+        # pos_start..T_total range regardless of branch, so for
+        # append_token=False its last entry was still the same one-ahead
+        # "predict what comes after the complete sequence" position — the
+        # comment above (pos_start/T_total) describing "this window ends
+        # one position earlier... that's correct, not a bug" is only true
+        # for append_token=True (where all_tokens/logits are the PRE-append
+        # state). For append_token=False, all_tokens already ends in the
+        # last generated token, so the same off-by-one applies here too.
+        # top_k_end mirrors source_position's fallback exactly. pos_start
+        # (used below for position_tokens) is deliberately NOT changed —
+        # that field describes INPUT tokens, correct at every position
+        # regardless of branch, no off-by-one there. See
+        # docs/DESIGN_DECISIONS.md.
+        top_k_end = T_total if (append_token or T_total < 2) else T_total - 1
+        # Direct user request, 2026-07-15: no window here — unlike
+        # position_vectors/qkv_detail (real per-position vectors, capped to
+        # DIAGNOSTIC_POSITION_WINDOW for response-size/cost reasons), each
+        # top_k_by_position entry is just a top-5 list of small scalars, so
+        # showing every position all the way back to the start of the
+        # captured sequence (not just the last 12) is cheap and was purely
+        # an unnecessary restriction. See docs/DESIGN_DECISIONS.md.
+        top_k_pos_start = 0
+
+        # Direct user request, 2026-07-15: highlight the actually-selected
+        # token at EVERY browsable position, not just the most recent one
+        # — previously the frontend only ever compared against
+        # generated_token.id (a single token, only meaningful for the
+        # latest position) and hardcoded isMostRecent as a prerequisite.
+        # Ground truth for "what token actually came next" after each
+        # position is reconstructible here: for every already-historical
+        # position, it's simply the next entry in all_tokens; for the
+        # newest position under append_token=True specifically, all_tokens
+        # is the PRE-append array, so its own "next" is next_token_id
+        # (not yet appended). Attaching it per-entry lets the frontend do a
+        # simple, uniform token_id comparison at any position, no more
+        # isMostRecent special-casing. See docs/DESIGN_DECISIONS.md.
+        full_next_tokens = all_tokens[1:] + [next_token_id] if append_token else all_tokens[1:]
+
         top_k_by_position = []
-        for pos in range(pos_start, T_total):
+        for pos in range(top_k_pos_start, top_k_end):
             pos_logits = logits[0, pos, :]
             pos_probs = torch.softmax(pos_logits, dim=-1)
             pos_topk_probs, pos_topk_ids = torch.topk(pos_probs, k=min(top_k, pos_logits.shape[0]))
             top_k_by_position.append({
                 "position": pos,
                 "token": session.tokenizer.decode([all_tokens[pos]]),
+                "actual_next_token_id": full_next_tokens[pos] if pos < len(full_next_tokens) else None,
                 "top_k": [
                     {
                         "rank": r + 1,

@@ -52,20 +52,22 @@ export default function PresetPicker({ onSelect }: Props) {
           </select>
         </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+      {/* ~50% bigger than before — direct user report, 2026-07-15: presets
+          were straining to read at the old size. See docs/DESIGN_DECISIONS.md. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         {presets.map((p) => (
           <button
             key={p.key}
             onClick={() => handlePick(p)}
-            style={{ textAlign: "left", padding: 12 }}
+            style={{ textAlign: "left", padding: 18 }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>{p.name}</div>
-            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 17 }}>{p.name}</div>
+            <div style={{ fontSize: 14, color: "var(--text-dim)" }}>
               {p.description}
             </div>
             <div
               className={`tag ${p.template === "rnn" ? "tag-paused" : "tag-running"}`}
-              style={{ marginTop: 6 }}
+              style={{ marginTop: 8 }}
             >
               {p.template}
             </div>

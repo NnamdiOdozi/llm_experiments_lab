@@ -203,20 +203,26 @@ class TinyTransformerLM(nn.Module):
         """
         from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
 
-        def _windowed_position_vectors(tensor: torch.Tensor) -> Optional[dict]:
-            """Raw per-position vectors, last DIAGNOSTIC_POSITION_WINDOW
-            positions — any 3D [B, T, *] tensor (2D inputs like embedding's
+        def _windowed_position_vectors(tensor: torch.Tensor, offset: int = 0) -> Optional[dict]:
+            """Raw per-position vectors, DIAGNOSTIC_POSITION_WINDOW positions
+            wide — any 3D [B, T, *] tensor (2D inputs like embedding's
             token-id lookup aren't per-position float vectors, so this
             correctly returns None for those — embedding only ever gets an
             OUTPUT vector, matching the fact there's no meaningful "input
-            vector" for a token id). See docs/DESIGN_DECISIONS.md."""
+            vector" for a token id). `offset` shifts the window earlier —
+            same semantics/formula as attention's window_offset (0 = most
+            recent, positive N = shift back N), direct user request,
+            2026-07-15: "a stepper that allows that window to slide
+            backwards in time" for every node, not just attention. See
+            docs/DESIGN_DECISIONS.md."""
             if tensor.dim() != 3:
                 return None
             with torch.no_grad():
                 T = tensor.shape[1]
                 window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-                start = T - window
-                return {"positions": list(range(start, T)), "vectors": tensor[0, start:T, :].tolist()}
+                end = max(window, T - max(offset, 0))
+                start = end - window
+                return {"positions": list(range(start, end)), "vectors": tensor[0, start:end, :].tolist()}
 
         def make_hook(node_id: str):
             def hook(module, input_tuple, output):
@@ -225,6 +231,7 @@ class TinyTransformerLM(nn.Module):
                 if session is None:
                     return
 
+                offset = session.node_window_offset
                 input_tensor = input_tuple[0] if input_tuple else None
                 input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
                 output_shape = list(output.shape) if isinstance(output, torch.Tensor) else []
@@ -233,9 +240,9 @@ class TinyTransformerLM(nn.Module):
                 input_position_vectors = None
                 if isinstance(output, torch.Tensor):
                     summary = _compute_summary(output)
-                    position_vectors = _windowed_position_vectors(output)
+                    position_vectors = _windowed_position_vectors(output, offset)
                 if isinstance(input_tensor, torch.Tensor):
-                    input_position_vectors = _windowed_position_vectors(input_tensor)
+                    input_position_vectors = _windowed_position_vectors(input_tensor, offset)
 
                 from backend.training.diagnostics import NodeCapture
                 session.captured_tensors[node_id] = NodeCapture(

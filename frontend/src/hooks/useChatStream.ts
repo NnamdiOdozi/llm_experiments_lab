@@ -141,5 +141,18 @@ export function useChatStream(experimentId: number) {
     [experimentId]
   );
 
-  return { messages, sendMessage, loading, error, unavailable };
+  // Resets a stuck/confused conversation without touching the experiment
+  // or any of its runs — direct user request, 2026-07-14. See
+  // docs/DESIGN_DECISIONS.md.
+  const clearMessages = useCallback(async () => {
+    setError(null);
+    try {
+      await fetch(`${BASE}/${experimentId}/messages`, { method: "DELETE" });
+      setMessages([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to clear chat");
+    }
+  }, [experimentId]);
+
+  return { messages, sendMessage, loading, error, unavailable, clearMessages };
 }

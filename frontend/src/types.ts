@@ -73,6 +73,11 @@ export interface RunStatus {
    * app's current global setting. A run started under one setting keeps its
    * own value even if the global setting changes later. */
   execution_backend: string;
+  /** "cpu" or "cuda" — this run's own actual device. Needed to re-sync the
+   * App-level device state after a reload, which otherwise stays at its
+   * hardcoded "cpu" default regardless of the real connected run. Real bug,
+   * 2026-07-15. See docs/DESIGN_DECISIONS.md. */
+  device?: string;
 }
 
 export interface MetricRow {
@@ -192,6 +197,13 @@ export interface NodeRuntimeData {
 export interface TopKByPositionEntry {
   position: number;
   token: string;
+  // The token id that actually occupied the next position, ground-truthed
+  // server-side — lets the frontend highlight "what was actually
+  // selected" at ANY browsable position (not just the newest one), via a
+  // simple token_id comparison. null when there's no known next token
+  // (edge cases only, e.g. a 1-token sequence). Direct user request,
+  // 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  actual_next_token_id: number | null;
   top_k: TopKEntry[];
 }
 
@@ -276,6 +288,17 @@ export interface DiagnosticStepRequest {
   attention_head?: number;
   qkv_detail?: boolean;
   attention_window_offset?: number;
+  // Live override for the session's decoding settings — omit to keep
+  // whatever the session already has. Direct user request, 2026-07-15: want
+  // to adjust temperature/decoding mode mid-prompting without restarting
+  // the session. See docs/DESIGN_DECISIONS.md.
+  temperature?: number;
+  decoding_mode?: string;
+  // Same semantics as attention_window_offset, but for every other node's
+  // position_vectors/input_position_vectors (LayerNorm, MLP, embedding,
+  // final_norm). Direct user request, 2026-07-15. See
+  // docs/DESIGN_DECISIONS.md.
+  node_window_offset?: number;
 }
 
 export interface GenerateStreamToken {

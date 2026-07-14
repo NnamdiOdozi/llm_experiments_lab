@@ -131,6 +131,37 @@ def _within(parent: Path, child: Path) -> bool:
         return False
 
 
+def _search_lines(
+    lines,
+    query: str,
+    *,
+    label: str,
+    max_output_chars: int = MAX_OUTPUT_CHARS,
+    max_matches: int = MAX_MATCHES,
+) -> dict[str, Any]:
+    query = _safe_literal_query(query)
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    matches: list[dict[str, Any]] = []
+    output_chars = 0
+    for line_no, text in enumerate(lines, start=1):
+        if not pattern.search(text):
+            continue
+        output_chars += len(text)
+        if output_chars > max_output_chars or len(matches) >= max_matches:
+            break
+        matches.append({"line": line_no, "text": text})
+
+    return {
+        "success": True,
+        "query": query,
+        "file": label,
+        "matches": matches,
+        "count": len(matches),
+        "truncated": output_chars > max_output_chars or len(matches) >= max_matches,
+        "note": _TOOL_RESULT_PREFIX,
+    }
+
+
 def _search_file(
     path: Path,
     query: str,
@@ -139,32 +170,63 @@ def _search_file(
     max_output_chars: int = MAX_OUTPUT_CHARS,
     max_matches: int = MAX_MATCHES,
 ) -> dict[str, Any]:
-    query = _safe_literal_query(query)
     if not path.exists() or not path.is_file():
         return {"success": False, "error": f"{path.name} not found"}
-
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    matches: list[dict[str, Any]] = []
-    output_chars = 0
     with path.open(encoding="utf-8", errors="replace") as handle:
-        for line_no, line in enumerate(handle, start=1):
-            if not pattern.search(line):
-                continue
-            text = line.rstrip("\n")
-            output_chars += len(text)
-            if output_chars > max_output_chars or len(matches) >= max_matches:
-                break
-            matches.append({"line": line_no, "text": text})
+        lines = [line.rstrip("\n") for line in handle]
+    return _search_lines(
+        lines,
+        query,
+        label=label or path.name,
+        max_output_chars=max_output_chars,
+        max_matches=max_matches,
+    )
 
-    return {
-        "success": True,
-        "query": query,
-        "file": label or path.name,
-        "matches": matches,
-        "count": len(matches),
-        "truncated": output_chars > max_output_chars or len(matches) >= max_matches,
-        "note": _TOOL_RESULT_PREFIX,
-    }
+
+async def _search_remote_run_metrics(
+    run_id: int,
+    query: str,
+    *,
+    max_output_chars: int = MAX_OUTPUT_CHARS,
+    max_matches: int = MAX_MATCHES,
+) -> dict[str, Any]:
+    """Remote (Nebius serverless) runs never get a local metrics.jsonl file —
+    only local runs write one. Both local and remote runs sync every metric
+    row into training_runs.train_loss_history/val_loss_history (JSON) in the
+    DB (see train_worker.py and the /metrics route in api/training.py), so
+    that's the universal fallback. Without this, search_run_metrics silently
+    returned "no matching records" for every remote run, and the model
+    fabricated explanations for the gap instead of reporting the real
+    limitation. See docs/DESIGN_DECISIONS.md."""
+    from backend import db
+
+    db_run = await db.get_training_run(run_id)
+    if db_run is None:
+        return {"success": False, "error": f"Run {run_id} not found"}
+
+    rows_by_step: dict[int, dict[str, Any]] = {}
+    for column in ("train_loss_history", "val_loss_history"):
+        try:
+            history = json.loads(db_run.get(column) or "[]")
+        except json.JSONDecodeError:
+            history = []
+        for row in history:
+            step = row.get("step")
+            if step is None:
+                continue
+            rows_by_step.setdefault(step, {}).update(row)
+
+    if not rows_by_step:
+        return {"success": False, "error": f"No synced metrics in the database for run {run_id}"}
+
+    lines = [json.dumps(rows_by_step[step]) for step in sorted(rows_by_step)]
+    return _search_lines(
+        lines,
+        query,
+        label=f"run {run_id} metrics (DB-synced, no local file — remote run)",
+        max_output_chars=max_output_chars,
+        max_matches=max_matches,
+    )
 
 
 def _allowed_run_id(requested_run_id: int | None, allowed_run_ids: list[int]) -> int | None:
@@ -174,7 +236,7 @@ def _allowed_run_id(requested_run_id: int | None, allowed_run_ids: list[int]) ->
     return requested_run_id if requested_run_id in allowed_run_ids else None
 
 
-def search_run_metrics(
+async def search_run_metrics(
     allowed_run_ids: list[int], query: str, requested_run_id: int | None = None
 ) -> dict[str, Any]:
     if not allowed_run_ids:
@@ -198,13 +260,23 @@ def search_run_metrics(
         if total >= MAX_MATCHES or output_chars >= MAX_OUTPUT_CHARS:
             truncated = True
             break
-        result = _search_file(
-            path,
-            query,
-            label=f"runs/{run_id}/metrics.jsonl",
-            max_output_chars=MAX_OUTPUT_CHARS - output_chars,
-            max_matches=MAX_MATCHES - total,
-        )
+        # Local runs write metrics.jsonl directly; remote (Nebius serverless)
+        # runs never get that file at all and only have DB-synced history.
+        if path.exists():
+            result = _search_file(
+                path,
+                query,
+                label=f"runs/{run_id}/metrics.jsonl",
+                max_output_chars=MAX_OUTPUT_CHARS - output_chars,
+                max_matches=MAX_MATCHES - total,
+            )
+        else:
+            result = await _search_remote_run_metrics(
+                run_id,
+                query,
+                max_output_chars=MAX_OUTPUT_CHARS - output_chars,
+                max_matches=MAX_MATCHES - total,
+            )
         if result.get("success"):
             total += result["count"]
             output_chars += sum(len(match["text"]) for match in result["matches"])
@@ -246,6 +318,31 @@ def search_experiment_file(
     return _search_file(path, query, label=label)
 
 
+def _trim_diagnostic_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Strips the raw per-position float arrays before handing a snapshot to
+    the model — real incident, 2026-07-14: this tool was the one place in
+    the whole file with no output cap, and every per-position field added
+    this session (position_vectors/input_position_vectors on every node,
+    qkv_detail's raw Q/K/V arrays) went into it raw. A single snapshot with
+    ~18 nodes x up to 12 windowed positions x n_embd floats each blew past
+    the model's 128k-token context on its own — confirmed live, a plain
+    "comment on the lm_head and top_k logits" question 400'd. Keeps shapes,
+    summary stats, top-k predictions, and attention weights (small — at
+    most a 12x12 windowed grid) since those are what the system prompt
+    actually describes this tool as providing; drops the raw vectors, which
+    aren't something a language model can meaningfully reason over as bare
+    floating-point numbers anyway. See docs/DESIGN_DECISIONS.md."""
+    trimmed = dict(snapshot)
+    trimmed["nodes"] = {
+        node_id: {k: v for k, v in node.items() if k not in ("position_vectors", "input_position_vectors")}
+        for node_id, node in snapshot.get("nodes", {}).items()
+    }
+    attention = snapshot.get("attention")
+    if isinstance(attention, dict) and "qkv_detail" in attention:
+        trimmed["attention"] = {k: v for k, v in attention.items() if k != "qkv_detail"}
+    return trimmed
+
+
 async def get_diagnostic_snapshot(
     allowed_run_ids: list[int], requested_run_id: int | None = None
 ) -> dict[str, Any]:
@@ -268,7 +365,18 @@ async def get_diagnostic_snapshot(
                 "through at least once."
             ),
         }
-    return {"success": True, "run_id": run_id, "snapshot": snapshot, "note": _TOOL_RESULT_PREFIX}
+    return {
+        "success": True,
+        "run_id": run_id,
+        "snapshot": _trim_diagnostic_snapshot(snapshot),
+        "note": (
+            _TOOL_RESULT_PREFIX
+            + " Raw per-position vectors and Q/K/V arrays are omitted here (too large for "
+            "this context) — shapes, summary stats, top-k predictions, and attention weights "
+            "are included. Tell the user to look in the Inspector's Runtime tab for exact "
+            "raw vector values."
+        ),
+    }
 
 
 async def execute_tool_call(
@@ -277,7 +385,7 @@ async def execute_tool_call(
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
         if name == "search_run_metrics":
-            result = search_run_metrics(allowed_run_ids, args.get("query", ""), args.get("run_id"))
+            result = await search_run_metrics(allowed_run_ids, args.get("query", ""), args.get("run_id"))
         elif name == "search_experiment_file":
             result = search_experiment_file(
                 allowed_run_ids,

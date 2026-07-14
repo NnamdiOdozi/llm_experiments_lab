@@ -40,7 +40,7 @@ async def test_create_endpoint_parses_endpoint_id(monkeypatch):
     endpoint_id = await endpoints_client.create_endpoint(
         name="llm-lab-cpu-trainer", image="cr.example/llm-lab-backend:phase2",
         platform="cpu-d3", preset="4vcpu-16gb", container_port=8000,
-        subnet_id="vpcsubnet-your-subnet-id-here",
+        subnet_id="vpcsubnet-abc123",
     )
 
     assert endpoint_id == "aiendpoint-abc123"
@@ -67,7 +67,7 @@ async def test_create_endpoint_parses_id_from_human_readable_fallback(monkeypatc
     endpoint_id = await endpoints_client.create_endpoint(
         name="llm-lab-gpu-trainer", image="cr.example/llm-lab-trainer-gpu:latest",
         platform="gpu-l40s-a", preset="1gpu-8vcpu-32gb", container_port=8000,
-        subnet_id="vpcsubnet-your-subnet-id-here",
+        subnet_id="vpcsubnet-abc123",
     )
 
     assert endpoint_id == "aiendpoint-xyz789"
@@ -83,7 +83,7 @@ async def test_create_endpoint_raises_with_raw_output_when_truly_unparseable(mon
         await endpoints_client.create_endpoint(
             name="llm-lab-cpu-trainer", image="cr.example/llm-lab-trainer-cpu:latest",
             platform="cpu-d3", preset="8vcpu-32gb", container_port=8000,
-            subnet_id="vpcsubnet-your-subnet-id-here",
+            subnet_id="vpcsubnet-abc123",
         )
 
 

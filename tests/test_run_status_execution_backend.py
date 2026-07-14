@@ -38,3 +38,18 @@ async def test_get_run_status_from_db_includes_execution_backend_remote(temp_db)
     status = await db.get_run_status_from_db(run_id)
 
     assert status["execution_backend"] == "nebius_endpoint"
+
+
+async def test_get_run_status_from_db_includes_device(temp_db):
+    """Real incident, 2026-07-15: device was never in any /status response
+    at all (not the file-based path, not this DB fallback), so the frontend
+    had no way to re-sync its device state after a reload — it stayed at a
+    hardcoded "cpu" default and showed CPU-only hardware specs for a run
+    that was actually running on GPU. See docs/DESIGN_DECISIONS.md."""
+    exp_id = await db.create_experiment("Exp", {"template": "transformer"})
+    run_id = await db.create_training_run(exp_id, "cuda")
+    await db.update_training_run(run_id, status=RunStatus.RUNNING)
+
+    status = await db.get_run_status_from_db(run_id)
+
+    assert status["device"] == "cuda"

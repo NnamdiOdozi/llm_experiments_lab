@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # :latest; override per-deploy via env var once real tags are pushed.
     nebius_cpu_trainer_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-trainer-cpu:latest"
     nebius_gpu_trainer_image: str = "cr.eu-north1.nebius.cloud/e00fjx4k9nbq206gh4/llm-lab-trainer-gpu:latest"
+    # Placeholder, not a real subnet — every Nebius account has its own VPC
+    # with its own subnet id, so a hardcoded real value here would (a) leak
+    # account topology into committed source and (b) not work for anyone
+    # else's account regardless. Override via NEBIUS_SUBNET_ID in .env.
+    # Open-sourcing prep, 2026-07-15. See docs/DESIGN_DECISIONS.md.
     nebius_subnet_id: str = "vpcsubnet-your-subnet-id-here"
     nebius_cpu_platform: str = "cpu-d3"
     nebius_cpu_preset: str = "16vcpu-64gb"  # unverified at this size, see comment above

@@ -307,6 +307,22 @@ async def get_chat_messages(experiment_id: int, limit: int | None = None) -> lis
     return [dict(r) for r in rows]
 
 
+async def clear_chat_messages(experiment_id: int) -> int:
+    """Deletes all chat history for an experiment — lets a stuck/confused
+    Lab Assistant conversation start fresh without touching the
+    experiment, its config, or any of its runs. Direct user request,
+    2026-07-14: "what if I'm in one experiment with lots of runs and
+    something's gone wrong with Lab Assistant and I need to reset that?"
+    Returns the number of messages deleted. See docs/DESIGN_DECISIONS.md.
+    """
+    db = await get_db()
+    cursor = await db.execute("DELETE FROM chat_messages WHERE experiment_id = ?", (experiment_id,))
+    await db.commit()
+    deleted = cursor.rowcount
+    await db.close()
+    return deleted
+
+
 async def set_chat_message_feedback(message_id: int, feedback: str | None) -> bool:
     """Sets or clears (feedback=None) thumbs up/down on one chat message.
     Returns False if no row with that id exists."""
@@ -479,7 +495,7 @@ async def get_run_status_from_db(run_id: int) -> dict | None:
     db = await get_db()
     cursor = await db.execute(
         "SELECT id, experiment_id, status, current_step, total_steps, "
-        "template_key, started_at, completed_at, config_snapshot, execution_backend "
+        "template_key, started_at, completed_at, config_snapshot, execution_backend, device "
         "FROM training_runs WHERE id = ?",
         (run_id,),
     )
@@ -507,4 +523,5 @@ async def get_run_status_from_db(run_id: int) -> dict | None:
         "elapsed_seconds": 0,
         "from_db": True,
         "execution_backend": r.get("execution_backend") or "local",
+        "device": r.get("device") or "cpu",
     }

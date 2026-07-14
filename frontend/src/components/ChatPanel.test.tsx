@@ -11,6 +11,7 @@ function mockHook(overrides: Partial<ReturnType<typeof useChatStreamModule.useCh
     loading: false,
     error: null,
     unavailable: false,
+    clearMessages: vi.fn(),
     ...overrides,
   });
   return sendMessage;
@@ -58,6 +59,31 @@ describe("ChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows no Clear chat button when there's no history yet", () => {
+    mockHook({ messages: [] });
+    render(<ChatPanel experimentId={1} />);
+    expect(screen.queryByText(/clear chat/i)).not.toBeInTheDocument();
+  });
+
+  it("Clear chat requires a second click to confirm before actually clearing", () => {
+    const clearMessages = vi.fn();
+    mockHook({
+      messages: [
+        { id: 1, experiment_id: 1, role: "user", content: "hi", prompt_tokens: null, completion_tokens: null, total_tokens: null, latency_ms: null, created_at: "2026-01-01" },
+      ],
+      clearMessages,
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const clearButton = screen.getByRole("button", { name: /clear chat/i });
+    fireEvent.click(clearButton);
+    expect(clearMessages).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /click to confirm/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /click to confirm/i }));
+    expect(clearMessages).toHaveBeenCalledTimes(1);
   });
 
   it("shows the error message when present", () => {

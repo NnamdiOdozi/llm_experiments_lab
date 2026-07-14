@@ -71,6 +71,22 @@ async def update_config(experiment_id: int, req: UpdateConfigRequest):
     exp = await db.get_experiment(experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
+    # Direct user request, 2026-07-15: max_new_tokens must never exceed
+    # block_size — applies identically to every template (transformer and
+    # MoE both share the same diagnostics/generation code, see
+    # docs/DESIGN_DECISIONS.md §57). Single validation point here since
+    # ConfigPanel is the only way to edit either field.
+    max_new_tokens = req.config.get("inference", {}).get("max_new_tokens")
+    block_size = req.config.get("model", {}).get("block_size")
+    if (
+        isinstance(max_new_tokens, (int, float))
+        and isinstance(block_size, (int, float))
+        and max_new_tokens > block_size
+    ):
+        raise HTTPException(
+            400,
+            f"max_new_tokens ({max_new_tokens}) cannot exceed block_size ({block_size})",
+        )
     old_config = json.loads(exp["config_json"])
     db_conn = await db.get_db()
     await db_conn.execute(

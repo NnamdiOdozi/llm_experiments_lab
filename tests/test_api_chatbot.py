@@ -87,6 +87,25 @@ async def test_set_feedback_404_for_unknown_message(temp_db, client):
     assert resp.status_code == 404
 
 
+async def test_clear_messages_deletes_history_for_experiment(temp_db, client):
+    """Direct user request, 2026-07-14: reset a stuck/confused Lab
+    Assistant conversation without starting a new experiment (which would
+    also lose all its runs). See docs/DESIGN_DECISIONS.md."""
+    await db.add_chat_message(temp_db, "user", "hello")
+    await db.add_chat_message(temp_db, "assistant", "hi there")
+
+    resp = await client.delete(f"/api/chatbot/{temp_db}/messages")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"experiment_id": temp_db, "deleted": 2}
+    assert await db.get_chat_messages(temp_db) == []
+
+
+async def test_clear_messages_404_for_unknown_experiment(temp_db, client):
+    resp = await client.delete("/api/chatbot/999999/messages")
+    assert resp.status_code == 404
+
+
 async def test_set_feedback_rejects_invalid_value(temp_db, client):
     message_id = await db.add_chat_message(temp_db, "assistant", "Some answer")
     resp = await client.patch(f"/api/chatbot/messages/{message_id}/feedback", json={"feedback": "sideways"})
