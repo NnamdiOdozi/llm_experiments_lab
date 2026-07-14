@@ -3518,6 +3518,30 @@ Verified: `test_remote_finalize_mirrors_persistence_into_local_db`
 finalize test updated for the new `persisted` response key. Full suite
 212 passed.
 
+## §73: Fresh runs trained max_iters + 1 steps — loop started at 0 with an inclusive end
+
+**Problem (Fable review, 2026-07-15):** `train_transformer`/`train_moe`
+looped `range(start_step, max_iters + 1)` with `start_step = 0` on a fresh
+run — max_iters + 1 optimizer steps, i.e. "500 of 500" had actually trained
+501 times. Checked for an existing rationale before changing (per direct
+user instruction): the only nearby comments explain *resume* semantics
+("checkpoint saved AFTER completing step N, so resume from N+1") and
+pause-check placement — nothing explains the extra fresh-run step, and the
+resume arithmetic itself assumes "step N = N completed steps", which a
+0-start contradicts.
+
+**Fix:** fresh runs start at step 1 (`else 1`); the inclusive `max_iters +
+1` end is kept so the final step is numbered max_iters and eval/checkpoint
+still fire on it. Resume path untouched. RNN's loop already counted from 1
+(`counter += 1` before use) — no change there. The now-redundant
+`step > 0` eval guard is left in place (harmless, and removing working code
+isn't worth the regression surface).
+
+Verified: new `tests/test_train_loop_steps.py` runs a real tiny
+train_transformer with a counting optimizer (dataset/DB monkeypatched,
+everything under tmp_path) — exactly max_iters steps, current_step still
+ends at max_iters. Confirmed failing pre-fix. Full suite 213 passed.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

@@ -316,8 +316,13 @@ def train_transformer(ws: WorkerState):
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
-    # Checkpoint is saved AFTER completing step N, so resume from N+1
-    start_step = ws.current_step + 1 if ws.resume else 0
+    # Checkpoint is saved AFTER completing step N, so resume from N+1.
+    # Fresh runs start at 1, not 0 — "step N" means "N completed steps"
+    # (that's what the resume arithmetic above already assumes), so a fresh
+    # run starting at 0 did max_iters + 1 optimizer steps: an off-by-one
+    # where "500 of 500" had actually trained 501 times. Fable review,
+    # 2026-07-15 — see docs/DESIGN_DECISIONS.md §73.
+    start_step = ws.current_step + 1 if ws.resume else 1
 
     for step in range(start_step, max_iters + 1):
         ws.current_step = step
@@ -399,7 +404,9 @@ def train_moe(ws: WorkerState):
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
-    start_step = ws.current_step + 1 if ws.resume else 0
+    # Fresh runs start at 1, not 0 — same off-by-one fix as
+    # train_transformer above, see §73.
+    start_step = ws.current_step + 1 if ws.resume else 1
 
     for step in range(start_step, max_iters + 1):
         ws.current_step = step
