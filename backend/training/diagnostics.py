@@ -312,6 +312,13 @@ def _compute_attention_weights(
                 x = x + model.pos_emb(torch.arange(x.shape[1], device=session.device))
             for i in range(layer):
                 x = model.blocks[i](x)
+                # BlockMoe.forward returns (x, drop_rate), not a bare tensor
+                # — without unwrapping, any MoE layer >= 1 crashed on
+                # `B, T, C = x.shape` below and the broad except turned it
+                # into a permanent "Capture failed" for blocks 2..N. Fable
+                # review, 2026-07-14 — see docs/DESIGN_DECISIONS.md §67.
+                if isinstance(x, tuple):
+                    x = x[0]
 
             B, T, C = x.shape
             x_ln = block.ln1(x)

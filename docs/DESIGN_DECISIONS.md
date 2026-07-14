@@ -3339,6 +3339,28 @@ Verified: new test `test_new_session_for_same_run_evicts_previous_and_detaches_h
 (handles stored; eviction detaches hooks from the old model; other runs'
 sessions untouched). Full suite 206 passed (was 205).
 
+## §67: MoE attention capture always failed for every block except the first
+
+**Problem (Fable review, 2026-07-14):** selecting Causal Self-Attention in
+any MoE block other than block 1 always showed "Capture failed".
+
+**Root cause:** `_compute_attention_weights` propagates the residual stream
+through the blocks *below* the requested layer with `x = model.blocks[i](x)`.
+`Block.forward` (transformer) returns a tensor, but `BlockMoe.forward`
+returns `(x, drop_rate)` — so for `layer >= 1` on MoE, `x` silently became a
+tuple, `B, T, C = x.shape` threw, and the function's broad `except` reported
+it as "Capture failed". Layer 0 never propagates (`range(0)`), which is why
+block 1 worked and masked the bug.
+
+**Fix:** unwrap the tuple after each block call (`if isinstance(x, tuple):
+x = x[0]`) — matches how `TinyMoeLM.forward` itself consumes its blocks.
+
+Verified: new test `test_attention_recompute_works_for_moe_layer_above_zero`
+— confirmed failing before the fix (revert → fail → restore → pass), passes
+after. Note for remote runs: this file ships inside the trainer image, so
+the fix needs a `scripts/build_push_trainer_*.sh` rebuild to take effect
+serverless-side.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

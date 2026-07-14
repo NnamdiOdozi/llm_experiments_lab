@@ -710,6 +710,37 @@ def test_new_session_for_same_run_evicts_previous_and_detaches_hooks():
         diagnostics._run_to_session.pop(424243, None)
 
 
+def test_attention_recompute_works_for_moe_layer_above_zero():
+    """Real bug (Fable review, 2026-07-14 — DESIGN_DECISIONS §67): the
+    manual attention recompute propagated through earlier blocks with
+    `x = model.blocks[i](x)`, but BlockMoe.forward returns (x, drop_rate)
+    — so for any MoE layer >= 1, x became a tuple, `B, T, C = x.shape`
+    threw, and the broad except surfaced as a permanent "Capture failed".
+    Layer 0 (range(0) empty, no propagation) masked the bug."""
+    from backend.training import diagnostics
+    from backend.training.templates.moe.model import TinyMoeLM
+
+    model = TinyMoeLM(
+        vocab_size=10, n_embd=8, n_head=2, n_layer=2, block_size=8,
+        dropout=0.0, num_experts=2, top_k=1,
+    )
+    model.train(False)
+    session_id = diagnostics.create_diagnostic_session(
+        model=model, tokenizer=_IdentityTokenizer(), device="cpu", prompt_tokens=[0, 1, 2],
+    )
+    try:
+        result = diagnostics._compute_attention_weights(
+            diagnostics.get_session(session_id), layer=1, head=0, qkv_detail=True,
+        )
+        assert result is not None, "layer 1 capture failed — BlockMoe tuple not unwrapped?"
+        assert result["available"] is True
+        assert result["layer"] == 1
+        assert len(result["weights"]) == 3  # one row per prompt position
+        assert len(result["qkv_detail"]["q"]) == 3
+    finally:
+        diagnostics.delete_session(session_id)
+
+
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
     """qkv_detail=True returns one Q/K/V vector per position (not just the
     last token) — the frontend's position stepper needs one per position."""
