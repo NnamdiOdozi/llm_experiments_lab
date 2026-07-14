@@ -3481,6 +3481,43 @@ against blocking code — the health request won the initial scheduling race
 — so the test now gives the step a 0.3s head start before timing; confirmed
 failing pre-fix after that. Full suite 210 passed.
 
+## §72: Remote diagnostic persistence was container-local — the controller now mirrors it
+
+**Problem (Fable review, 2026-07-15):** for remote runs, `/generate` and
+`/finalize` are proxied wholesale to the trainer container, so
+`_persist_diagnostic_result` ran *inside the container* — writing that
+container's own SQLite and prompt log, both of which die with the
+container. The Lab Assistant is grounded on the CONTROLLER's lab.db and
+logs, so serverless prompt history was simply invisible to it (same class
+of gap as §16/§17: local row never updated for remote activity).
+
+**Fix:**
+- `_persist_diagnostic_result` now returns the payload it persisted
+  (prompt, generated_output, generation_params, top_k_summary), and the
+  local `/finalize` includes it in the response as `persisted` (extra key,
+  invisible to the frontend which only reads `success`).
+- New `_persist_remote_diagnostic()` on the controller mirrors that payload
+  into the local `diagnostic_sessions` table + prompt log, tagged
+  `(remote)` in the log line.
+- Controller's `/finalize` remote branch mirrors after proxying.
+- Controller's `/generate` remote branch calls the remote `/finalize` after
+  the stream completes and mirrors its payload. Deliberate trade-off: this
+  writes a second, identical row in the *container's* throwaway DB (its
+  /generate already persisted once) — nothing ever reads that DB, and the
+  alternative was a separate payload-only route on the trainer. Mirror
+  failures log a warning and never corrupt the already-delivered stream.
+
+**Stale-image tolerance:** a trainer image built before this change returns
+plain `{"success": true}` — the controller logs "trainer image predates
+§72?" and skips the mirror rather than erroring. As with §67/§68, the full
+fix needs a trainer-image rebuild to work end-to-end serverless.
+
+Verified: `test_remote_finalize_mirrors_persistence_into_local_db`
+(confirmed failing pre-fix) and
+`test_remote_finalize_tolerates_stale_trainer_image`. Existing local
+finalize test updated for the new `persisted` response key. Full suite
+212 passed.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

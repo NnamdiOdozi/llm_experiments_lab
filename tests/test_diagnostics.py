@@ -1130,7 +1130,12 @@ async def test_diagnostic_session_persisted_after_manual_finalize(temp_db, clien
 
     resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/finalize")
     assert resp.status_code == 200
-    assert resp.json() == {"success": True}
+    body = resp.json()
+    assert body["success"] is True
+    # §72: the persisted payload rides back so a proxying controller can
+    # mirror it into its own durable DB for remote runs.
+    assert body["persisted"]["prompt"] == "The king"
+    assert body["persisted"]["generated_output"].startswith("The king")
 
     conn = await db.get_db()
     cursor = await conn.execute("SELECT COUNT(*) FROM diagnostic_sessions WHERE run_id = ?", (run_id,))
@@ -1404,6 +1409,72 @@ async def test_diagnostics_step_remote_proxy_forwards_temperature_without_attent
     assert resp.status_code == 200
     _, _, sent_body = fake_client.calls[0]
     assert sent_body == {"temperature": 1.7, "decoding_mode": "greedy", "node_window_offset": 0}
+
+
+async def _setup_remote_run(exp_id: int) -> int:
+    """Remote run row + READY worker session — shared by the §72 tests."""
+    run_id = await db.create_training_run(
+        exp_id, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session("worker-cpu", endpoint_url="https://cpu.tunnel.nebius.cloud")
+    return run_id
+
+
+async def test_remote_finalize_mirrors_persistence_into_local_db(temp_db, client, monkeypatch):
+    """§72 (Fable review, 2026-07-15): a remote run's finalize persisted only
+    inside the trainer container's ephemeral storage — the controller's
+    lab.db (which grounds the Lab Assistant) never got a row. The trainer
+    now returns the persisted payload and the controller mirrors it."""
+    import backend.api.training as training_module
+    from tests.test_training_remote import FakeAsyncClient, FakeResponse
+
+    run_id = await _setup_remote_run(temp_db)
+    persisted = {
+        "prompt": "The king",
+        "generated_output": "The king said",
+        "generation_params": {"max_new_tokens": 2},
+        "top_k_summary": [],
+    }
+    fake_client = FakeAsyncClient([FakeResponse({"success": True, "persisted": persisted})])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/diag-test/finalize")
+    assert resp.status_code == 200
+
+    conn = await db.get_db()
+    cursor = await conn.execute(
+        "SELECT prompt, generated_output FROM diagnostic_sessions WHERE run_id = ?", (run_id,),
+    )
+    rows = await cursor.fetchall()
+    await conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "The king"
+    assert rows[0][1] == "The king said"
+
+
+async def test_remote_finalize_tolerates_stale_trainer_image(temp_db, client, monkeypatch):
+    """A trainer image built before §72 returns plain {"success": true} —
+    the controller must skip the mirror gracefully (log + no row), not 500.
+    Trainer-image staleness is this project's known recurring trap."""
+    import backend.api.training as training_module
+    from tests.test_training_remote import FakeAsyncClient, FakeResponse
+
+    run_id = await _setup_remote_run(temp_db)
+    fake_client = FakeAsyncClient([FakeResponse({"success": True})])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/diag-test/finalize")
+    assert resp.status_code == 200
+
+    conn = await db.get_db()
+    cursor = await conn.execute(
+        "SELECT COUNT(*) FROM diagnostic_sessions WHERE run_id = ?", (run_id,),
+    )
+    (count,) = await cursor.fetchone()
+    await conn.close()
+    assert count == 0
 
 
 async def test_diagnostic_step_windows_context_past_block_size(temp_db, client, monkeypatch, tmp_path):

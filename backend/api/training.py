@@ -1297,7 +1297,7 @@ async def get_diagnostic_snapshot_for_run(run_id: int) -> dict | None:
         return None
 
 
-async def _persist_diagnostic_result(run_id: int, session, generation_params: dict) -> None:
+async def _persist_diagnostic_result(run_id: int, session, generation_params: dict) -> dict:
     """Persist a diagnostic session's final outcome — shared by /generate's
     completion (Phase 4) and /finalize (manual `>` stepping to the same
     end state). Reads session.last_snapshot rather than taking a snapshot
@@ -1307,18 +1307,24 @@ async def _persist_diagnostic_result(run_id: int, session, generation_params: di
     stepping `>` to maxNewTokens manually reached the same end state as
     `>>` but never got saved here, so the Lab Assistant couldn't see it.
     See docs/DESIGN_DECISIONS.md.
+
+    Returns the persisted payload so /finalize can hand it back to a
+    proxying controller — when this code runs inside a trainer container,
+    this DB/log write lands in the container's EPHEMERAL storage; the
+    controller mirrors the returned payload into its own durable lab.db
+    (see _persist_remote_diagnostic / §72).
     """
     from backend.training import artifacts
 
     prompt_text = session.tokenizer.decode(session.prompt_tokens)
     generated_output = session.tokenizer.decode(session.prompt_tokens + session.token_history)
-    await db.save_diagnostic_session_result(
-        run_id,
-        prompt=prompt_text,
-        generated_output=generated_output,
-        generation_params=generation_params,
-        top_k_summary=session.last_snapshot.lm_head.get("top_k", []),
-    )
+    payload = {
+        "prompt": prompt_text,
+        "generated_output": generated_output,
+        "generation_params": generation_params,
+        "top_k_summary": session.last_snapshot.lm_head.get("top_k", []),
+    }
+    await db.save_diagnostic_session_result(run_id, **payload)
 
     # Also log in the same format /prompt (the now-removed Generate button)
     # used to — the chatbot's context builder
@@ -1330,6 +1336,44 @@ async def _persist_diagnostic_result(run_id: int, session, generation_params: di
         "run_id=%d payload=%s",
         run_id,
         json.dumps({"step": status.get("current_step"), "prompt": prompt_text, "output": generated_output}),
+    )
+    return payload
+
+
+async def _persist_remote_diagnostic(run_id: int, db_run: dict, persisted: dict | None) -> None:
+    """Mirror a remote trainer's diagnostic persistence into the CONTROLLER's
+    own lab.db + prompt log. Without this, a remote run's /generate//finalize
+    only ever wrote inside the trainer container — ephemeral storage that
+    dies with the container — so the Lab Assistant (grounded on the
+    controller's DB/logs) never saw serverless prompt history at all. Fable
+    review, 2026-07-15 — see docs/DESIGN_DECISIONS.md §72.
+
+    Tolerates `persisted` being absent: a trainer image built before §72
+    returns plain {"success": true} from /finalize — log and skip rather
+    than break the request (trainer-image staleness is this project's
+    known recurring trap).
+    """
+    if not persisted or "prompt" not in persisted:
+        training_log.warning(
+            "Remote finalize returned no persisted payload — trainer image "
+            "predates §72? Skipping local mirror — run_id=%d", run_id,
+        )
+        return
+    await db.save_diagnostic_session_result(
+        run_id,
+        prompt=persisted["prompt"],
+        generated_output=persisted["generated_output"],
+        generation_params=persisted.get("generation_params", {}),
+        top_k_summary=persisted.get("top_k_summary", []),
+    )
+    prompt_log.info(
+        "run_id=%d (remote) payload=%s",
+        run_id,
+        json.dumps({
+            "step": db_run.get("current_step"),
+            "prompt": persisted["prompt"],
+            "output": persisted["generated_output"],
+        }),
     )
 
 
@@ -1354,6 +1398,10 @@ async def diagnostics_finalize(run_id: int, session_id: str, req: DiagnosticsSte
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics finalize failed: {exc}")
         await _touch_worker_for_run(db_run)
+        # The trainer container persisted into its own EPHEMERAL storage —
+        # mirror the payload it returns into the controller's durable
+        # lab.db/logs so the Lab Assistant can see it. See §72.
+        await _persist_remote_diagnostic(run_id, db_run, result.get("persisted"))
         return result
 
     from backend.training import diagnostics
@@ -1370,8 +1418,12 @@ async def diagnostics_finalize(run_id: int, session_id: str, req: DiagnosticsSte
         "attention_head": attention_head,
         "qkv_detail": qkv_detail,
     }
-    await _persist_diagnostic_result(run_id, session, generation_params)
-    return {"success": True}
+    # "persisted" rides back to a proxying controller so it can mirror this
+    # into its own durable DB when we're running inside a trainer container
+    # (whose own write above is ephemeral). See §72. Extra key is invisible
+    # to the frontend, which only reads success.
+    payload = await _persist_diagnostic_result(run_id, session, generation_params)
+    return {"success": True, "persisted": payload}
 
 
 @router.post("/{run_id}/diagnostics/{session_id}/generate")
@@ -1397,6 +1449,31 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
                         async for line in resp.aiter_lines():
                             yield line + "\n"
                 await _touch_worker_for_run(db_run)
+                # Mirror the remote persistence into the controller's own
+                # DB/logs (see §72): the trainer's /generate persisted only
+                # inside its ephemeral container. Its /finalize returns the
+                # same payload — call it and mirror. This does write a
+                # second (identical) row in the CONTAINER's throwaway DB;
+                # nothing ever reads that DB, the duplication is the price
+                # of not inventing a separate payload-only route. Failures
+                # here must not corrupt the already-delivered stream — log
+                # and move on, the generation itself succeeded.
+                try:
+                    fin = await _proxy(
+                        db_run, "POST",
+                        f"/api/training/{{run_id}}/diagnostics/{session_id}/finalize",
+                        {
+                            "attention_layer": req.attention_layer,
+                            "attention_head": req.attention_head,
+                            "qkv_detail": req.qkv_detail,
+                        },
+                    )
+                    await _persist_remote_diagnostic(run_id, db_run, fin.get("persisted"))
+                except (httpx.HTTPError, HTTPException) as exc:
+                    training_log.warning(
+                        "Remote generate finished but local persistence mirror failed — "
+                        "run_id=%d session_id=%s: %s", run_id, session_id, exc,
+                    )
             except httpx.HTTPError as exc:
                 yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
             return
