@@ -116,7 +116,7 @@ npm run dev
 
 Open `http://localhost:5173` in browser.
 
-### 3. Nebius Serverless (optional — only needed for GPU or offloaded CPU runs)
+### 3. Nebius Serverless
 
 By default training runs locally, no Nebius account needed. To use serverless
 GPU/CPU endpoints instead:
