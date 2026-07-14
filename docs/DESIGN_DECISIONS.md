@@ -3442,6 +3442,45 @@ Verified: new `tests/test_reconcile.py` (local running → failed; remote
 running with remote_run_id → untouched; remote mid-provisioning → failed;
 local paused → untouched). Confirmed failing pre-fix. Full suite 209 passed.
 
+## §71: Sync torch in async routes froze the whole API — moved to worker threads, with a diagnostics lock
+
+**Problem (Fable review, 2026-07-15):** every diagnostics route is `async
+def` but ran synchronous torch directly on the event loop: forward passes
+in `/step`/`/peek`, checkpoint loads in `/diagnostics/start`,
+`/architecture/embedding-table` and `/prompt`, a model build in
+`/architecture`, and — worst — the `>>` SSE loop, which blocked the loop
+once per generated token. During any of these, *every* other request
+stalled, including the frontend's 2s status poll (which pre-§69 could then
+even trip the false disconnected banner).
+
+**Fix:** the blocking sections now run via `asyncio.to_thread(...)`. The
+`>>` loop offloads one token at a time, so frames still stream as they're
+produced.
+
+**The subtle part — `_diag_lock`:** the event loop's blocking behavior was
+also an accidental *serialization guarantee* — no two session-touching
+calls could ever interleave mid-mutation. Threads remove that guarantee,
+and the frontend genuinely fires overlapping requests (the Inspector's
+peek effect triggers while a step is in flight). A single global
+`asyncio.Lock` in training.py now wraps every session-mutating torch call
+(`start`/`step`/`peek`/each `>>` token/final capture). Global rather than
+per-session: after §66 sessions are one-per-run and this is a single-user
+lab — per-session locks would add bookkeeping for no observable gain. The
+`>>` loop takes the lock per token (not across the stream), preserving the
+old behavior of peeks interleaving between tokens. Session-free loads
+(`/prompt`, embedding table, param count) use `to_thread` without the lock.
+
+Also fixed in passing: an `HTTPException` raised inside `/diagnostics/
+start`'s try-block (e.g. 400 "Unknown template") was previously swallowed
+by the broad `except Exception` and re-raised as a 500 — it now passes
+through with its real status.
+
+Verified: new test `test_slow_diagnostic_step_does_not_block_event_loop`
+(a 1.5s-slow step must not delay `/api/health`). First version passed even
+against blocking code — the health request won the initial scheduling race
+— so the test now gives the step a 0.3s head start before timing; confirmed
+failing pre-fix after that. Full suite 210 passed.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

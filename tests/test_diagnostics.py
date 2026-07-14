@@ -794,6 +794,58 @@ def test_attention_recompute_matches_real_forward_for_rope():
         diagnostics.delete_session(session_id)
 
 
+async def test_slow_diagnostic_step_does_not_block_event_loop(temp_db, client, monkeypatch, tmp_path):
+    """Event-loop-blocking fix (Fable review, 2026-07-15 — DESIGN_DECISIONS
+    §71): diagnostics routes used to run sync torch directly on the event
+    loop, freezing every other request (including the 2s status poll) for
+    the duration of a forward pass or checkpoint load. Now they run via
+    asyncio.to_thread. This test makes the step artificially slow (1.5s
+    sleep) and requires /api/health to answer while it's still in flight —
+    pre-fix, health could only answer after the step finished."""
+    import time as time_module
+
+    from backend.training import diagnostics as diag_module
+
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    real_step = diag_module.run_diagnostic_step
+
+    def slow_step(*args, **kwargs):
+        time_module.sleep(1.5)  # simulates a slow forward pass
+        return real_step(*args, **kwargs)
+
+    monkeypatch.setattr(diag_module, "run_diagnostic_step", slow_step)
+
+    start = time_module.perf_counter()
+    step_task = asyncio.create_task(
+        client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={})
+    )
+    # Give the step task a head start so it's INSIDE its slow section before
+    # health is timed — without this the health request can win the initial
+    # scheduling race and pass even against blocking code. Pre-fix, this
+    # asyncio.sleep itself can't resume until the loop unblocks (~1.5s), so
+    # the elapsed window below reliably captures the freeze.
+    await asyncio.sleep(0.3)
+    health = await client.get("/api/health")
+    elapsed = time_module.perf_counter() - start
+
+    assert health.status_code == 200
+    # Generous margin: post-fix this is ~0.3s (the head-start sleep plus
+    # milliseconds); pre-fix it's >= 1.5s because the loop itself is asleep
+    # inside the step.
+    assert elapsed < 0.8, f"health round trip took {elapsed:.2f}s — event loop blocked by the step?"
+
+    step_resp = await step_task
+    assert step_resp.status_code == 200
+
+
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
     """qkv_detail=True returns one Q/K/V vector per position (not just the
     last token) — the frontend's position stepper needs one per position."""

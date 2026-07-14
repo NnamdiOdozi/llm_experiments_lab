@@ -31,6 +31,19 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 # Serialize start requests to prevent race conditions
 _start_lock = asyncio.Lock()
 
+# Diagnostics torch work now runs in a worker thread (asyncio.to_thread) so
+# a forward pass / checkpoint load no longer freezes the whole event loop
+# (previously every step/peek/generate-token stalled the 2s status poll and
+# every other request for its full duration). That threading removes the
+# event loop's implicit serialization of session access, so this lock
+# restores it: session state (token_history, captured_tensors, hooks) is
+# mutated by these calls and the frontend really does fire overlapping
+# requests (the Inspector's peek effect triggers while a step is still in
+# flight). One global lock, not per-session — sessions after §66 are
+# one-per-run and this is a single-user lab, so the simplicity wins. Fable
+# review, 2026-07-15 — see docs/DESIGN_DECISIONS.md §71.
+_diag_lock = asyncio.Lock()
+
 # run_id -> in-flight background task for a remote run's provisioning
 # (ensure_worker + mirror experiment + remote start). Lets Cancel/Stop
 # actually interrupt provisioning instead of only being able to stop an
@@ -462,7 +475,10 @@ async def prompt_model(run_id: int, req: PromptRequest):
             json.dumps({"prompt": req.prompt, "output": output}),
         )
         return {"run_id": run_id, "prompt": req.prompt, "output": output}
-    result = prompt_paused_model(run_id, req.prompt, req.max_new_tokens)
+    # Worker thread — loads a full checkpoint + runs generation, seconds of
+    # sync torch that previously froze the event loop (see §71). No
+    # _diag_lock: it builds its own throwaway model, touches no session.
+    result = await asyncio.to_thread(prompt_paused_model, run_id, req.prompt, req.max_new_tokens)
     if result is None:
         raise HTTPException(400, "Run must be paused or completed, with a saved checkpoint, to prompt")
     # Full prompt+output logged as one JSON payload — the chatbot's context
@@ -719,13 +735,18 @@ async def get_architecture_manifest(run_id: int):
     template_key = config.get("template", "transformer")
     model_cfg = config.get("model", {})
 
-    # Count parameters using template's model
+    # Count parameters using template's model — built in a worker thread,
+    # model construction is sync torch work (see §71).
+    def _count_params() -> tuple[int, int]:
+        model = TEMPLATE_REGISTRY[template_key]["build_model"](config)
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        return total, trainable
+
     total_params = 0
     trainable_params = 0
     try:
-        model = TEMPLATE_REGISTRY[template_key]["build_model"](config)
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params, trainable_params = await asyncio.to_thread(_count_params)
     except Exception as e:
         training_log.warning("Could not count params for run %d (may not have a saved checkpoint yet): %s", run_id, e)
 
@@ -927,43 +948,49 @@ async def get_embedding_table(run_id: int):
     if not cp_path.exists():
         raise HTTPException(400, "No checkpoint available for this run")
 
-    import torch
-    cp = torch.load(cp_path, map_location="cpu", weights_only=False)
-    model_config = cp.get("config", config)
-    model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config)
-    model.load_state_dict(cp["model_state"])
-    model.eval()
+    # Sync helper via asyncio.to_thread — checkpoint load + a vocab_size x
+    # n_embd .tolist() previously ran straight on the event loop (see §71).
+    # No _diag_lock: builds its own throwaway model, touches no session.
+    def _load_table() -> dict:
+        import torch
+        cp = torch.load(cp_path, map_location="cpu", weights_only=False)
+        model_config = cp.get("config", config)
+        model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config)
+        model.load_state_dict(cp["model_state"])
+        model.train(False)
 
-    from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
-    text = load_tiny_shakespeare()
-    tokenizer = CharDataset(text, model_config["model"]["block_size"], 1)
+        from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
+        text = load_tiny_shakespeare()
+        tokenizer = CharDataset(text, model_config["model"]["block_size"], 1)
 
-    weight = model.token_emb.weight.detach().cpu()
-    vocab_size, n_embd = weight.shape
+        weight = model.token_emb.weight.detach().cpu()
+        vocab_size, n_embd = weight.shape
 
-    # Position embedding table is only a real learned parameter under
-    # pos_encoding="learned" (nn.Embedding(block_size, n_embd)) — RoPE
-    # computes rotary embeddings on the fly, no table exists to show.
-    # hasattr is the ground truth here (checked against the actual loaded
-    # model), not the config string, so this can't drift out of sync with
-    # the model's real structure. Direct user follow-up, 2026-07-13: "I
-    # can't see the position embedding table... I think they should both
-    # be on that tab." See docs/DESIGN_DECISIONS.md.
-    position_embedding = None
-    block_size = None
-    if hasattr(model, "pos_emb"):
-        pos_weight = model.pos_emb.weight.detach().cpu()
-        block_size = pos_weight.shape[0]
-        position_embedding = pos_weight.tolist()
+        # Position embedding table is only a real learned parameter under
+        # pos_encoding="learned" (nn.Embedding(block_size, n_embd)) — RoPE
+        # computes rotary embeddings on the fly, no table exists to show.
+        # hasattr is the ground truth here (checked against the actual loaded
+        # model), not the config string, so this can't drift out of sync with
+        # the model's real structure. Direct user follow-up, 2026-07-13: "I
+        # can't see the position embedding table... I think they should both
+        # be on that tab." See docs/DESIGN_DECISIONS.md.
+        position_embedding = None
+        block_size = None
+        if hasattr(model, "pos_emb"):
+            pos_weight = model.pos_emb.weight.detach().cpu()
+            block_size = pos_weight.shape[0]
+            position_embedding = pos_weight.tolist()
 
-    return {
-        "vocab_size": vocab_size,
-        "n_embd": n_embd,
-        "tokens": [tokenizer.decode([i]) for i in range(vocab_size)],
-        "embedding": weight.tolist(),
-        "block_size": block_size,
-        "position_embedding": position_embedding,
-    }
+        return {
+            "vocab_size": vocab_size,
+            "n_embd": n_embd,
+            "tokens": [tokenizer.decode([i]) for i in range(vocab_size)],
+            "embedding": weight.tolist(),
+            "block_size": block_size,
+            "position_embedding": position_embedding,
+        }
+
+    return await asyncio.to_thread(_load_table)
 
 
 @router.post("/{run_id}/diagnostics/start")
@@ -1018,7 +1045,10 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
     if template_key == "rnn":
         raise HTTPException(400, "Step-through diagnostics not yet supported for the RNN template — architecture view only.")
 
-    try:
+    # Sync helper run via asyncio.to_thread — torch.load + model build here
+    # is the single heaviest blocking call in the API (seconds), and it used
+    # to run directly on the event loop. See _diag_lock's comment / §71.
+    def _load_and_start() -> dict:
         # Load checkpoint
         import torch
         cp = torch.load(cp_path, map_location=device, weights_only=False)
@@ -1026,7 +1056,7 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
         model_config = cp.get("config", config)
         model = TEMPLATE_REGISTRY[template_key]["build_model"](model_config).to(device)
         model.load_state_dict(cp["model_state"])
-        model.eval()
+        model.train(False)
 
         # Load tokenizer
         if template_key in ("transformer", "moe"):
@@ -1067,6 +1097,14 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
             "tokens": input_tokens,
         }
 
+    try:
+        # Under _diag_lock: create_diagnostic_session evicts the run's
+        # previous session (§66) — must not race a step/peek still using it.
+        async with _diag_lock:
+            return await asyncio.to_thread(_load_and_start)
+
+    except HTTPException:
+        raise
     except Exception as e:
         training_log.error("Diagnostics start failed for run %d: %s", run_id, e, exc_info=True)
         raise HTTPException(500, f"Failed to start diagnostic session: {str(e)}")
@@ -1133,11 +1171,15 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
         session.decoding_mode = decoding_mode
     session.node_window_offset = node_window_offset
 
-    # Run step
-    snapshot = diagnostics.run_diagnostic_step(
-        session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
-        attention_window_offset=attention_window_offset,
-    )
+    # Run step — in a worker thread, under _diag_lock (see §71): the forward
+    # pass must not block the event loop, and the lock keeps session
+    # mutation atomic now that the loop no longer serializes it.
+    async with _diag_lock:
+        snapshot = await asyncio.to_thread(
+            diagnostics.run_diagnostic_step,
+            session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
+            attention_window_offset=attention_window_offset,
+        )
     if snapshot is None:
         raise HTTPException(500, "Failed to run diagnostic step")
 
@@ -1189,10 +1231,13 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
         raise HTTPException(404, "Diagnostic session not found")
 
     session.node_window_offset = node_window_offset
-    snapshot = diagnostics.run_diagnostic_step_internal(
-        session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
-        skip_token_generation=True, attention_window_offset=attention_window_offset,
-    )
+    # Worker thread + _diag_lock, same as /step — see §71.
+    async with _diag_lock:
+        snapshot = await asyncio.to_thread(
+            diagnostics.run_diagnostic_step_internal,
+            session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
+            skip_token_generation=True, attention_window_offset=attention_window_offset,
+        )
     if snapshot is None:
         raise HTTPException(500, "Failed to peek diagnostic state")
 
@@ -1375,43 +1420,59 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
             session.decoding_mode = req.decoding_mode
         session.node_window_offset = req.node_window_offset
 
-        try:
+        # One token's forward pass + sample — sync, run per token via
+        # asyncio.to_thread under _diag_lock so the stream no longer blocks
+        # the event loop between yields (see §71). Lock is per-token, not
+        # held across the whole stream, preserving the previous behavior of
+        # peeks being able to interleave between tokens.
+        def _generate_one_token() -> dict:
             import torch
-            for _ in range(req.max_new_tokens):
-                with torch.inference_mode():
-                    all_tokens = session.prompt_tokens + session.token_history
-                    # Same window-to-block_size fix as _execute_forward_pass —
-                    # this loop has its own separate forward-pass code (not
-                    # shared with diagnostics.py), so it needed the identical
-                    # fix applied twice. See docs/DESIGN_DECISIONS.md.
-                    idx = torch.tensor(
-                        [all_tokens[-session.model.block_size:]], dtype=torch.long, device=session.device
-                    )
-                    if "Moe" in session.model.__class__.__name__:
-                        logits, _, _ = session.model(idx)
-                    else:
-                        logits, _ = session.model(idx)
-                    # Same recipe and same decoding_mode setting as
-                    # model.generate() / _execute_forward_pass. See
-                    # docs/DESIGN_DECISIONS.md.
-                    if session.decoding_mode == "greedy":
-                        next_id = torch.argmax(logits[0, -1, :]).item()
-                    else:
-                        temp = max(session.temperature, diagnostics.MIN_TEMPERATURE)
-                        sample_probs = torch.softmax(logits[0, -1, :] / temp, dim=-1)
-                        next_id = torch.multinomial(sample_probs, num_samples=1).item()
-                    session.token_history.append(next_id)
-                    session.generation_step += 1
+            with torch.inference_mode():
+                all_tokens = session.prompt_tokens + session.token_history
+                # Same window-to-block_size fix as _execute_forward_pass —
+                # this loop has its own separate forward-pass code (not
+                # shared with diagnostics.py), so it needed the identical
+                # fix applied twice. See docs/DESIGN_DECISIONS.md.
+                idx = torch.tensor(
+                    [all_tokens[-session.model.block_size:]], dtype=torch.long, device=session.device
+                )
+                if "Moe" in session.model.__class__.__name__:
+                    logits, _, _ = session.model(idx)
+                else:
+                    logits, _ = session.model(idx)
+                # Same recipe and same decoding_mode setting as
+                # model.generate() / _execute_forward_pass. See
+                # docs/DESIGN_DECISIONS.md.
+                if session.decoding_mode == "greedy":
+                    next_id = torch.argmax(logits[0, -1, :]).item()
+                else:
+                    temp = max(session.temperature, diagnostics.MIN_TEMPERATURE)
+                    sample_probs = torch.softmax(logits[0, -1, :] / temp, dim=-1)
+                    next_id = torch.multinomial(sample_probs, num_samples=1).item()
+                session.token_history.append(next_id)
+                session.generation_step += 1
+            return {
+                "position": len(session.prompt_tokens) + len(session.token_history) - 1,
+                "id": next_id,
+                "text": session.tokenizer.decode([next_id]),
+                "generation_step": session.generation_step,
+            }
 
-                yield f"event: token\ndata: {json.dumps({'position': len(session.prompt_tokens) + len(session.token_history) - 1, 'id': next_id, 'text': session.tokenizer.decode([next_id]), 'generation_step': session.generation_step})}\n\n"
+        try:
+            for _ in range(req.max_new_tokens):
+                async with _diag_lock:
+                    token_payload = await asyncio.to_thread(_generate_one_token)
+                yield f"event: token\ndata: {json.dumps(token_payload)}\n\n"
 
             attention_params = None
             if req.attention_layer is not None and req.attention_head is not None:
                 attention_params = (req.attention_layer, req.attention_head)
-            final_snapshot = diagnostics.run_diagnostic_step_internal(
-                session_id, top_k=5, attention_params=attention_params,
-                qkv_detail=req.qkv_detail, skip_token_generation=True,
-            )
+            async with _diag_lock:
+                final_snapshot = await asyncio.to_thread(
+                    diagnostics.run_diagnostic_step_internal,
+                    session_id, top_k=5, attention_params=attention_params,
+                    qkv_detail=req.qkv_detail, skip_token_generation=True,
+                )
             if final_snapshot is None:
                 yield f"event: error\ndata: {json.dumps({'error': 'Failed to capture final snapshot'})}\n\n"
                 return
