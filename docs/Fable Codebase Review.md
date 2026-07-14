@@ -1,6 +1,8 @@
 # Fable Codebase Review
 
-Deep review of the full codebase (~9k lines read: all major backend — `training.py`, `diagnostics.py`, `runner.py`, `train_worker.py`, `db.py`, `worker_manager.py`, `endpoints_client.py`, `idle_monitor.py`, `experiments.py`, `main.py`, both model templates, `settings.py` — and frontend — `App.tsx`, `Inspector.tsx`, `PausePrompt.tsx`, `ArchSchematic.tsx`, `useApi.ts`). **No code was changed** — review only. Findings ordered worst first.
+Deep review of the full codebase (~9k lines read: all major backend — `training.py`, `diagnostics.py`, `runner.py`, `train_worker.py`, `db.py`, `worker_manager.py`, `endpoints_client.py`, `idle_monitor.py`, `experiments.py`, `main.py`, both model templates, `settings.py` — and frontend — `App.tsx`, `Inspector.tsx`, `PausePrompt.tsx`, `ArchSchematic.tsx`, `useApi.ts`). Findings ordered worst first.
+
+> **Status update 2026-07-15:** nine findings fixed, one commit each, all with regression tests and DESIGN_DECISIONS entries §65–§73: block picker dead end (`f28469b`), session memory leak (`5c9dcaa`), MoE tuple bug (`8917f4a`), RoPE recompute (`9e0eb0c`), disconnected-banner heuristic (`b571311`), reconcile filter (`f9af221`), event-loop blocking (`57827a9`), remote diagnostic persistence (`544914f`), train-loop off-by-one (`3bf45ad`). Trainer image NOT yet rebuilt — the diagnostics-side fixes don't reach remote runs until `scripts/build_push_trainer_*.sh` runs. Still open: the DRY/bloat items below and the db.py connection handling (both deferred deliberately).
 
 ---
 
@@ -65,13 +67,49 @@ For remote runs, `/generate` and `/finalize` are proxied, so `_persist_diagnosti
 
 ---
 
-## Code bloat / DRY
+## Code bloat / DRY (deferred — detail for when it's picked up)
 
-- `make_hook` + `_windowed_position_vectors` duplicated near-verbatim (~60 lines) between `transformer/model.py` and `moe/model.py` — extract to `diagnostics.py`; only the MoE tuple-unwrap differs.
-- `train_transformer` and `train_moe` in `train_worker.py` are ~90% identical (~60 duplicated lines).
-- `useApi.ts` carries ~230 lines of hard-coded fixtures in the production bundle — belongs in a test/fixtures module.
-- `CopyIconButton` defined three times (App.tsx, Inspector.tsx, ChatPanel per its own comments); the window-stepper JSX duplicated inside Inspector (`NodeWindowStepper` vs the inline heatmap stepper).
-- The metrics WebSocket (`training.py:602-689`) is fully built and never used by the frontend (polling does the same job) — dead code; keep or delete deliberately, not by accident.
+### 1. Diagnostic hooks duplicated across model templates (~120 lines → ~40)
+
+`TinyTransformerLM.register_diagnostic_hooks` (`transformer/model.py:192-270`) and `TinyMoeLM.register_diagnostic_hooks` (`moe/model.py:219-297`) are near-verbatim copies.
+
+**Identical in both:** the windowed-vector helper (same body, even the same `DIAGNOSTIC_POSITION_WINDOW` windowing math — only the *name* differs: `_windowed_position_vectors` vs `_position_vectors`); the `make_hook(node_id)` closure factory (get_session lookup, shape/summary/position-vector capture, NodeCapture construction); the registration sequence (embedding → per-block ln1/attention/ln2/FFN-or-MoE → final_norm → lm_head); the handle collection added in §66.
+
+**Actually different:** (a) the MoE hook's output handling unwraps the `(x, drop_rate)` tuple before shape/summary/vectors — the transformer hook assumes a bare tensor; (b) the 4th block child: `block.{i}.mlp` hooked on `block.ffn` vs `block.{i}.moe` hooked on `block.moe`.
+
+**Refactor shape:** move the helper + `make_hook` into `diagnostics.py`. The MoE hook is a strict superset (its tuple-tolerant branch handles the tensor case too), so both templates can share it as-is. Each model's method shrinks to its registration list — the only genuinely template-specific part. Do the transformer and MoE test files still pass unchanged afterwards? They should; that's the acceptance check.
+
+### 2. `train_transformer` vs `train_moe` (`train_worker.py:291-351` / `374-435`, ~90% identical)
+
+**Identical:** STARTING status, tiny_shakespeare + CharDataset setup, TEMPLATE_REGISTRY build + optimizer setup, resume/checkpoint load, `sync_metadata`, seed, the whole step loop skeleton (batch → forward → backward → step → yield_gpu → progress → pause check), eval cadence, final checkpoint + COMPLETED block.
+
+**Actually different:** (a) registry key `"transformer"` vs `"moe"`; (b) forward unpack `_, loss = model(x, y)` vs `_, loss, _ = model(x, y)`; (c) eval helper — `_transformer_eval` returns `{split: loss}`, `_moe_eval` returns `{split: {loss, drop_rate}}`; (d) the metric row — MoE adds `train_drop_rate`/`val_drop_rate` (×100, rounded 1dp).
+
+**Refactor shape:** one `_train_char_lm(ws, template_key, eval_fn, build_metric_row)` — the two public functions become 3-line wrappers. `_transformer_eval`/`_moe_eval` are themselves ~80% identical and could merge behind a "returns extra drop_rate field" flag, but that's second-order. Note `tests/test_train_loop_steps.py` (§73) counts optimizer steps through `train_transformer` — it must keep passing.
+
+### 3. `useApi.ts` fixtures in the production bundle (~230 of 549 lines)
+
+`FIXTURE_MANIFEST` (~50 lines), `FIXTURE_SNAPSHOT_WITH_ATTENTION` (~110), `FIXTURE_SNAPSHOT` (~65) live in the main API module, shipped to every user, used only behind `?use_fixtures=true`. Move to e.g. `src/fixtures/diagnostics.ts`; if bundle size matters, gate behind a dynamic `import()` so they tree-shake/lazy-load. The dozen `if (useFixtures())` branches stay — only the data moves.
+
+### 4. Copy-icon button defined three times
+
+Same copy/checkmark SVG glyph pair + "copied for 1.5s" logic in: `Inspector.tsx` `CopyIconButton` (12px, local `copied` bool), `App.tsx` `CopyIconButton` (14px, identical code otherwise), `ChatPanel.tsx` (inline per-message variant keyed on `copiedId: number | null` rather than a bool — the only structural difference). Extract `components/CopyIconButton.tsx` with a `size` prop; ChatPanel keeps its own keying but reuses the two SVGs (or the whole button with a `copied` prop lifted).
+
+### 5. Window-stepper JSX duplicated inside `Inspector.tsx`
+
+`NodeWindowStepper` (~40 lines) and the inline stepper in `AttentionHeatmap` (~30 lines) are the same UI: ◀ Earlier / "Positions X–Y of Z" / Later ▶, same `maxOffset = max(0, total - windowSize)` math, same disabled logic. Differences are only where the numbers come from (`pv.positions` vs `att.window_start`/`att.total_positions`) and the hide condition. Extract one `WindowStepper({ windowStart, windowSize, totalPositions, offset, onOffsetChange })`; both call sites shrink to one line. `VectorPreviewTable` in the same file is the pattern to imitate — that one was extracted properly.
+
+### 6. Test doubles duplicated
+
+`FakeResponse`/`FakeAsyncClient` are defined in `tests/test_training_remote.py` AND redefined at the top of `tests/test_diagnostics.py` — which *also* imports the other file's copies in some tests (`from tests.test_training_remote import FakeAsyncClient, FakeResponse`). Two sources of truth, already interleaved. Move to a `tests/conftest.py` or `tests/fakes.py`.
+
+### 7. db.py connection boilerplate (explicitly deferred — volume, not a bug)
+
+Every one of ~20 functions repeats the same 5 lines: `db = await get_db()` → execute → commit → `close()`, with no try/finally (an exception between open and close leaks the connection). One `@asynccontextmanager async def _db()` used as `async with _db() as conn:` removes ~80 lines and fixes the leak-on-exception in the same stroke. Do this as one mechanical pass; it touches every db.py function, so don't mix it with behavior changes.
+
+### Smaller singles
+
+- The metrics WebSocket (`training.py`, `/{run_id}/ws`, ~90 lines) is fully built and never used by the frontend (polling does the same job) — dead code; keep or delete deliberately, not by accident.
 - `settings.py:76` — `gpu_idle_timeout_seconds: 1800` with comment "temporarily changed to 30mins for hackathon but should be 10 min". Flag before open-sourcing.
 - `database_path: Path("lab.db")` is CWD-relative — start uvicorn from a different directory and you silently get a second empty DB. Anchor it to the project root like `data_dir` usage elsewhere.
 
@@ -97,3 +135,4 @@ Note: 1b and 1c live in `backend/training/diagnostics.py`, so they need the trai
 ---
 
 *Review completed: 2026-07-14 23:29 BST (Claude Fable 5)*
+*Status update + DRY detail expanded: 2026-07-15 (Claude Fable 5) — 9 findings fixed (§65–§73), DRY/db.py items deferred with implementation notes above.*
