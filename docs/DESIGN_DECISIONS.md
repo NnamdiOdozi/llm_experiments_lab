@@ -3388,6 +3388,36 @@ recomputed per-head weights + V (att @ V → concat → out_proj) and require
 allclose. Confirmed failing pre-fix, passing post-fix. Same trainer-image
 rebuild caveat as §67 for remote runs.
 
+## §69: False "Backend disconnected" banner — the disconnect heuristic parsed error MESSAGE text
+
+**Problem (direct user report, 2026-07-14 evening):** after restarting both
+servers and refreshing the browser, a persistent red "Backend disconnected"
+banner appeared even though the backend was up. It only cleared once a new
+run was started.
+
+**Root cause — two individually-fine changes that were incompatible:**
+- `api()` (useApi.ts) was improved to throw FastAPI's `detail` string
+  ("Run not found") instead of "404 Not Found".
+- The poll loop's disconnect heuristic (App.tsx) classified network-vs-HTTP
+  by whether the error MESSAGE started with a 4xx status code
+  (`err.message.match(/^4\d\d/)`).
+
+Once detail strings arrived, every 4xx-with-body was misread as a network
+failure. The observed scenario: sessionStorage restores `runId` across a
+hard refresh; after the backend restart that run 4xx'd on every poll; 3
+polls later the banner appeared and stayed. (A 5xx also counted as
+"disconnected" — equally wrong; a 500 proves the backend answered.)
+
+**Fix:** `api()` now throws an `ApiError` subclass carrying `status` as a
+real field; the poll loop classifies with `!(err instanceof ApiError)` — any
+answered request (4xx or 5xx) means connected; only genuine fetch failures
+(TypeError et al.) count toward the banner. A status-as-field check can't
+drift with message wording, which is exactly how the original heuristic
+broke.
+
+Verified: new test in `useApi.test.ts` (404-with-detail → ApiError,
+status=404, message="Run not found"). Frontend suite 55 passed.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

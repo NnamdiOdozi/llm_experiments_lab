@@ -5,6 +5,23 @@ function useFixtures(): boolean {
   return new URLSearchParams(window.location.search).get("use_fixtures") === "true";
 }
 
+// Carries the HTTP status as a real field. Real bug, 2026-07-14: when
+// api() started throwing FastAPI's detail message ("Run not found")
+// instead of "404 Not Found", App.tsx's disconnect heuristic — which
+// classified network-vs-HTTP by whether the MESSAGE started with a 4xx
+// status code — misread every 4xx-with-detail as a network failure and
+// showed a false "Backend disconnected" banner (e.g. after a backend
+// restart with a stale sessionStorage runId). An instanceof/status check
+// can't drift with message wording. See docs/DESIGN_DECISIONS.md.
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -23,7 +40,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       // Response body wasn't JSON — keep the status-line fallback.
     }
-    throw new Error(detail);
+    throw new ApiError(detail, res.status);
   }
   return res.json();
 }

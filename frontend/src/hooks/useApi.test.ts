@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { generateDiagnosticStream, peekDiagnostic, updateConfig } from "./useApi";
+import { generateDiagnosticStream, peekDiagnostic, updateConfig, ApiError, fetchRunStatus } from "./useApi";
 import { ExperimentConfig } from "../types";
 
 function sseResponse(frames: string[]): Response {
@@ -130,6 +130,27 @@ describe("api() error handling (via updateConfig)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(updateConfig(1, config)).rejects.toThrow("500 Internal Server Error");
+  });
+
+  it("throws an ApiError carrying the HTTP status, even when the message is a detail string", async () => {
+    // Real bug, 2026-07-14: App.tsx's disconnect heuristic classified
+    // network-vs-HTTP by matching the MESSAGE against /^4\d\d/ — the
+    // moment api() started throwing detail strings ("Run not found"),
+    // every 4xx-with-detail was misread as a network failure and tripped
+    // a false "Backend disconnected" banner. The status must survive as
+    // a real field so callers never have to parse message text. See
+    // docs/DESIGN_DECISIONS.md.
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ detail: "Run not found" }), { status: 404, statusText: "Not Found" })
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const err = await fetchRunStatus(999).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("Run not found");
   });
 });
 

@@ -28,6 +28,7 @@ import {
   fetchExperiment,
   fetchPresets,
   peekDiagnostic,
+  ApiError,
   OpenRun,
 } from "./hooks/useApi";
 
@@ -388,7 +389,16 @@ export default function App() {
         if (pollRef.current) clearInterval(pollRef.current);
       }
     } catch (err) {
-      const isNetworkError = err instanceof TypeError || (err instanceof Error && !err.message.match(/^4\d\d/));
+      // An ApiError means the backend ANSWERED (4xx/5xx) — connected, just
+      // unhappy about this request. Only genuine fetch failures (TypeError
+      // etc.) count toward the disconnected banner. Real bug, 2026-07-14:
+      // the previous check matched the message text against /^4\d\d/,
+      // which broke the day api() started throwing FastAPI's detail
+      // string instead of "404 Not Found" — a stale sessionStorage runId
+      // after a backend restart produced "Run not found" 4xxs that were
+      // misread as network failures, showing a persistent false
+      // "Backend disconnected" banner. See docs/DESIGN_DECISIONS.md.
+      const isNetworkError = !(err instanceof ApiError);
       if (isNetworkError) {
         failCountRef.current += 1;
         if (failCountRef.current >= 3) setDisconnected(true);
