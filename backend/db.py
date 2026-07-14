@@ -448,14 +448,26 @@ def sync_update_training_run(run_id: int, **kwargs):
 
 async def reconcile_orphaned_runs() -> int:
     """Mark runs with active status as failed — called on startup to clear stale state.
-    After a backend restart no worker processes exist, so any 'active' row is orphaned.
+    After a backend restart no LOCAL worker processes exist, so any active
+    local row is orphaned.
+
+    Remote runs are exempt (Fable review, 2026-07-14 — DESIGN_DECISIONS
+    §70): a serverless run lives in the Nebius trainer container, which
+    survives a local API restart just fine — marking it failed here left
+    the DB claiming failure while the endpoint kept training (and billing).
+    The one remote case that IS orphaned: execution_backend already set to
+    'nebius_endpoint' but remote_run_id still NULL — provisioning was
+    mid-flight in this process's memory (_provisioning_tasks) when it died,
+    and nothing remote exists yet to resume. execution_backend IS NULL is
+    kept for pre-migration rows that predate the column.
     """
     statuses = tuple(ACTIVE_STATUSES)
     placeholders = ",".join("?" for _ in statuses)
     db = await get_db()
     cursor = await db.execute(
         f"UPDATE training_runs SET status = 'failed', error_message = 'Backend restarted — worker lost' "
-        f"WHERE status IN ({placeholders})",
+        f"WHERE status IN ({placeholders}) "
+        f"AND (execution_backend IS NULL OR execution_backend = 'local' OR remote_run_id IS NULL)",
         statuses,
     )
     count = cursor.rowcount

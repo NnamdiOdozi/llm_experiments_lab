@@ -3418,6 +3418,30 @@ broke.
 Verified: new test in `useApi.test.ts` (404-with-detail → ApiError,
 status=404, message="Run not found"). Frontend suite 55 passed.
 
+## §70: Startup reconciliation marked live remote runs as failed
+
+**Problem (Fable review, 2026-07-14):** `reconcile_orphaned_runs()` (run on
+every startup from `main.py`'s lifespan) marked EVERY active-status run
+failed with "Backend restarted — worker lost". Correct for local runs — the
+worker subprocess dies with the parent (pdeathsig). Wrong for remote runs:
+the Nebius trainer container survives a local API restart and keeps
+training (and billing). The failure was masked in practice because the
+`/status` route re-syncs the local row from the live remote status on the
+next frontend poll — but with no browser open, the run stayed "failed"
+locally while the endpoint kept working.
+
+**Fix:** the UPDATE now exempts remote runs that actually have something
+remote: `AND (execution_backend IS NULL OR execution_backend = 'local' OR
+remote_run_id IS NULL)`. The `remote_run_id IS NULL` clause deliberately
+keeps one remote case reconcilable — a run whose provisioning task
+(in-memory `_provisioning_tasks`) died with the restart before mirroring
+anything to the endpoint; nothing remote exists for it, so it *is*
+orphaned. `IS NULL` on execution_backend covers pre-migration rows.
+
+Verified: new `tests/test_reconcile.py` (local running → failed; remote
+running with remote_run_id → untouched; remote mid-provisioning → failed;
+local paused → untouched). Confirmed failing pre-fix. Full suite 209 passed.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
