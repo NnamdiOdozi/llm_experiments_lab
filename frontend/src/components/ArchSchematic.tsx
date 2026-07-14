@@ -179,12 +179,27 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
                   onClick={() => onNodeClick?.(`block.${selectedBlockIdx}`, node)}
                 />
 
-                {/* Block selector: small numbered buttons */}
+                {/* Block selector: small numbered buttons. Real bug report,
+                    2026-07-14: these previously only set local
+                    selectedBlockIdx — App's selectedNodeId (the source of
+                    truth for the Inspector, the peek effect, and even the
+                    staleness warning) never changed, so switching block
+                    silently did nothing in the Runtime inspector. If a node
+                    inside the block is currently selected, remap its id to
+                    the newly-picked block so the whole selection follows.
+                    See docs/DESIGN_DECISIONS.md. */}
                 <div style={{ display: "flex", gap: 4, marginLeft: 8, marginRight: 8 }}>
                   {Array.from({ length: node.repeat_count }).map((_, idx) => (
                     <button
                       key={idx}
-                      onClick={() => setSelectedBlockIdx(idx)}
+                      onClick={() => {
+                        setSelectedBlockIdx(idx);
+                        const m = selectedNodeId?.match(/^block\.\d+\.(.+)$/);
+                        if (m && node.children) {
+                          const child = node.children.find((c) => c.id === `block.{i}.${m[1]}`);
+                          if (child) onNodeClick?.(`block.${idx}.${m[1]}`, child);
+                        }
+                      }}
                       style={{
                         width: 24,
                         height: 24,

@@ -3277,6 +3277,33 @@ manual-stepping session reaching finalize writes exactly one
 one confirms calling `/finalize` before any `/step` returns 400 rather
 than saving a garbage row. Full suite: 205 passed (was 203).
 
+## §65: The block-number picker was a selection dead end — changing block never touched the Inspector
+
+**Problem (direct user report, 2026-07-14):** with an attention node selected
+and a live diagnostic session, clicking a different block number in the
+architecture diagram showed no change at all in the Runtime inspector — no
+new heatmap, no new Q/K/V, not even the "showing stale data" warning.
+
+**Root cause:** the numbered block buttons in `ArchSchematic.tsx` only set
+the component-local `selectedBlockIdx` (which relabels the diagram and
+re-targets the "Inside Block N" row). App's `selectedNodeId` — the single
+source of truth for `attentionBlock`, the auto-peek effect, *and* the
+Inspector's staleness warning — never changed, so nothing downstream could
+react. The staleness warning couldn't even fire, because it compares the
+snapshot against the same unchanged `selectedNodeId`.
+
+**Fix:** the block buttons now also remap the current selection: if a
+`block.{i}.*` child node is selected, clicking block N calls `onNodeClick`
+with the same child re-addressed as `block.{N}.*`. App then updates
+`selectedNodeId`, `attentionBlock` recomputes, and the existing peek effect
+(§ the 2026-07-14 head-change fix) refreshes the snapshot automatically.
+Nothing selected (or a non-block node selected) → picking a block behaves
+as before, label-only.
+
+Verified: 2 new tests in `frontend/src/components/ArchSchematic.test.tsx` —
+remap fires with the re-indexed node id; no remap when a non-block node is
+selected. Frontend suite 54 passed (was 52).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
