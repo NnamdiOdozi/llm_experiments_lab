@@ -11,7 +11,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 - **Watch training as it happens** — live loss/validation charts update as the model trains, no separate logging setup, no TensorBoard.
 - **Pause mid-training and ask what it knows** — prompt the partially-trained model, see its actual generated response, resume, and try the same prompt again later. Watch it go from near-random characters to recognizable structure, live.
 - **Look inside one forward pass** — the Inspector panel exposes tensor shapes, attention maps, Q/K/V vectors, embeddings, and the LM head's actual top-k token candidates: the machinery a loss curve alone never shows.
-- **A chatbot that knows *this* experiment** — grounded in your config, metrics, logs, and diagnostics, not a generic LLM explainer.
+- **A chatbot that knows *this* experiment** — grounded in your data, code, config, metrics, tensors, logs, and diagnostics, not a generic LLM explainer.
 - **Server metrics and logs, live** — CPU/GPU utilization, memory, and step-by-step training events, right alongside the model code.
 - **Cost-conscious and environmentally friendly by design** — runs locally or on Nebius serverless endpoints, with idle auto-stop so a GPU never sits running (and burning power) for nobody. Concurrent runs on the same device type share one already-warm endpoint instead of each spinning up its own machine, so idle compute isn't wasted and no one pays for — or powers — a second GPU that wasn't actually needed.
 

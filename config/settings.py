@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # from jobs (Nebius jobs have no public URL for the controller to route
     # training requests to; endpoints do). See docs/NEBIUS_SERVERLESS_IMPLEMENTATION_PLAN.md.
     training_backend: Literal["local", "nebius_endpoint"] = "local"
-    gpu_idle_timeout_seconds: int = 600   # 10 min — matches plan doc's GPU worker policy
+    gpu_idle_timeout_seconds: int = 1800   # temporarily changed to 30mins for hackathon but should be 10 min — matches plan doc's GPU worker policy
     cpu_idle_timeout_seconds: int = 1800  # 30 min — matches plan doc's CPU worker policy
     # Warn the user this many seconds before the idle timeout actually stops the
     # worker, so they get a "Continue session" chance — see 2026-07-11 session.

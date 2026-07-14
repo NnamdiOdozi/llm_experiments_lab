@@ -1252,6 +1252,83 @@ async def get_diagnostic_snapshot_for_run(run_id: int) -> dict | None:
         return None
 
 
+async def _persist_diagnostic_result(run_id: int, session, generation_params: dict) -> None:
+    """Persist a diagnostic session's final outcome — shared by /generate's
+    completion (Phase 4) and /finalize (manual `>` stepping to the same
+    end state). Reads session.last_snapshot rather than taking a snapshot
+    argument, since both callers have already caused it to be set (either
+    by /generate's own final capture or by a prior /step call) — one less
+    thing for a caller to get wrong. Direct user report, 2026-07-16:
+    stepping `>` to maxNewTokens manually reached the same end state as
+    `>>` but never got saved here, so the Lab Assistant couldn't see it.
+    See docs/DESIGN_DECISIONS.md.
+    """
+    from backend.training import artifacts
+
+    prompt_text = session.tokenizer.decode(session.prompt_tokens)
+    generated_output = session.tokenizer.decode(session.prompt_tokens + session.token_history)
+    await db.save_diagnostic_session_result(
+        run_id,
+        prompt=prompt_text,
+        generated_output=generated_output,
+        generation_params=generation_params,
+        top_k_summary=session.last_snapshot.lm_head.get("top_k", []),
+    )
+
+    # Also log in the same format /prompt (the now-removed Generate button)
+    # used to — the chatbot's context builder
+    # (backend/chatbot/context.py::_get_prompt_history) only reads
+    # lab.prompt log lines, not the diagnostic_sessions table. See
+    # docs/DESIGN_DECISIONS.md.
+    status = artifacts.read_status(run_id) or {}
+    prompt_log.info(
+        "run_id=%d payload=%s",
+        run_id,
+        json.dumps({"step": status.get("current_step"), "prompt": prompt_text, "output": generated_output}),
+    )
+
+
+@router.post("/{run_id}/diagnostics/{session_id}/finalize")
+async def diagnostics_finalize(run_id: int, session_id: str, req: DiagnosticsStepRequest = None):
+    """Persist a diagnostic session reached via manual `>` stepping —
+    same end state as `>>` (generation_step >= maxNewTokens), same
+    diagnostic_sessions row, just reached one step at a time. The frontend
+    calls this instead of /generate's own persistence when the user steps
+    to the cap manually rather than using `>>`. See
+    docs/DESIGN_DECISIONS.md.
+    """
+    attention_layer = req.attention_layer if req is not None else None
+    attention_head = req.attention_head if req is not None else None
+    qkv_detail = req.qkv_detail if req is not None else False
+
+    db_run = await db.get_training_run(run_id)
+    if _is_remote(db_run):
+        try:
+            body = {"attention_layer": attention_layer, "attention_head": attention_head, "qkv_detail": qkv_detail}
+            result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/finalize", body)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Remote diagnostics finalize failed: {exc}")
+        await _touch_worker_for_run(db_run)
+        return result
+
+    from backend.training import diagnostics
+
+    session = diagnostics.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Diagnostic session not found")
+    if session.last_snapshot is None:
+        raise HTTPException(400, "No snapshot captured yet — step at least once before finalizing")
+
+    generation_params = {
+        "max_new_tokens": session.generation_step,
+        "attention_layer": attention_layer,
+        "attention_head": attention_head,
+        "qkv_detail": qkv_detail,
+    }
+    await _persist_diagnostic_result(run_id, session, generation_params)
+    return {"success": True}
+
+
 @router.post("/{run_id}/diagnostics/{session_id}/generate")
 async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGenerateRequest):
     """Phase 3: continue generation (`>>`) — SSE stream, matching
@@ -1340,37 +1417,16 @@ async def diagnostics_generate(run_id: int, session_id: str, req: DiagnosticsGen
                 return
 
             # Phase 4: persist the final outcome once the stream completes —
-            # not per-token, per contract cost-control guidance.
-            prompt_text = session.tokenizer.decode(session.prompt_tokens)
-            generated_output = session.tokenizer.decode(session.prompt_tokens + session.token_history)
+            # not per-token, per contract cost-control guidance. Shared with
+            # /finalize (manual `>` stepping to the same end state). See
+            # docs/DESIGN_DECISIONS.md.
             generation_params = {
                 "max_new_tokens": req.max_new_tokens,
                 "attention_layer": req.attention_layer,
                 "attention_head": req.attention_head,
                 "qkv_detail": req.qkv_detail,
             }
-            await db.save_diagnostic_session_result(
-                run_id,
-                prompt=prompt_text,
-                generated_output=generated_output,
-                generation_params=generation_params,
-                top_k_summary=final_snapshot.lm_head.get("top_k", []),
-            )
-
-            # Also log in the same format /prompt (the now-removed Generate
-            # button) used to — the chatbot's context builder
-            # (backend/chatbot/context.py::_get_prompt_history) only reads
-            # lab.prompt log lines, not the diagnostic_sessions table, so
-            # without this, prompts run via >> would stop being visible to
-            # the Lab Assistant entirely once Generate was removed from the
-            # UI. Direct user confirmation, 2026-07-14. See
-            # docs/DESIGN_DECISIONS.md.
-            status = artifacts.read_status(run_id) or {}
-            prompt_log.info(
-                "run_id=%d payload=%s",
-                run_id,
-                json.dumps({"step": status.get("current_step"), "prompt": prompt_text, "output": generated_output}),
-            )
+            await _persist_diagnostic_result(run_id, session, generation_params)
 
             yield f"event: done\ndata: {json.dumps({'final_snapshot': final_snapshot.to_dict()})}\n\n"
         except Exception as e:

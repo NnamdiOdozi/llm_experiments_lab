@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { startDiagnostic, stepDiagnostic, generateDiagnosticStream } from "../hooks/useApi";
+import { startDiagnostic, stepDiagnostic, generateDiagnosticStream, finalizeDiagnosticSession } from "../hooks/useApi";
 import { DiagnosticSnapshot, DiagnosticSessionResponse } from "../types";
 
 interface Props {
@@ -196,7 +196,18 @@ export default function PausePrompt({
       setDiagnosticStep(snapshot.generation_step);
       setGeneratedTokens((prev) => prev + snapshot.generated_token.text);
       onDiagnosticSnapshot?.(snapshot);
-      if (snapshot.generation_step >= maxNewTokens) closeSession();
+      if (snapshot.generation_step >= maxNewTokens) {
+        // Reached the same end state >> reaches on its own — persist it the
+        // same way, so a prompt stepped through manually is just as visible
+        // to the Lab Assistant as one run via >>. Direct user report,
+        // 2026-07-16. See docs/DESIGN_DECISIONS.md.
+        await finalizeDiagnosticSession(runId, session.diagnostic_session_id, {
+          attention_layer: attentionBlock ?? undefined,
+          attention_head: attentionHead ?? undefined,
+          qkv_detail: showQKVDetail || undefined,
+        });
+        closeSession();
+      }
     } catch (err) {
       console.error("Diagnostic step error:", err);
       alert("Error stepping diagnostic: " + (err instanceof Error ? err.message : String(err)));

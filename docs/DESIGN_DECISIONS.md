@@ -3240,6 +3240,43 @@ device type) would be a meaningfully bigger change, only worth it if
 concurrent-user demand actually exceeds 3. Explicitly deferred — not needed
 for the current POC scope. See also `README.md`'s Current Status section.
 
+## §64: Manual `>` stepping to the end never persisted a diagnostic session — only `>>` did
+
+Direct user report, 2026-07-16, surfaced through a genuinely useful
+architecture Q&A session: stepping `>` one click at a time all the way to
+`maxNewTokens` reaches the exact same end state `>>` reaches in one go
+(`generation_step >= maxNewTokens`, session auto-closes either way — see
+the `atCap` logic in `PausePrompt.tsx`), but only `>>`'s completion ever
+wrote a `diagnostic_sessions` row. A prompt run purely by manual stepping
+was invisible to the Lab Assistant's `get_diagnostic_snapshot` grounding —
+not a deliberate choice, just a gap: `/generate`'s completion block had
+the persistence logic inlined, `/step` never called it.
+
+**Fix**, not a `/step` behavior change — `/step`'s contract (return one
+snapshot) is untouched:
+- Extracted the persist logic (`>>`'s inline decode/save/prompt_log block)
+  into a shared helper, `_persist_diagnostic_result(run_id, session,
+  generation_params)` — reads `session.last_snapshot` (already populated
+  after every `/step`/`/generate` capture) rather than taking a snapshot
+  argument, so both callers can't hand it something stale.
+- New route, `POST /{run_id}/diagnostics/{session_id}/finalize` — same
+  local/remote `_is_remote`/`_proxy` dual-path every other diagnostics
+  route uses. Requires `session.last_snapshot` to exist (400 if you call
+  it before ever stepping — nothing to persist yet).
+- `/generate`'s completion block now calls the same shared helper —
+  behavior-identical, just de-duplicated.
+- Frontend: `PausePrompt.tsx`'s existing `if (snapshot.generation_step >=
+  maxNewTokens)` check (the same one that already called `closeSession()`)
+  now also calls the new `finalizeDiagnosticSession()` first — the exact
+  trigger condition `>>` already used, just reached via repeated `>`
+  clicks instead of one `>>` burst.
+
+Verified: 2 new tests (`tests/test_diagnostics.py`) — one confirms a
+manual-stepping session reaching finalize writes exactly one
+`diagnostic_sessions` row (mirroring the existing `>>` persistence test),
+one confirms calling `/finalize` before any `/step` returns 400 rather
+than saving a garbage row. Full suite: 205 passed (was 203).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

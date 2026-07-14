@@ -921,6 +921,59 @@ async def test_diagnostic_session_persisted_after_generate(temp_db, client, monk
     assert count == 1
 
 
+async def test_diagnostic_session_persisted_after_manual_finalize(temp_db, client, monkeypatch, tmp_path):
+    """Direct user report, 2026-07-16: stepping `>` all the way to the same
+    end state `>>` reaches on its own never persisted anything, so a prompt
+    run purely by manual stepping was invisible to the Lab Assistant. The
+    frontend now calls /finalize once generation_step reaches maxNewTokens
+    via >, same as >> already did on its own. See docs/DESIGN_DECISIONS.md.
+    """
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # Simulate two manual > clicks reaching the (frontend-tracked) cap.
+    await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step")
+    await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step")
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/finalize")
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True}
+
+    conn = await db.get_db()
+    cursor = await conn.execute("SELECT COUNT(*) FROM diagnostic_sessions WHERE run_id = ?", (run_id,))
+    (count,) = await cursor.fetchone()
+    await conn.close()
+    assert count == 1
+
+
+async def test_finalize_before_any_step_returns_400(temp_db, client, monkeypatch, tmp_path):
+    """No snapshot captured yet — finalize must reject, not save a garbage
+    row or 500. See docs/DESIGN_DECISIONS.md."""
+    exp_id = temp_db
+    run_id = await _setup_paused_run_with_checkpoint(monkeypatch, tmp_path, exp_id)
+
+    resp = await client.post(
+        f"/api/training/{run_id}/diagnostics/start",
+        json={"prompt": "The king", "top_k": 5, "max_prompt_tokens": 32},
+    )
+    session_id = resp.json()["diagnostic_session_id"]
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/finalize")
+    assert resp.status_code == 400
+
+    conn = await db.get_db()
+    cursor = await conn.execute("SELECT COUNT(*) FROM diagnostic_sessions WHERE run_id = ?", (run_id,))
+    (count,) = await cursor.fetchone()
+    await conn.close()
+    assert count == 0
+
+
 async def test_generate_completion_logs_for_chatbot_grounding(temp_db, client, monkeypatch, tmp_path):
     """Direct user request, 2026-07-14: the Generate button was removed
     from the UI entirely (replaced by >/>> only, both driven through the

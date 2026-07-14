@@ -435,6 +435,21 @@ export function peekDiagnostic(runId: number, sessionId: string, params?: import
   });
 }
 
+// Persists a diagnostic session reached via manual `>` stepping to the same
+// end state `>>` reaches on its own (generation_step >= maxNewTokens) —
+// without this, only >> ever wrote a diagnostic_sessions row, so the Lab
+// Assistant couldn't see prompts run purely by manual stepping. Direct
+// user report, 2026-07-16. See docs/DESIGN_DECISIONS.md.
+export function finalizeDiagnosticSession(
+  runId: number, sessionId: string, params?: import("../types").DiagnosticStepRequest,
+) {
+  if (useFixtures()) return Promise.resolve({ success: true });
+  return api<{ success: boolean }>(`/training/${runId}/diagnostics/${sessionId}/finalize`, {
+    method: "POST",
+    body: JSON.stringify(params || {}),
+  });
+}
+
 export function getDiagnosticSession(runId: number, sessionId: string) {
   if (useFixtures()) {
     return Promise.resolve(FIXTURE_SNAPSHOT_WITH_ATTENTION);
