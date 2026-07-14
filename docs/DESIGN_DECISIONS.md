@@ -3189,6 +3189,57 @@ are small, low-risk UI-only changes using the standard Clipboard API,
 consistent with how trivial verified-by-inspection changes have been
 handled elsewhere this session), build clean.
 
+## §63: Nebius serverless capacity is shared and fixed, not elastic — by design
+
+Direct user report, 2026-07-16: two concurrent runs (a MoE experiment and a
+Tiny Transformer experiment), both on CPU, only ever showed **one** CPU
+trainer endpoint in the Nebius console — expected two. Investigated and
+confirmed this is intentional existing behavior, not a bug.
+
+**Root cause / design, confirmed three ways:**
+1. **Code** — `backend/nebius/worker_manager.py`'s own docstring: *"One
+   shared endpoint per device type (session_id = 'worker-cpu' /
+   'worker-gpu'), not one per user session — Track B's per-user job model
+   was dropped in the 2026-07-11 pivot."* Every serverless run for a given
+   device type reuses the same endpoint via `ensure_worker()`.
+2. **DB** — the two runs' `training_runs` rows both had the identical
+   `remote_endpoint_id`.
+3. **Live logs** — `nebius ai endpoint logs` on that endpoint showed both
+   runs' traffic genuinely interleaved (`GET /api/training/1/*` and
+   `GET /api/training/2/*` back to back, 2-5ms responses, no contention).
+
+**Why this works correctly, not just "happens to work":** each training
+run — including inside the remote endpoint's own container, which runs the
+same codebase — launches as its own OS **subprocess** (`subprocess.Popen`
+in `backend/training/runner.py`), not a thread sharing one Python process.
+`nebius_cpu_preset` is `16vcpu-64gb` (`config/settings.py`), so "one CPU
+trainer" is a 16-core box — multiple subprocess training loops get real
+multi-core parallelism, not GIL-limited interleaving.
+`max_concurrent_serverless_cpu_runs` / `max_concurrent_serverless_gpu_runs`
+(also `config/settings.py`) are the deliberate per-endpoint caps (default 3
+each); a request beyond the cap gets a 429, it does not spin up a second
+endpoint.
+
+**Why one shared endpoint instead of one per run:** a second endpoint costs
+money and takes ~2-5 minutes to cold-start (per `worker_manager.py`'s own
+comments), which is wasteful when the existing endpoint has spare vCPU/VRAM
+capacity — a deliberate POC trade-off from the 2026-07-11 pivot, not an
+oversight.
+
+**Current limitation, worth remembering later:** there is no hardware-tier
+selector in the frontend (e.g. choosing GPU L40S vs H100, or a bigger/smaller
+CPU preset) — the device picker only chooses CPU vs GPU, not a size within
+either. Discussed as a future idea, not built: key `worker_manager`'s
+shared-endpoint lookup by `(device_type, tier)` instead of just
+`device_type` (extra `session_id` buckets like `worker-gpu-l40s` /
+`worker-gpu-h100`) — same pattern already in place, just more buckets. That
+gives *choice*, not *elasticity*: each tier is still one shared endpoint
+capped at `max_concurrent_*_runs`; true elasticity (auto-spinning a second
+endpoint of the same tier once saturated, i.e. a pool instead of one row per
+device type) would be a meaningfully bigger change, only worth it if
+concurrent-user demand actually exceeds 3. Explicitly deferred — not needed
+for the current POC scope. See also `README.md`'s Current Status section.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

@@ -385,8 +385,12 @@ function VectorPreviewTable({
   // position). Deliberately not a per-row copy icon — double-click already
   // opens any single vector in its own copyable tab, so a per-row icon
   // here would just duplicate that path and clutter a table that can have
-  // many rows. Direct user request, 2026-07-15. See docs/DESIGN_DECISIONS.md.
-  const tableText = () => positions.map((pos, i) => [pos + 1, ...vectors[i]].join("\t")).join("\n");
+  // many rows. Direct user request, 2026-07-15. Blank line between rows
+  // added 2026-07-16 — long rows word-wrap in Word/Docs and adjacent
+  // vectors blurred together with no visual gap; still a real tab-grid
+  // for spreadsheet paste, just with a separator line Excel/Sheets ignore
+  // as an empty row. See docs/DESIGN_DECISIONS.md.
+  const tableText = () => positions.map((pos, i) => [pos + 1, ...vectors[i]].join("\t")).join("\n\n");
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>

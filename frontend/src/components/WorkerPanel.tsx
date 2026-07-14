@@ -65,7 +65,15 @@ export default function WorkerPanel({ runId }: Props) {
   ];
 
   return (
-    <pre style={{ maxHeight: 300, overflowY: "auto", fontSize: 13 }}>
+    // whiteSpace/wordBreak added 2026-07-16: this pre used to have the full
+    // panel width to itself, so long unwrapped lines never mattered. Now it
+    // sits in a narrower side-by-side column (see CodeView.tsx) — without
+    // wrapping, a long line forces the flex item (and the whole page) wider
+    // than the viewport instead of scrolling internally. Direct user
+    // report, 2026-07-16. See docs/DESIGN_DECISIONS.md.
+    // maxHeight 400 matches CodeView's code <pre> — direct user report
+    // (bottom edges misaligned with Template Code), 2026-07-16.
+    <pre style={{ maxHeight: 400, overflowY: "auto", fontSize: 13, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
       {eventLines.length ? eventLines.join("\n") : "No metrics yet — start a run to see step-by-step progress here."}
     </pre>
   );

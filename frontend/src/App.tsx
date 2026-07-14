@@ -300,12 +300,26 @@ export default function App() {
     }
   }
 
+  // Inspector/data-tab state is per-run — carrying it across an experiment
+  // or run switch left stale vector tabs open and a dangling rightPaneTab
+  // pointing at a data-tab id that no longer exists (blank Inspector pane).
+  // Direct user report, 2026-07-16. See docs/DESIGN_DECISIONS.md.
+  function resetInspectorState() {
+    setDataTabs([]);
+    setRightPaneTab("assistant");
+    setSelectedNode(null);
+    setSelectedNodeId(null);
+    setDiagnosticSnapshot(null);
+    setDiagnosticSessionId(null);
+  }
+
   function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string, selectedBackend: string) {
     setExperimentId(expId);
     setConfig(cfg);
     setRunId(null);
     setRunStatus(null);
     setMetrics([]);
+    resetInspectorState();
     setDevice(selectedDevice);
     setBackend(selectedBackend);
     saveSession(expId, null, cfg);
@@ -321,6 +335,7 @@ export default function App() {
     setRunId(null);
     setRunStatus(null);
     setMetrics([]);
+    resetInspectorState();
     setDevice("cpu");
     setBackend("local");
     saveSession(expId, null, cfg);
@@ -336,6 +351,7 @@ export default function App() {
     setRunId(run.id);
     setRunStatus(null);
     setMetrics([]);
+    resetInspectorState();
     setDevice(run.device);
     setBackend(run.execution_backend);
     saveSession(run.experiment_id, run.id, exp.config);
@@ -353,6 +369,15 @@ export default function App() {
       // Same bug class as the earlier config-staleness fix. See
       // docs/DESIGN_DECISIONS.md.
       if (status.device) setDevice(status.device);
+      // Same bug, same fix, for backend — direct user report, 2026-07-16:
+      // a serverless run showed "Local" in TrainingControls' Device/Backend
+      // picker once it finished. `backend` state defaults to "local" on
+      // mount and isn't in sessionStorage, so a refresh mid-run left it
+      // stuck at that default forever (the run's own status/badge stayed
+      // correct throughout — only this picker, which the isDone block
+      // reveals once the run finishes, was ever wrong). See
+      // docs/DESIGN_DECISIONS.md.
+      if (status.execution_backend) setBackend(status.execution_backend);
       const m = await fetchMetrics(runId);
       setMetrics(m);
       failCountRef.current = 0;
@@ -578,7 +603,7 @@ export default function App() {
         </h1>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => setShowOpenRuns(true)}>Open Runs</button>
-          <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); saveSession(null, null, null); }}>
+          <button onClick={() => { setExperimentId(null); setConfig(null); setRunId(null); setRunStatus(null); setMetrics([]); resetInspectorState(); saveSession(null, null, null); }}>
             ← New Experiment
           </button>
         </div>
@@ -593,8 +618,9 @@ export default function App() {
       <div
         style={{
           display: "grid",
-          // 190px right pane ≈ 50mm at 96dpi — dedicated Lab Assistant column
-          gridTemplateColumns: "360px 1fr 570px",
+          // ConfigPanel matches the right pane's 570px width for a
+          // symmetrical layout — direct user request, 2026-07-16.
+          gridTemplateColumns: "570px 1fr 570px",
           gap: 16,
           alignItems: "start",
         }}
@@ -800,7 +826,14 @@ export default function App() {
                     same as Colab/VS Code's variable inspector. See
                     docs/DESIGN_DECISIONS.md. */}
                 <div style={{ height: "calc(100vh - 260px)", overflowY: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
-                  <table style={{ borderCollapse: "collapse", fontSize: 11, fontFamily: "var(--font-mono)", width: "100%" }}>
+                  {/* No width: "100%" — this is a 2-column Index/Value table
+                      of short numbers; stretching it to the full ~570px
+                      pane left huge empty gaps in each cell. Fixed width
+                      here (roughly 2x the auto-content width) rather than
+                      100% or auto — direct user report, 2026-07-16: auto
+                      was too narrow, 100% was too wide. See
+                      docs/DESIGN_DECISIONS.md. */}
+                  <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: 240 }}>
                     <thead>
                       <tr>
                         <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Index</th>
