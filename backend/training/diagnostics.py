@@ -327,6 +327,17 @@ def _compute_attention_weights(
             k = k.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
             v = v.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
 
+            # Apply RoPE exactly like MultiHeadSelfAttention.forward does —
+            # previously skipped here, so for rope models (MoE's default,
+            # or a transformer configured with pos_encoding="rope") the
+            # heatmap and Q/K vectors were the attention of a position-
+            # blind model, not what the trained model actually computes.
+            # V is deliberately untouched (rope only rotates Q/K). Fable
+            # review, 2026-07-14 — see docs/DESIGN_DECISIONS.md §68.
+            if getattr(attn, "pos_encoding", "learned") == "rope":
+                q = attn.rope(q)
+                k = attn.rope(k)
+
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(attn.head_size)
             causal_mask = torch.tril(torch.ones(T, T, device=session.device, dtype=torch.bool))
             scores = scores.masked_fill(~causal_mask, float("-inf"))

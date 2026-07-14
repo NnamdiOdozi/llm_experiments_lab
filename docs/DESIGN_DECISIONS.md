@@ -3361,6 +3361,33 @@ after. Note for remote runs: this file ships inside the trainer image, so
 the fix needs a `scripts/build_push_trainer_*.sh` rebuild to take effect
 serverless-side.
 
+## §68: RoPE was never applied in the manual attention recompute — heatmap/Q/K numerically wrong for rope models
+
+**Problem (Fable review, 2026-07-14):** `_compute_attention_weights`
+replicates the fused attention path explicitly (QKᵀ → scale → mask →
+softmax) because the fused path doesn't expose weights. It handled the
+learned-position path (`pos_emb` added before the blocks) but never applied
+`attn.rope` to Q/K — which `MultiHeadSelfAttention.forward` does. So for
+any rope model (MoE's default `pos_encoding="rope"`, or a transformer
+configured that way), every heatmap and Q/K vector shown in the Inspector
+was the attention of a *position-blind* model — plausible-looking numbers,
+just not the trained model's.
+
+**Fix:** apply `attn.rope(q)` / `attn.rope(k)` under the same
+`pos_encoding == "rope"` condition the real forward uses. V deliberately
+untouched — RoPE rotates only Q/K. The Q/K vectors in `qkv_detail` now show
+the *rotated* values, matching what actually enters the score computation.
+
+**Testing note (worth remembering):** the first version of the regression
+test passed even against the broken code — a freshly-initialized model's
+qkv weights (std 0.02) give near-zero scores, so softmax is ~uniform with
+or without RoPE and the difference sat below any tolerance. The test now
+scales the qkv weight up 50x so the scores are O(1), then uses the model's
+own fused forward as the oracle: reconstruct `attn(x_ln)` from the
+recomputed per-head weights + V (att @ V → concat → out_proj) and require
+allclose. Confirmed failing pre-fix, passing post-fix. Same trainer-image
+rebuild caveat as §67 for remote runs.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

@@ -741,6 +741,59 @@ def test_attention_recompute_works_for_moe_layer_above_zero():
         diagnostics.delete_session(session_id)
 
 
+def test_attention_recompute_matches_real_forward_for_rope():
+    """Real bug (Fable review, 2026-07-14 — DESIGN_DECISIONS §68): the manual
+    attention recompute never applied RoPE to Q/K, so for rope models (MoE's
+    default) the heatmap showed a position-blind model's attention, not the
+    trained model's. Oracle here is the REAL fused forward path itself:
+    reconstruct the attention module's output from the recomputed per-head
+    weights and V vectors (att @ V, concat heads, out_proj) and require it
+    to match attn(x_ln) exactly — only true if the recomputed weights are
+    the ones the model actually uses."""
+    import torch
+    from backend.training import diagnostics
+    from backend.training.templates.transformer.model import TinyTransformerLM
+
+    torch.manual_seed(0)
+    model = TinyTransformerLM(
+        vocab_size=10, n_embd=8, n_head=2, n_layer=1, block_size=8,
+        dropout=0.0, pos_encoding="rope",
+    )
+    model.train(False)
+    # Freshly-initialized weights (std 0.02) produce near-zero attention
+    # scores — softmax is then ~uniform whether or not RoPE is applied,
+    # and the bug slips under any tolerance. Scale qkv up so the scores
+    # are O(1) and the rotation visibly changes the distribution, like a
+    # trained model's would.
+    with torch.no_grad():
+        model.blocks[0].attn.qkv.weight.mul_(50.0)
+    session_id = diagnostics.create_diagnostic_session(
+        model=model, tokenizer=_IdentityTokenizer(), device="cpu", prompt_tokens=[0, 1, 2, 3],
+    )
+    session = diagnostics.get_session(session_id)
+    try:
+        weights, values = [], []
+        for head in (0, 1):
+            r = diagnostics._compute_attention_weights(session, layer=0, head=head, qkv_detail=True)
+            assert r is not None and r["available"] is True
+            weights.append(torch.tensor(r["weights"]))
+            values.append(torch.tensor(r["qkv_detail"]["v"]))
+
+        block = model.blocks[0]
+        attn = block.attn
+        with torch.inference_mode():
+            idx = torch.tensor([[0, 1, 2, 3]])
+            x_ln = block.ln1(model.token_emb(idx))
+            expected = attn(x_ln)  # the real (fused) forward pass
+            y = torch.cat([weights[h] @ values[h] for h in (0, 1)], dim=-1).unsqueeze(0)
+            reconstructed = attn.out_proj(y.float())
+        assert torch.allclose(reconstructed, expected, atol=1e-4), (
+            "recomputed attention diverges from the model's real forward — RoPE not applied?"
+        )
+    finally:
+        diagnostics.delete_session(session_id)
+
+
 async def test_qkv_detail_returns_vectors_when_requested(temp_db, client, monkeypatch, tmp_path):
     """qkv_detail=True returns one Q/K/V vector per position (not just the
     last token) — the frontend's position stepper needs one per position."""
