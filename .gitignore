@@ -18,6 +18,7 @@ yarn-error.log*
 *.safetensors
 
 # Training data & run artifacts
+data/runs/
 
 *.db
 *.db-shm

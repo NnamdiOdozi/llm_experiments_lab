@@ -1,3 +1,0 @@
-{"step": 20, "train_loss": 2.9616, "val_loss": 3.0139, "learning_rate": 0.0003, "elapsed_seconds": 149.6, "param_count": 1827137, "timestamp": "2026-07-11T22:50:39.700020"}
-{"step": 40, "train_loss": 2.7167, "val_loss": 2.6996, "learning_rate": 0.0003, "elapsed_seconds": 296.1, "param_count": 1827137, "timestamp": "2026-07-11T22:53:06.184147"}
-{"step": 60, "train_loss": 2.597, "val_loss": 2.6108, "learning_rate": 0.0003, "elapsed_seconds": 446.2, "param_count": 1827137, "timestamp": "2026-07-11T22:55:36.353153"}

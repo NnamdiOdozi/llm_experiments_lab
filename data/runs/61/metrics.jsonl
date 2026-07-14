@@ -1,1 +1,0 @@
-{"step": 20, "train_loss": 3.0113, "val_loss": 3.0677, "train_drop_rate": 22.0, "val_drop_rate": 20.2, "learning_rate": 0.0003, "elapsed_seconds": 96.4, "param_count": 5362241, "timestamp": "2026-06-29T15:30:22.644444"}

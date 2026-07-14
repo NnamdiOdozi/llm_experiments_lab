@@ -1,1 +1,0 @@
-{"run_id": 172, "status": "paused", "current_step": 44, "total_steps": 5000, "metrics_count": 4, "template": "rnn", "elapsed_seconds": 111.3, "pid": 2147271, "device": "cpu"}
