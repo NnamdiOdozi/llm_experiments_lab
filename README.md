@@ -48,6 +48,12 @@ You select from preset experiments (tiny transformers,MoE variant, RNNs), option
 - **Frontend:** React + TypeScript + Vite. Recharts for loss visualization. Polls backend every 2s during training.
 - **Database:** SQLite file (`lab.db`, auto-created on first run). Stores experiments, training runs, and metrics.
 
+| Layer | What it is | Where it runs |
+|-------|-----------|----------------|
+| Frontend | React + TypeScript + Vite UI — config panel, live charts, Inspector, chatbot | Your browser (`npm run dev`, port 5173) |
+| Backend | FastAPI + SQLite — the API/orchestrator: experiments, runs, chatbot, diagnostics | Your machine (`uv run uvicorn`, port 8000) |
+| Trainer | The actual PyTorch training loop, one OS subprocess per run | Either **local** (in-process on your machine, same codebase as the backend) or **remote** (proxied to a Nebius serverless CPU/GPU endpoint — see [Hardware Configuration](#hardware-configuration)) |
+
 ## Hardware Configuration
 
 Training runs locally (in-process, on your own machine) by default. Selecting
@@ -65,16 +71,18 @@ why, and the concurrency caps.
 
 ## Docker Images
 
-Three images, all built from this repo:
+Two images, both built from this repo — the backend/frontend run directly via
+`uv`/`npm` (see [Setup & Run](#setup--run)), not as a Docker image; only the
+trainer, which is what actually gets deployed to a Nebius endpoint, is
+containerized:
 
 | Image | Dockerfile | Purpose |
 |-------|-----------|---------|
-| Backend | `Dockerfile.backend` | The FastAPI + React app itself (this UI) |
 | CPU trainer | `Dockerfile.trainer-cpu` | Deployed to the Nebius CPU endpoint — CPU-only PyTorch, no CUDA |
 | GPU trainer | `Dockerfile.trainer-gpu` | Deployed to the Nebius GPU endpoint — CUDA PyTorch |
 
 Build/push scripts: `scripts/build_push_trainer_cpu.sh`, `scripts/build_push_trainer_gpu.sh`.
-The trainer images are the same codebase as the backend (`backend/`, `config/`) —
+Both images are the same codebase as the backend (`backend/`, `config/`) —
 split into two Dockerfiles only so the CPU endpoint doesn't have to pull CUDA
 PyTorch it can't use.
 
@@ -228,6 +236,11 @@ and cold-starting a second endpoint when the existing one has spare vCPU/VRAM
 capacity), not an oversight. See `docs/DESIGN_DECISIONS.md` §63 for the
 tiered-preset-selector idea if this needs to become elastic later.
 
+## Further Reading
+
+[What If You Could Pause a Language Model While It Is Learning?](https://nodozi.substack.com/p/what-if-you-could-pause-a-language) — the motivation and design thinking behind this project, in more depth.
+
 ## License
+
 
 [MIT](LICENSE)
