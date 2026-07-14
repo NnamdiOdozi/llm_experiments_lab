@@ -13,7 +13,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 - **Look inside one forward pass** — the Inspector panel exposes tensor shapes, attention maps, Q/K/V vectors, embeddings, and the LM head's actual top-k token candidates: the machinery a loss curve alone never shows.
 - **A chatbot that knows *this* experiment** — grounded in your config, metrics, logs, and diagnostics, not a generic LLM explainer.
 - **Server metrics and logs, live** — CPU/GPU utilization, memory, and step-by-step training events, right alongside the model code.
-- **Real infrastructure, real savings** — runs locally or on Nebius serverless endpoints, with idle auto-stop so you're never paying for a GPU nobody's using.
+- **Cost-conscious and environmentally friendly by design** — runs locally or on Nebius serverless endpoints, with idle auto-stop so a GPU never sits running (and burning power) for nobody. Concurrent runs on the same device type share one already-warm endpoint instead of each spinning up its own machine, so idle compute isn't wasted and no one pays for — or powers — a second GPU that wasn't actually needed.
 
 ## Screenshots
 
