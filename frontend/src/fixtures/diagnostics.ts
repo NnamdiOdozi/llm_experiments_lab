@@ -227,6 +227,16 @@ export const FIXTURE_SNAPSHOT_WITH_ATTENTION: import("../types").DiagnosticSnaps
         [[1.0, 0.0, 0.0], [0.40, 0.60, 0.0], [0.09, 0.41, 0.50]],
       ],
     ],
+    positions: [0, 1, 2],
+    // Eager per-pair Q/K/V (compact 8-dim vectors, generated so each
+    // layer/head pair is distinct without 72 hand-written blocks).
+    qkv: Array.from({ length: 4 }, (_, layer) =>
+      Array.from({ length: 6 }, (_, head) => ({
+        q: [0, 1, 2].map((pos) => Array.from({ length: 8 }, (_, d) => Number((0.1 * layer + 0.01 * head + 0.001 * pos + 0.02 * d - 0.05).toFixed(4)))),
+        k: [0, 1, 2].map((pos) => Array.from({ length: 8 }, (_, d) => Number((0.05 * layer + 0.02 * head + 0.001 * pos - 0.015 * d + 0.1).toFixed(4)))),
+        v: [0, 1, 2].map((pos) => Array.from({ length: 8 }, (_, d) => Number((-0.08 * layer + 0.015 * head + 0.002 * pos + 0.01 * d).toFixed(4)))),
+      }))
+    ),
   },
   complete: true
 };

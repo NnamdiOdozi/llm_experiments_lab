@@ -243,6 +243,13 @@ export interface AttentionData {
   total_positions?: number;
 }
 
+export interface AttentionMapsQKV {
+  // Per-position Q/K/V vectors for one head: arrays of vectors, one per position
+  q: number[][];  // [position][head_size]
+  k: number[][];
+  v: number[][];
+}
+
 export interface AttentionMaps {
   available: boolean;
   reason?: string;
@@ -251,6 +258,10 @@ export interface AttentionMaps {
   // has n_head arrays; each head has a [window × window] weight matrix.
   weights?: number[][][][];
   token_labels?: string[];
+  // Q/K/V vectors for all layers × all heads, captured eagerly. Shape:
+  // qkv[layer][head] = {q, k, v} where each is per-position arrays.
+  qkv?: AttentionMapsQKV[][];
+  positions?: number[];  // Window position indices [start, start+1, ..., end-1]
   window_start?: number;
   total_positions?: number;
   n_layer?: number;

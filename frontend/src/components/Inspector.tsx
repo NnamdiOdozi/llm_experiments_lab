@@ -727,12 +727,29 @@ function AttentionHeatmap({
         </table>
       </div>
 
-      {/* Runtime guard, not just the TS type: qkv_detail's shape changed
-          2026-07-14 (single last-token vector -> per-position arrays) — a
-          response from a trainer container built before that change would
-          still have the old {position, q, k, v} shape and crash QKVTable's
-          .positions.length access. See docs/DESIGN_DECISIONS.md. */}
-      {snapshot.attention.qkv_detail && Array.isArray(snapshot.attention.qkv_detail.positions) && (
+      {/* Q/K/V detail: prefer eager maps over single-pair fallback. When
+          attention_maps includes qkv, use that (all pairs captured); otherwise
+          fall back to snapshot.attention.qkv_detail (single pair, on-demand).
+          Runtime guard: qkv_detail's shape changed 2026-07-14 — old trainers
+          may return wrong format, check Array.isArray(positions). */}
+      {hasMaps && blockNum !== null && head !== null && snapshot.attention_maps?.qkv && (
+        <QKVTable
+          qkv={{
+            positions: snapshot.attention_maps.positions ?? [],
+            tokens: snapshot.attention_maps.token_labels ?? [],
+            q: snapshot.attention_maps.qkv[blockNum]?.[head]?.q ?? [],
+            k: snapshot.attention_maps.qkv[blockNum]?.[head]?.k ?? [],
+            v: snapshot.attention_maps.qkv[blockNum]?.[head]?.v ?? [],
+          }}
+          blockNum={blockNum}
+          head={head}
+          onOpenDataTab={onOpenDataTab}
+        />
+      )}
+      {/* Single-pair fallback also covers the maps-without-qkv case (a §76
+          backend predating eager Q/K/V): there App still peeks per pair, and
+          the response's qkv_detail is the only vector source. */}
+      {!snapshot.attention_maps?.qkv && snapshot.attention.qkv_detail && Array.isArray(snapshot.attention.qkv_detail.positions) && (
         <QKVTable qkv={snapshot.attention.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
       )}
     </div>

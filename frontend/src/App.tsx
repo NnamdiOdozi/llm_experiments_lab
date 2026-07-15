@@ -203,16 +203,16 @@ export default function App() {
   useEffect(() => {
     if (diagnosticSessionId == null || runId == null || attentionBlock == null || attentionHead == null) return;
 
-    // Skip peek if all three conditions are met (attention_maps is current):
-    // 1. attention_maps is available (eager capture happened)
-    // 2. not showing Q/K/V detail (which is still on-demand per selected pair)
-    // 3. window offset is 0 (not browsing history, maps are for current window)
-    // Otherwise, peek is needed: for qkv_detail, offset ≠ 0, or attention_maps absent.
+    // Skip peek when attention_maps covers all current needs:
+    // - maps available AND
+    // - window offset is 0 (maps not recomputed at offset ≠ 0) AND
+    // - (!showQKVDetail OR maps include qkv for all pairs)
+    // Otherwise peek: for offset ≠ 0 (need recompute), qkv needed but absent, or maps missing.
     const hasCurrentMaps =
       diagnosticSnapshot?.attention_maps?.available &&
       diagnosticSnapshot.attention_maps.weights &&
-      !showQKVDetail &&
-      attentionWindowOffset === 0;
+      attentionWindowOffset === 0 &&
+      (!showQKVDetail || !!diagnosticSnapshot.attention_maps.qkv);
 
     if (hasCurrentMaps) {
       // Data already current, skip the network fetch
