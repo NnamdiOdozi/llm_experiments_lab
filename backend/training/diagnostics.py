@@ -246,6 +246,74 @@ def _compute_summary(tensor: torch.Tensor) -> dict:
         }
 
 
+def _get_position_vectors(tensor: torch.Tensor, offset: int = 0) -> Optional[dict]:
+    """Raw per-position vectors, DIAGNOSTIC_POSITION_WINDOW positions wide.
+
+    Handles any 3D [B, T, *] tensor (2D inputs like embedding's token-id
+    lookup return None, matching the fact there's no meaningful "input vector"
+    for a token id). `offset` shifts the window earlier — same semantics as
+    attention's window_offset (0 = most recent, positive N = shift back N).
+
+    Used by both transformer and MoE templates via make_hook_for_diagnostics.
+    See docs/DESIGN_DECISIONS.md.
+    """
+    if tensor.dim() != 3:
+        return None
+    with torch.no_grad():
+        T = tensor.shape[1]
+        window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+        end = max(window, T - max(offset, 0))
+        start = end - window
+        return {"positions": list(range(start, end)), "vectors": tensor[0, start:end, :].tolist()}
+
+
+def make_hook_for_diagnostics(node_id: str, session_id: str):
+    """Factory for forward hooks that capture tensor info for a diagnostic session.
+
+    The returned hook handles both plain tensors (transformer) and tuples where
+    the first element is a tensor (MoE blocks return (x, drop_rate)) — it unpacks
+    tuples before computing summaries and position vectors.
+
+    Used by both transformer and MoE templates. Closures reference session_id so
+    they store captures in the correct session's captured_tensors dict.
+    """
+    def hook(module, input_tuple, output):
+        session = get_session(session_id)
+        if session is None:
+            return
+
+        offset = session.node_window_offset
+        input_tensor = input_tuple[0] if input_tuple else None
+        input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
+        input_position_vectors = (
+            _get_position_vectors(input_tensor, offset) if isinstance(input_tensor, torch.Tensor) else None
+        )
+
+        # Handle both plain tensors (transformer) and tuples (MoE)
+        if isinstance(output, tuple) and len(output) > 0:
+            x = output[0]
+            output_shape = list(x.shape) if isinstance(x, torch.Tensor) else []
+            summary = _compute_summary(x) if isinstance(x, torch.Tensor) else {}
+            position_vectors = _get_position_vectors(x, offset) if isinstance(x, torch.Tensor) else None
+        elif isinstance(output, torch.Tensor):
+            output_shape = list(output.shape)
+            summary = _compute_summary(output)
+            position_vectors = _get_position_vectors(output, offset)
+        else:
+            output_shape = []
+            summary = {}
+            position_vectors = None
+
+        session.captured_tensors[node_id] = NodeCapture(
+            input_shape=input_shape,
+            output_shape=output_shape,
+            summary=summary,
+            position_vectors=position_vectors,
+            input_position_vectors=input_position_vectors,
+        )
+    return hook
+
+
 def register_diagnostic_hooks(model: torch.nn.Module, session_id: str) -> None:
     """Register forward hooks at diagnostic node points.
 

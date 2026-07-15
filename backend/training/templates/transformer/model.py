@@ -192,90 +192,35 @@ class TinyTransformerLM(nn.Module):
     def register_diagnostic_hooks(self, session_id: str):
         """Register forward hooks at diagnostic node points for a session.
 
-        Called by diagnostic route handlers. Hooks capture tensor shapes
-        and summary statistics at embedding, attention, MLP, and final
-        normalization layers. Hook closures reference the session_id so
-        they store captures in the correct session's captured_tensors dict.
+        Delegates to the shared hook factory in backend.training.diagnostics,
+        which handles both transformer and MoE outputs. Hooks capture tensor
+        shapes and summary statistics at embedding, attention, MLP, and final
+        normalization layers.
 
-        For simplicity and zero impact on normal forward passes, hooks
-        are not unregistered per-layer — they stay live for the lifetime
-        of the model. Session cleanup will remove model references entirely.
+        See docs/DESIGN_DECISIONS.md §66.
         """
-        from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
-
-        def _windowed_position_vectors(tensor: torch.Tensor, offset: int = 0) -> Optional[dict]:
-            """Raw per-position vectors, DIAGNOSTIC_POSITION_WINDOW positions
-            wide — any 3D [B, T, *] tensor (2D inputs like embedding's
-            token-id lookup aren't per-position float vectors, so this
-            correctly returns None for those — embedding only ever gets an
-            OUTPUT vector, matching the fact there's no meaningful "input
-            vector" for a token id). `offset` shifts the window earlier —
-            same semantics/formula as attention's window_offset (0 = most
-            recent, positive N = shift back N), direct user request,
-            2026-07-15: "a stepper that allows that window to slide
-            backwards in time" for every node, not just attention. See
-            docs/DESIGN_DECISIONS.md."""
-            if tensor.dim() != 3:
-                return None
-            with torch.no_grad():
-                T = tensor.shape[1]
-                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-                end = max(window, T - max(offset, 0))
-                start = end - window
-                return {"positions": list(range(start, end)), "vectors": tensor[0, start:end, :].tolist()}
-
-        def make_hook(node_id: str):
-            def hook(module, input_tuple, output):
-                from backend.training.diagnostics import get_session
-                session = get_session(session_id)
-                if session is None:
-                    return
-
-                offset = session.node_window_offset
-                input_tensor = input_tuple[0] if input_tuple else None
-                input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
-                output_shape = list(output.shape) if isinstance(output, torch.Tensor) else []
-                summary = {}
-                position_vectors = None
-                input_position_vectors = None
-                if isinstance(output, torch.Tensor):
-                    summary = _compute_summary(output)
-                    position_vectors = _windowed_position_vectors(output, offset)
-                if isinstance(input_tensor, torch.Tensor):
-                    input_position_vectors = _windowed_position_vectors(input_tensor, offset)
-
-                from backend.training.diagnostics import NodeCapture
-                session.captured_tensors[node_id] = NodeCapture(
-                    input_shape=input_shape,
-                    output_shape=output_shape,
-                    summary=summary,
-                    position_vectors=position_vectors,
-                    input_position_vectors=input_position_vectors,
-                )
-            return hook
+        from backend.training.diagnostics import make_hook_for_diagnostics
 
         # Collect and return the hook handles — previously the
         # register_forward_hook return values were discarded, so
         # session.hook_handles stayed empty and delete_session() had
-        # nothing to deregister. The diagnostics-side wrapper
-        # (diagnostics.register_diagnostic_hooks) stores these on the
-        # session so eviction can actually detach them. Fable review,
-        # 2026-07-14 — see docs/DESIGN_DECISIONS.md §66.
+        # nothing to deregister. The diagnostics-side wrapper stores
+        # these on the session so eviction can actually detach them.
         handles = []
 
         # Register embedding hook
-        handles.append(self.token_emb.register_forward_hook(make_hook("embedding")))
+        handles.append(self.token_emb.register_forward_hook(make_hook_for_diagnostics("embedding", session_id)))
 
         # Register block hooks
         for i, block in enumerate(self.blocks):
-            handles.append(block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1")))
-            handles.append(block.attn.register_forward_hook(make_hook(f"block.{i}.attention")))
-            handles.append(block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2")))
-            handles.append(block.ffn.register_forward_hook(make_hook(f"block.{i}.mlp")))
+            handles.append(block.ln1.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.ln1", session_id)))
+            handles.append(block.attn.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.attention", session_id)))
+            handles.append(block.ln2.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.ln2", session_id)))
+            handles.append(block.ffn.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.mlp", session_id)))
 
         # Register final norm and lm_head hooks
-        handles.append(self.ln_f.register_forward_hook(make_hook("final_norm")))
-        handles.append(self.lm_head.register_forward_hook(make_hook("lm_head")))
+        handles.append(self.ln_f.register_forward_hook(make_hook_for_diagnostics("final_norm", session_id)))
+        handles.append(self.lm_head.register_forward_hook(make_hook_for_diagnostics("lm_head", session_id)))
         return handles
 
     @torch.no_grad()

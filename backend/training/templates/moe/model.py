@@ -219,87 +219,33 @@ class TinyMoeLM(nn.Module):
     def register_diagnostic_hooks(self, session_id: str):
         """Register forward hooks at diagnostic node points for a session.
 
-        Called by diagnostic route handlers. For MoE, the MoE block is treated
-        as a single opaque node (block.{i}.moe) with shape capture only;
-        per-expert routing breakdown is deferred to Phase 2.
+        Delegates to the shared hook factory in backend.training.diagnostics,
+        which handles both transformer and MoE outputs (unwrapping MoE tuples).
+        For MoE, the MoE block is treated as a single opaque node (block.{i}.moe)
+        with shape capture only; per-expert routing breakdown is deferred to Phase 2.
 
-        Hook closures reference the session_id so they store captures in the
-        correct session's captured_tensors dict.
+        See docs/DESIGN_DECISIONS.md §66.
         """
-        from backend.training.diagnostics import _compute_summary, DIAGNOSTIC_POSITION_WINDOW
+        from backend.training.diagnostics import make_hook_for_diagnostics
 
-        def _position_vectors(tensor: torch.Tensor, offset: int = 0) -> Optional[dict]:
-            """Raw per-position vectors, DIAGNOSTIC_POSITION_WINDOW positions
-            wide — any 3D [B, T, *] tensor. `offset` shifts the window
-            earlier — same semantics as attention's window_offset (0 =
-            most recent, positive N = shift back N). Direct user request,
-            2026-07-15. See docs/DESIGN_DECISIONS.md."""
-            if tensor.dim() != 3:
-                return None
-            with torch.no_grad():
-                T = tensor.shape[1]
-                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-                end = max(window, T - max(offset, 0))
-                start = end - window
-                return {"positions": list(range(start, end)), "vectors": tensor[0, start:end, :].tolist()}
-
-        def make_hook(node_id: str):
-            def hook(module, input_tuple, output):
-                from backend.training.diagnostics import get_session
-                session = get_session(session_id)
-                if session is None:
-                    return
-
-                offset = session.node_window_offset
-                input_tensor = input_tuple[0] if input_tuple else None
-                input_shape = list(input_tensor.shape) if isinstance(input_tensor, torch.Tensor) else []
-                input_position_vectors = (
-                    _position_vectors(input_tensor, offset) if isinstance(input_tensor, torch.Tensor) else None
-                )
-                # MoE block returns (x, drop_rate) tuple
-                if isinstance(output, tuple) and len(output) > 0:
-                    x = output[0]
-                    output_shape = list(x.shape) if isinstance(x, torch.Tensor) else []
-                    summary = _compute_summary(x) if isinstance(x, torch.Tensor) else {}
-                    position_vectors = _position_vectors(x, offset) if isinstance(x, torch.Tensor) else None
-                elif isinstance(output, torch.Tensor):
-                    output_shape = list(output.shape)
-                    summary = _compute_summary(output)
-                    position_vectors = _position_vectors(output, offset)
-                else:
-                    output_shape = []
-                    summary = {}
-                    position_vectors = None
-
-                from backend.training.diagnostics import NodeCapture
-                session.captured_tensors[node_id] = NodeCapture(
-                    input_shape=input_shape,
-                    output_shape=output_shape,
-                    summary=summary,
-                    position_vectors=position_vectors,
-                    input_position_vectors=input_position_vectors,
-                )
-            return hook
-
-        # Collect and return the hook handles — same reason as the
-        # transformer template: discarded handles meant delete_session()
-        # could never detach hooks. Fable review, 2026-07-14 — see
-        # docs/DESIGN_DECISIONS.md §66.
+        # Collect and return the hook handles — discarded handles meant
+        # delete_session() could never detach hooks. The diagnostics-side
+        # wrapper stores these on the session so eviction can actually detach them.
         handles = []
 
         # Register embedding hook
-        handles.append(self.token_emb.register_forward_hook(make_hook("embedding")))
+        handles.append(self.token_emb.register_forward_hook(make_hook_for_diagnostics("embedding", session_id)))
 
         # Register block hooks
         for i, block in enumerate(self.blocks):
-            handles.append(block.ln1.register_forward_hook(make_hook(f"block.{i}.ln1")))
-            handles.append(block.attn.register_forward_hook(make_hook(f"block.{i}.attention")))
-            handles.append(block.ln2.register_forward_hook(make_hook(f"block.{i}.ln2")))
-            handles.append(block.moe.register_forward_hook(make_hook(f"block.{i}.moe")))
+            handles.append(block.ln1.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.ln1", session_id)))
+            handles.append(block.attn.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.attention", session_id)))
+            handles.append(block.ln2.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.ln2", session_id)))
+            handles.append(block.moe.register_forward_hook(make_hook_for_diagnostics(f"block.{i}.moe", session_id)))
 
         # Register final norm and lm_head hooks
-        handles.append(self.ln_f.register_forward_hook(make_hook("final_norm")))
-        handles.append(self.lm_head.register_forward_hook(make_hook("lm_head")))
+        handles.append(self.ln_f.register_forward_hook(make_hook_for_diagnostics("final_norm", session_id)))
+        handles.append(self.lm_head.register_forward_hook(make_hook_for_diagnostics("lm_head", session_id)))
         return handles
 
 
