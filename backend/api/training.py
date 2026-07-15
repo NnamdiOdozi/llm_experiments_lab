@@ -115,6 +115,13 @@ class DiagnosticsGenerateRequest(BaseModel):
     node_window_offset: int = 0
 
 
+class ArchitecturePreviewRequest(BaseModel):
+    """POST body for /architecture/preview — raw, possibly-still-being-
+    edited experiment config, no run required. See _build_architecture_manifest.
+    """
+    config: dict
+
+
 def _count_active_runs(device_filter: str | None = None) -> int:
     """Count runs with live worker processes.
 
@@ -705,33 +712,46 @@ async def metrics_websocket(websocket: WebSocket, run_id: int):
         pass
 
 
-@router.get("/{run_id}/architecture")
-async def get_architecture_manifest(run_id: int):
-    """Return static architecture manifest derived from config.
+# Sanity bounds for /architecture/preview only — the endpoint builds a real
+# (untrained) torch model from whatever config the user is mid-typing in
+# ConfigPanel to count params, so a stray digit (n_embd=999999) must not
+# reach build_model and attempt a huge allocation. Generous relative to
+# every real preset (max n_embd=192, n_layer=4 — see config/presets.py) but
+# far below OOM territory. Direct reviewer flag, 2026-07-15. See
+# docs/DESIGN_DECISIONS.md.
+_PREVIEW_BOUNDS = {
+    "n_layer": (1, 32),
+    "n_head": (1, 64),
+    "n_embd": (8, 4096),
+    "block_size": (1, 8192),
+    "num_experts": (1, 64),
+}
 
-    For local runs, derive from run_dir/config.json. For remote runs,
-    proxy to the endpoint. Node IDs and Phase 1 scope per
-    docs/Diagnostic_Contract.md.
+
+def _validate_preview_config(model_cfg: dict) -> None:
+    for field, (lo, hi) in _PREVIEW_BOUNDS.items():
+        value = model_cfg.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, (int, float)) or not (lo <= value <= hi):
+            raise HTTPException(400, f"{field}={value!r} out of allowed range [{lo}, {hi}]")
+
+
+async def _build_architecture_manifest(config: dict, local_run_id: int | None) -> dict:
+    """Pure function: config -> architecture diagram manifest.
+
+    No DB access, no run, no live worker — architecture (node list, param
+    counts) is entirely determined by model config (template + n_layer/
+    n_head/n_embd/etc), so this needs nothing beyond the config dict itself.
+    Shared by the run-scoped route (config_snapshot, frozen at run
+    creation) and /architecture/preview (live in-progress config, used
+    before a run exists at all). Direct user request, 2026-07-15 — "you go
+    to the dashboard and you've got just something very blank... there
+    must be a way" to see the diagram before Start is clicked. See
+    docs/DESIGN_DECISIONS.md.
     """
-    from backend.training import artifacts
     from backend.training.templates import TEMPLATE_REGISTRY
 
-    db_run = await db.get_training_run(run_id)
-    if _is_remote(db_run):
-        try:
-            result = await _proxy(db_run, "GET", "/api/training/{run_id}/architecture")
-            result["local_run_id"] = run_id  # Override with local run_id
-            return result
-        except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote architecture fetch failed: {exc}")
-
-    # Load config from disk
-    rd = artifacts.run_dir(run_id)
-    config_path = rd / "config.json"
-    if not config_path.exists():
-        raise HTTPException(404, "Run config not found")
-
-    config = json.loads(config_path.read_text())
     template_key = config.get("template", "transformer")
     model_cfg = config.get("model", {})
 
@@ -748,7 +768,7 @@ async def get_architecture_manifest(run_id: int):
     try:
         total_params, trainable_params = await asyncio.to_thread(_count_params)
     except Exception as e:
-        training_log.warning("Could not count params for run %d (may not have a saved checkpoint yet): %s", run_id, e)
+        training_log.warning("Could not count params (local_run_id=%s): %s", local_run_id, e)
 
     # RNN (CharRNN) has a completely different shape from transformer/MoE —
     # one-hot input, a single stacked nn.LSTM (n_layers is internal to one
@@ -801,7 +821,7 @@ async def get_architecture_manifest(run_id: int):
         ]
         return {
             "schema_version": 1,
-            "local_run_id": run_id,
+            "local_run_id": local_run_id,
             "template": template_key,
             "param_count": total_params,
             "trainable_param_count": trainable_params,
@@ -903,12 +923,74 @@ async def get_architecture_manifest(run_id: int):
 
     return {
         "schema_version": 1,
-        "local_run_id": run_id,
+        "local_run_id": local_run_id,
         "template": template_key,
         "param_count": total_params,
         "trainable_param_count": trainable_params,
         "nodes": nodes,
     }
+
+
+@router.get("/{run_id}/architecture")
+async def get_architecture_manifest(run_id: int):
+    """Return the architecture manifest for a run's frozen config.
+
+    Reads config_snapshot — written once at run creation (see
+    db.create_training_run) and never updated afterward — not the
+    experiment's live/editable config, so a run keeps showing what it
+    actually ran even if the user tweaks settings for a future run
+    afterward. Direct reviewer flag, 2026-07-15.
+
+    Always computed locally, even for remote runs — previously proxied
+    live to the Nebius endpoint, which 502'd whenever the worker wasn't
+    fully booted yet (real incident, 2026-07-15). Architecture is pure
+    config math, so there was never a need to ask the remote container at
+    all. See docs/DESIGN_DECISIONS.md.
+    """
+    db_run = await db.get_training_run(run_id)
+    if db_run is None:
+        raise HTTPException(404, "Run not found")
+
+    if db_run.get("config_snapshot"):
+        config = json.loads(db_run["config_snapshot"])
+    else:
+        # Defensive fallback for any pre-existing row without a snapshot —
+        # config_snapshot has been written unconditionally at run creation
+        # since before this route existed, so this path is not expected to
+        # be hit in practice.
+        from backend.training import artifacts
+        rd = artifacts.run_dir(run_id)
+        config_path = rd / "config.json"
+        if not config_path.exists():
+            raise HTTPException(404, "Run config not found")
+        config = json.loads(config_path.read_text())
+
+    return await _build_architecture_manifest(config, local_run_id=run_id)
+
+
+@router.post("/architecture/preview")
+async def preview_architecture_manifest(req: ArchitecturePreviewRequest):
+    """Architecture manifest for a config that has no run yet.
+
+    Lets the diagram render as soon as a preset is picked — before Start
+    is clicked — and update live as the user tweaks structural fields
+    (n_layer, n_head, n_embd, pos_encoding) in ConfigPanel. Direct user
+    request, 2026-07-15: "you go to the dashboard and you've got just
+    something very blank... there must be a way." Frontend debounces
+    calls here on config change; _validate_preview_config still guards
+    against an in-progress edit (e.g. a stray extra digit) reaching
+    build_model with a config that would attempt a huge allocation. See
+    docs/DESIGN_DECISIONS.md.
+
+    Non-structural fields (inference.max_new_tokens/temperature/
+    decoding_mode, training.max_iters) are irrelevant here — this route
+    only ever reads config["model"], never config["inference"] or
+    config["training"] — and are untouched by this endpoint or route.
+    Those stay live-editable via their own existing paths (diagnostic
+    session step/generate, resume).
+    """
+    _validate_preview_config(req.config.get("model", {}))
+    return await _build_architecture_manifest(req.config, local_run_id=None)
 
 
 @router.get("/{run_id}/architecture/embedding-table")

@@ -76,7 +76,7 @@ function renderSection(
 ) {
   return (
     <div style={{ marginBottom: 16 }}>
-      <h4 style={{ fontSize: 12, color: "var(--accent)", marginBottom: 8 }}>
+      <h4 style={{ fontSize: 15, color: "var(--accent)", marginBottom: 8 }}>
         {title}
       </h4>
       {/* Temperature has no effect under greedy decoding — argmax(logits/T)
@@ -106,10 +106,10 @@ function renderSection(
               alignItems: "center",
             }}
           >
-            <label style={{ fontSize: 12, color: "var(--text-dim)" }}>{key}</label>
+            <label style={{ fontSize: 15, color: "var(--text-dim)" }}>{key}</label>
             {options ? (
               <select
-                style={{ width: 100, textAlign: "right", fontSize: 12, padding: "4px 8px" }}
+                style={{ width: 100, textAlign: "right", fontSize: 15, padding: "4px 8px" }}
                 value={String(val)}
                 disabled={disabled}
                 onChange={(e) => handleChange(e.target.value)}
@@ -135,17 +135,17 @@ function renderSection(
             )}
           </div>
           {changedFromBaseline && (
-            <div style={{ textAlign: "right", fontSize: 10, color: "var(--text-dim)", opacity: 0.6 }}>
+            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
               baseline: {String(baselineVal)}
             </div>
           )}
           {key === "temperature" && isGreedy && (
-            <div style={{ textAlign: "right", fontSize: 10, color: "var(--text-dim)", opacity: 0.6 }}>
+            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
               no effect under greedy
             </div>
           )}
           {isReadOnly && (
-            <div style={{ textAlign: "right", fontSize: 10, color: "var(--text-dim)", opacity: 0.6 }}>
+            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
               fixed by dataset
             </div>
           )}
@@ -181,7 +181,7 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
         {normalizedConfig.template}
       </div>
       {error && (
-        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 12 }}>
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 15, marginBottom: 12 }}>
           {error}
         </div>
       )}

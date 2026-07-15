@@ -121,6 +121,131 @@ async def test_get_architecture_manifest_transformer(temp_db, client, monkeypatc
     assert len(lm_head) == 1
 
 
+async def test_architecture_run_scoped_reads_frozen_snapshot_not_live_config(temp_db, client):
+    """GET /{run_id}/architecture must reflect config_snapshot (frozen at
+    run creation), not whatever the experiment's config is now — an old
+    run should keep showing what it actually ran even after the user
+    edits settings for a future run. Direct reviewer flag, 2026-07-15.
+    """
+    exp_id = temp_db
+    frozen_config = {
+        "template": "transformer",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+        },
+    }
+    run_id = await db.create_training_run(
+        exp_id, device="cpu", execution_backend="local",
+        config_snapshot=json.dumps(frozen_config),
+    )
+
+    # Edit the experiment's live config AFTER the run was created (via the
+    # real PATCH route, same path ConfigPanel uses) — this must not affect
+    # what the already-created run reports.
+    patch_resp = await client.patch(
+        f"/api/experiments/{exp_id}/config",
+        json={"config": {"template": "transformer", "model": {"n_layer": 99}}},
+    )
+    assert patch_resp.status_code == 200
+
+    resp = await client.get(f"/api/training/{run_id}/architecture")
+    assert resp.status_code == 200
+    arch = resp.json()
+    block = [n for n in arch["nodes"] if n["id"] == "block"][0]
+    assert block["repeat_count"] == 4  # frozen snapshot's n_layer, not the edited 99
+
+
+async def test_preview_architecture_transformer(client):
+    """POST /architecture/preview needs no run at all — just a config."""
+    config = {
+        "template": "transformer",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+        },
+    }
+    resp = await client.post("/api/training/architecture/preview", json={"config": config})
+    assert resp.status_code == 200
+    arch = resp.json()
+    assert arch["local_run_id"] is None
+    assert arch["template"] == "transformer"
+    block = [n for n in arch["nodes"] if n["id"] == "block"][0]
+    assert block["repeat_count"] == 4
+    child_ids = [c["id"] for c in block["children"]]
+    # Literal {i} template placeholder — the frontend's block-picker remap
+    # depends on matching against this exact literal id. Direct reviewer
+    # flag, 2026-07-15.
+    assert "block.{i}.attention" in child_ids
+    assert "block.{i}.mlp" in child_ids
+
+
+async def test_preview_architecture_moe(client):
+    config = {
+        "template": "moe",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "rope",
+            "num_experts": 8, "top_k": 2, "capacity_factor": 1.25,
+        },
+    }
+    resp = await client.post("/api/training/architecture/preview", json={"config": config})
+    assert resp.status_code == 200
+    arch = resp.json()
+    block = [n for n in arch["nodes"] if n["id"] == "block"][0]
+    child_ids = [c["id"] for c in block["children"]]
+    assert "block.{i}.moe" in child_ids
+    assert "block.{i}.mlp" not in child_ids
+
+
+async def test_preview_architecture_rnn(client):
+    config = {
+        "template": "rnn",
+        "model": {"vocab_size": 65, "n_hidden": 256, "n_layers": 2, "dropout": 0.5},
+    }
+    resp = await client.post("/api/training/architecture/preview", json={"config": config})
+    assert resp.status_code == 200
+    arch = resp.json()
+    node_ids = [n["id"] for n in arch["nodes"]]
+    assert node_ids == ["one_hot", "lstm", "dropout", "lm_head"]
+
+
+async def test_preview_architecture_reflects_layer_count_change(client):
+    """Changing n_layer between two preview calls changes repeat_count —
+    the live-update behavior a user tweaking ConfigPanel before Start
+    should see. Direct user request, 2026-07-15.
+    """
+    base_model = {
+        "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+        "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+    }
+    resp_4 = await client.post(
+        "/api/training/architecture/preview",
+        json={"config": {"template": "transformer", "model": {**base_model, "n_layer": 4}}},
+    )
+    resp_5 = await client.post(
+        "/api/training/architecture/preview",
+        json={"config": {"template": "transformer", "model": {**base_model, "n_layer": 5}}},
+    )
+    block_4 = [n for n in resp_4.json()["nodes"] if n["id"] == "block"][0]
+    block_5 = [n for n in resp_5.json()["nodes"] if n["id"] == "block"][0]
+    assert block_4["repeat_count"] == 4
+    assert block_5["repeat_count"] == 5
+
+
+async def test_preview_architecture_rejects_out_of_bounds_config(client):
+    """A stray digit mid-typing (n_embd=999999) must not reach build_model
+    and attempt a huge allocation. Direct reviewer flag, 2026-07-15.
+    """
+    config = {
+        "template": "transformer",
+        "model": {"vocab_size": 65, "block_size": 128, "n_embd": 999999, "n_head": 6, "n_layer": 4},
+    }
+    resp = await client.post("/api/training/architecture/preview", json={"config": config})
+    assert resp.status_code == 400
+    assert "n_embd" in resp.json()["detail"]
+
+
 async def test_diagnostics_start_requires_paused_run(temp_db, client):
     """POST /diagnostics/start rejects 400 if run not paused/completed."""
     exp_id = temp_db

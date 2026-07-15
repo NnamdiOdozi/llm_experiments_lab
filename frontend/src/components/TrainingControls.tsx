@@ -18,6 +18,8 @@ interface Props {
   pollError: string | null;
   startError: string | null;
   controlError: string | null;
+  soundMuted: boolean;
+  onToggleSoundMuted: () => void;
 }
 
 function statusTag(status: string) {
@@ -70,6 +72,8 @@ export default function TrainingControls({
   pollError,
   startError,
   controlError,
+  soundMuted,
+  onToggleSoundMuted,
 }: Props) {
   const status = runStatus?.status;
   const isActive = status != null && ACTIVE_RUN_STATUSES.has(status);
@@ -100,19 +104,19 @@ export default function TrainingControls({
       <h3>Training</h3>
 
       {startError && (
-        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 15, marginBottom: 8 }}>
           {startError}
         </div>
       )}
 
       {controlError && (
-        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 15, marginBottom: 8 }}>
           {controlError}
         </div>
       )}
 
       {isStale && (
-        <div style={{ background: "#dd6b20", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 12, marginBottom: 8 }}>
+        <div style={{ background: "#dd6b20", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 15, marginBottom: 8 }}>
           Data may be stale — last update {staleSeconds}s ago
           {pollError && <span> ({pollError})</span>}
         </div>
@@ -121,15 +125,15 @@ export default function TrainingControls({
       {runStatus && (
         <div style={{ marginBottom: 12 }}>
           {runId != null && (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8 }}>
+            <span style={{ fontSize: 14, color: "var(--text-dim)", marginRight: 8 }}>
               Run #{runId}
             </span>
           )}
           {statusTag(runStatus.status)}
-          <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>
+          <span className="tag" style={{ marginLeft: 6, fontSize: 13 }}>
             {workerTag}
           </span>
-          <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 10 }}>
+          <span style={{ fontSize: 15, color: "var(--text-dim)", marginLeft: 10 }}>
             Step {runStatus.current_step} / {runStatus.total_steps}
             {runStatus.elapsed_seconds > 0 && ` — ${formatElapsed(runStatus.elapsed_seconds)}`}
           </span>
@@ -140,22 +144,22 @@ export default function TrainingControls({
       {isDone && (
         <div style={{ marginBottom: 10, display: "flex", gap: 16 }}>
           <div>
-            <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
+            <label style={{ fontSize: 15, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
             <select
               value={device}
               onChange={(e) => onDeviceChange(e.target.value)}
-              style={{ fontSize: 12, padding: "4px 8px" }}
+              style={{ fontSize: 15, padding: "4px 8px" }}
             >
               <option value="cpu">CPU</option>
               <option value="cuda">GPU (CUDA)</option>
             </select>
           </div>
           <div>
-            <label style={{ fontSize: 12, color: "var(--text-dim)", marginRight: 8 }}>Backend</label>
+            <label style={{ fontSize: 15, color: "var(--text-dim)", marginRight: 8 }}>Backend</label>
             <select
               value={backend}
               onChange={(e) => onBackendChange(e.target.value)}
-              style={{ fontSize: 12, padding: "4px 8px" }}
+              style={{ fontSize: 15, padding: "4px 8px" }}
             >
               <option value="local">Local</option>
               <option value="nebius_endpoint">Serverless (Nebius)</option>
@@ -190,6 +194,13 @@ export default function TrainingControls({
             Stop
           </button>
         )}
+        <button
+          onClick={onToggleSoundMuted}
+          title={soundMuted ? "Unmute training-start sound" : "Mute training-start sound"}
+          style={{ marginLeft: "auto", fontSize: 14 }}
+        >
+          {soundMuted ? "🔇" : "🔔"}
+        </button>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import ArchSchematic from "./ArchSchematic";
-import { fetchArchitecture } from "../hooks/useApi";
+import { fetchArchitecture, previewArchitecture } from "../hooks/useApi";
 
 // Real bug report, 2026-07-14: the numbered block buttons only ever set
 // ArchSchematic's local selectedBlockIdx — App's selectedNodeId (which
@@ -39,6 +39,7 @@ const manifest = {
 
 vi.mock("../hooks/useApi", () => ({
   fetchArchitecture: vi.fn(() => Promise.resolve(manifest)),
+  previewArchitecture: vi.fn(() => Promise.resolve(manifest)),
 }));
 
 describe("ArchSchematic block selector", () => {
@@ -101,13 +102,18 @@ describe("ArchSchematic block selector", () => {
         manifest.nodes[0],
         {
           ...block,
-          label: "Transformer Block (MoE)",
+          // Simulates an older remote MoE manifest whose presentation text
+          // and kind differ from the current local producer. Stable node ids
+          // must still receive the shared Transformer/MoE headings.
+          kind: "moe_block_group",
+          label: "MoE Blocks",
           children: [
             ...block.children!.slice(0, 3),
             { id: "block.{i}.moe", kind: "moe", label: "Mixture of Experts", config: {} },
           ],
         },
-        ...manifest.nodes.slice(2),
+        { ...manifest.nodes[2], label: "Output normalization" },
+        manifest.nodes[3],
       ],
     });
 
@@ -116,5 +122,75 @@ describe("ArchSchematic block selector", () => {
     await waitFor(() => expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument());
     expect(screen.getByText(/Final\s+LayerNorm/)).toBeInTheDocument();
     expect(screen.getByText("Experts")).toBeInTheDocument();
+  });
+});
+
+// Direct user request, 2026-07-15: the diagram should render as soon as a
+// preset is picked, before Start is clicked, and update as the user tweaks
+// structural fields — not stay blank until a run exists. See
+// docs/DESIGN_DECISIONS.md.
+describe("ArchSchematic preview mode (no run yet)", () => {
+  const previewConfig = { template: "transformer", model: { n_layer: 4 } } as any;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(previewArchitecture).mockClear();
+    vi.mocked(fetchArchitecture).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders from config alone when there is no runId, via previewArchitecture not fetchArchitecture", async () => {
+    render(<ArchSchematic config={previewConfig} />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(previewArchitecture).toHaveBeenCalledWith(previewConfig);
+    expect(fetchArchitecture).not.toHaveBeenCalled();
+    expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument();
+  });
+
+  it("debounces rapid config changes into a single call", async () => {
+    const { rerender } = render(
+      <ArchSchematic config={{ template: "transformer", model: { n_layer: 4 } } as any} />,
+    );
+    rerender(<ArchSchematic config={{ template: "transformer", model: { n_layer: 5 } } as any} />);
+    rerender(<ArchSchematic config={{ template: "transformer", model: { n_layer: 6 } } as any} />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(399);
+    });
+    expect(previewArchitecture).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(previewArchitecture).toHaveBeenCalledTimes(1);
+    expect(previewArchitecture).toHaveBeenCalledWith({ template: "transformer", model: { n_layer: 6 } });
+  });
+
+  it("does not call previewArchitecture once a runId exists", async () => {
+    render(<ArchSchematic runId={1} config={previewConfig} />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(fetchArchitecture).toHaveBeenCalledWith(1);
+    expect(previewArchitecture).not.toHaveBeenCalled();
   });
 });

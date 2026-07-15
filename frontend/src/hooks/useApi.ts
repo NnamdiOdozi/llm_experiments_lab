@@ -177,6 +177,21 @@ export function fetchEmbeddingTable(runId: number) {
   return api<import("../types").EmbeddingTableData>(`/training/${runId}/architecture/embedding-table`);
 }
 
+// Architecture manifest for a config with no run yet — lets the diagram
+// render before Start is clicked, and update live as the user tweaks
+// structural fields in ConfigPanel. Direct user request, 2026-07-15. See
+// docs/DESIGN_DECISIONS.md.
+export async function previewArchitecture(config: import("../types").ExperimentConfig) {
+  if (useFixtures()) {
+    const { FIXTURE_MANIFEST } = await import("../fixtures/diagnostics");
+    return FIXTURE_MANIFEST;
+  }
+  return api<import("../types").ArchitectureManifest>(`/training/architecture/preview`, {
+    method: "POST",
+    body: JSON.stringify({ config }),
+  });
+}
+
 export async function startDiagnostic(runId: number, payload: import("../types").DiagnosticStartRequest) {
   if (useFixtures()) {
     const { FIXTURE_START_RESPONSE } = await import("../fixtures/diagnostics");

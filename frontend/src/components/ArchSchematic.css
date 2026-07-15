@@ -20,16 +20,24 @@
   display: flex;
   align-items: center;
   flex: 1 1 0;
-  min-width: 165px;
+  min-width: 150px;
 }
 
 .arch-flow-item--block {
   flex-grow: 1.35;
-  min-width: 230px;
+  min-width: 215px;
 }
 
 .arch-flow-item--detail {
   min-width: 175px;
+}
+
+/* Input/Output bookends — smaller than a real component box, since these
+   are just boundary labels, not computational nodes. Direct user request,
+   2026-07-15. See docs/DESIGN_DECISIONS.md. */
+.arch-flow-item--io {
+  flex-grow: 0.4;
+  min-width: 70px;
 }
 
 .arch-stage {
@@ -40,16 +48,19 @@
   justify-content: center;
 }
 
+/* Shrunk slightly (was min-height 58/padding 12px 14px/font-size 14px) to
+   make room for the new Input/Output bookends without the pipeline growing
+   overall. Direct user request, 2026-07-15. See docs/DESIGN_DECISIONS.md. */
 .arch-node {
   display: flex;
-  min-height: 58px;
+  min-height: 50px;
   width: 100%;
-  padding: 12px 14px;
+  padding: 9px 12px;
   align-items: center;
   justify-content: center;
   border-radius: 8px;
   color: #1a202c;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 650;
   line-height: 1.25;
   text-align: center;

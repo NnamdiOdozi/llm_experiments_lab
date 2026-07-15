@@ -3717,6 +3717,141 @@ Implementation note: partially built by a Sonnet subagent that died mid-task
 on a spend limit; orchestrator completed the fallback fix, backend tests,
 and shadowing cleanup, Sonnet finished the frontend tests on resume.
 
+## §79 — Two deferred issues (raised 2026-07-15, intentionally not yet fixed)
+
+Both flagged during a live session; user has a presentation and explicitly
+asked to defer both until after it. Recorded here so they aren't lost.
+Status: **open, no code changed for either.**
+
+### 79a. Overlapping Nebius Start commands can corrupt an endpoint into ERROR
+
+Nebius support (email, 2026-07-15 14:59) traced the CPU/GPU endpoint ERROR
+incidents from earlier that day to overlapping lifecycle operations: a
+successful endpoint start followed shortly by a *separate* Start request
+authenticated as `mlflow-sa` — which is confirmed to be **this project's
+own** Nebius CLI profile (`scripts/install_nebius_cli.sh`'s
+`NEBIUS_PROFILE:=mlflow-sa` default, unrelated to any actual MLflow use).
+So this is our own backend double-starting an endpoint, not a third party.
+
+Likely mechanism: `backend/nebius/worker_manager.py::ensure_worker()` reads
+`worker_status` from the DB, and only writes `STARTING` back several lines
+later, *after* an actual network call to Nebius
+(`endpoints_client.start_endpoint`). Nothing locks that gap — two
+`/start` requests for the same device type landing close together could
+both read the pre-STARTING status and both fire a Start command at Nebius.
+The existing `WorkerBusyError` guard (checks `PROVISIONING`/`STARTING`)
+only protects against a call arriving *after* the DB write, not during the
+gap before it.
+
+Plausible real trigger: FastAPI does not cancel a request's coroutine just
+because the client disconnected. If a user gives up waiting mid-cold-start
+(closes tab / refreshes / client-side timeout) while `ensure_worker()` is
+still polling Nebius server-side, that coroutine keeps running. A retry
+click lands a second call while the first is still alive in the unlocked
+gap.
+
+**Proposed fix (not yet implemented):** an `asyncio.Lock` per session_id
+(only two exist — `worker-cpu`/`worker-gpu`, so a small dict-of-locks is
+enough) wrapping the entire check-then-act sequence in `ensure_worker()`,
+so two calls for the same device type can never both pass the status check
+before one commits `STARTING`.
+
+Caveat: reasoned from our own code + that day's logs, not from Nebius's
+internal operation timestamps — plausible root cause, not proven beyond
+doubt. Worth fixing on its own merits regardless (it's a real TOCTOU race).
+
+### 79b. No way to reopen a run once it's terminal (completed/failed/stopped)
+
+Three navigation paths exist today, and none of them cover this:
+- **"Existing Experiments"** (`ExperimentBrowser.tsx`) loads a past
+  experiment's *config* only, to start a fresh run — no run history shown.
+- **"Open Runs"** (`OpenRunsPage.tsx` / `db.list_open_runs()`) lists only
+  non-terminal runs (active/paused), by design (docstring: "across all
+  experiments" but explicitly excludes terminal statuses).
+- The actual reopen mechanism, `App.tsx::handleReopenRun()`, is generic —
+  it'll load *any* run id it's given, terminal or not. The gap is entirely
+  that nothing feeds it a terminal run id.
+
+Net effect: once a run finishes, fails, or is stopped, there is currently
+no UI path back to it at all, from any experiment.
+
+Scoping note (user's own observation, worth preserving): a terminal run's
+usefulness is limited even if reachable — the trainer container and its
+checkpoint are gone once the run ends, so **weights are lost** (no
+resume, no prompt) and **diagnostic session state is lost** (no
+Inspector/attention data — that was always in-memory only, per
+`backend/training/diagnostics.py`'s `_diagnostic_sessions`, never
+persisted). What *does* survive and would be worth showing: the run's
+frozen `config_snapshot` (see §64/architecture-preview work) and its
+metrics history (loss curves, MoE drop rate) via `metrics.jsonl` — both
+already stored, already read successfully by other routes today. So a
+reopened terminal run's UI should show config + charts, and should NOT
+offer prompt/diagnostics (those need live weights that no longer exist).
+
+**Proposed direction (not yet implemented):** generalize "Open Runs" into
+a filterable "Runs" view (status chips: Active / Paused / Completed /
+Failed / All) instead of a page that silently excludes history — same
+list UI, same already-generic `handleReopenRun`, just stop filtering the
+query. Matches the standard pattern used by W&B/MLflow/GitHub
+Actions-style run lists. Avoid over-building — this app has a handful of
+runs per experiment, not thousands; one filterable table is the right
+size, not a folder/tag/search hierarchy.
+
+Related, answered live (not a bug, just worth noting alongside this):
+reopening an experiment today shows the *last-saved* `config_json` for
+that experiment (auto-saved 500ms after every ConfigPanel edit via
+`handleConfigChange` → `updateConfig`), not the original preset and not
+necessarily the last run's exact config — those are usually the same
+since Start flushes pending edits first, but not guaranteed if config was
+edited after a run stopped and never started again.
+
+### 79c. Stopping a run orphans its worker_session in a stuck provisioning state
+
+Hit live, 2026-07-15, same session as 79a: user manually deleted a stuck
+Nebius endpoint (console/CLI, outside the app) after run 201's provisioning
+never resolved, then stopped/cancelled runs 201 and 202 via the app. Result:
+`worker_sessions.worker_status` for `worker-gpu` stayed wedged at
+`"starting"`, still pointing at the now-deleted endpoint id, with **no
+endpoint ever spinning back up** and every subsequent Start click for any
+run rejected by the busy-worker guard ("already being provisioned, please
+wait") — forever, since nothing was left to clear it.
+
+Root cause: `stop_training`'s cancel-in-flight-provisioning path (see 79a
+context, `backend/api/training.py::stop_training`) only updates the
+*run's* own status (`training_runs.status = CANCELLED`) and cancels that
+run's task. It never touches `worker_sessions` at all. The background
+coroutine in `worker_manager.py::ensure_worker()` that was polling Nebius
+and would eventually have self-healed (its own code already handles "the
+endpoint disappeared mid-wait" by creating a fresh one) almost certainly
+died along with the cancelled task — so nobody was left polling to ever
+notice and fix it. `worker_status` has no independent timeout/staleness
+check of its own; once written, it's trusted indefinitely.
+
+**Manual unblock used in the moment:** direct DB write,
+`UPDATE worker_sessions SET worker_status='none' WHERE session_id='worker-gpu'`.
+Confirmed this is not something a user should have to know how to do.
+
+**User's explicit ask:** this should self-heal automatically, without
+manual DB surgery, when someone deletes an endpoint out from under the app
+(a supported, expected action — not misuse).
+
+**Proposed direction (not yet implemented):**
+- Cancelling/stopping a run should also reset any `worker_session` it was
+  the sole owner of back to a clean state (not just cancel the run's own
+  task in isolation) — probably the more targeted fix, addresses this
+  exact sequence directly.
+- Independently, `worker_status` values like `STARTING`/`PROVISIONING`
+  should probably carry a staleness check — e.g. idle_monitor (already a
+  periodic background scanner, per §7-ish idle-timeout logic) could also
+  verify a long-STARTING session's endpoint is still genuinely live via
+  `get_endpoint()`, and clear/reset it if the endpoint's gone or the
+  status hasn't moved in an unreasonable amount of time. This is the more
+  general fix — covers manual out-of-band deletion regardless of how the
+  orphaning happened, not just via Stop.
+- Both together would also help 79a: a lock alone prevents new overlapping
+  starts, but doesn't recover a session already wedged by other means
+  (like this one).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

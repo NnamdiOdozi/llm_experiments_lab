@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, CSSProperties } from "react";
-import { ExperimentConfig, MetricRow, RunStatus, ArchitectureNode, DiagnosticSnapshot } from "./types";
+import { ExperimentConfig, MetricRow, RunStatus, ArchitectureNode, DiagnosticSnapshot, TERMINAL_RUN_STATUSES } from "./types";
 import PresetPicker from "./components/PresetPicker";
 import ExperimentBrowser from "./components/ExperimentBrowser";
 import HardwareSpecs from "./components/HardwareSpecs";
@@ -18,6 +18,7 @@ import WorkerIdleBanner from "./components/WorkerIdleBanner";
 import OpenRunsPage from "./components/OpenRunsPage";
 import { CopyIconButton } from "./components/CopyIconButton";
 import { useActivityHeartbeat } from "./hooks/useActivityHeartbeat";
+import { playTrainingStartBeep, isSoundMuted, setSoundMuted, shouldPlayTrainingStartBeep, unlockAudioContext } from "./utils/beep";
 import {
   startTraining,
   pauseTraining,
@@ -87,6 +88,35 @@ export default function App() {
   const [config, setConfig] = useState<ExperimentConfig | null>(saved.current?.config ?? null);
   const [runId, setRunId] = useState<number | null>(saved.current?.runId ?? null);
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
+  const [soundMuted, setSoundMutedState] = useState(isSoundMuted);
+  // True only between a user's own handleStart() call and that run reaching
+  // running/terminal — see beep.ts's top-of-file comment for why this
+  // replaced inferring intent from the queued->running status sequence
+  // (a fast local run can skip past an observable "queued" reading).
+  const awaitingStartRef = useRef(false);
+
+  function toggleSoundMuted() {
+    setSoundMutedState((prev) => {
+      const next = !prev;
+      setSoundMuted(next);
+      return next;
+    });
+  }
+
+  // Beep when training actually starts — real gap, 2026-07-15: serverless
+  // endpoints can sit queued for minutes waiting on Nebius to provision,
+  // easy to step away and miss the moment it starts. See beep.ts and
+  // docs/DESIGN_DECISIONS.md.
+  useEffect(() => {
+    const current = runStatus?.status ?? null;
+    if (shouldPlayTrainingStartBeep(awaitingStartRef.current, current) && !soundMuted) {
+      playTrainingStartBeep();
+    }
+    if (current === "running" || (current != null && TERMINAL_RUN_STATUSES.has(current))) {
+      awaitingStartRef.current = false;
+    }
+  }, [runStatus?.status, soundMuted]);
+
   const [metrics, setMetrics] = useState<MetricRow[]>([]);
   const [baselineConfig, setBaselineConfig] = useState<ExperimentConfig | null>(null);
   const [loading, setLoading] = useState(false);
@@ -440,6 +470,12 @@ export default function App() {
 
   async function handleStart() {
     if (experimentId == null || !config) return;
+    // Must run synchronously here, inside the click's own call stack — the
+    // browser's autoplay policy can permanently suspend an AudioContext
+    // created later (e.g. inside a polling effect), even for a real user-
+    // triggered event several ticks removed from the original gesture.
+    unlockAudioContext();
+    awaitingStartRef.current = true;
     setLoading(true);
     setStartError(null);
     try {
@@ -453,6 +489,7 @@ export default function App() {
       setRunId(run_id);
       saveSession(experimentId, run_id, config);
     } catch (err) {
+      awaitingStartRef.current = false; // start never actually happened
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.startsWith("429")) {
         setStartError("Max concurrent runs reached. Stop a run first.");
@@ -487,14 +524,43 @@ export default function App() {
     setLoading(false);
   }
 
+  // A stopped run is genuinely dead — no resume, no prompt (unlike paused,
+  // which is what actually stays useful) — so lingering step/elapsed
+  // numbers just look like stale "still going" state rather than the
+  // finished run it is. Reset to the same fresh, ready-to-start state as
+  // picking a preset — same experiment/config, no run. The stopped run's
+  // own final numbers stay browsable via Open Runs, nothing is lost.
+  // Direct user request, 2026-07-15. See docs/DESIGN_DECISIONS.md.
+  function resetAfterStop() {
+    setRunId(null);
+    setRunStatus(null);
+    setMetrics([]);
+    resetInspectorState();
+    saveSession(experimentId, null, config);
+  }
+
   async function handleStop() {
     if (runId == null) return;
     setLoading(true);
     setControlError(null);
     try {
       await stopTraining(runId);
+      resetAfterStop();
     } catch (err) {
-      setControlError(err instanceof Error ? err.message : "Stop failed");
+      // Backend's /stop route only ever raises 400 for one reason — no
+      // active process/session to stop, i.e. the run was already dead
+      // (completed/failed/cancelled, or a stale runId from a previous
+      // session). Real bug, 2026-07-15: this was treated as a fresh
+      // failure — persistent red "Run not found" banner, no cleanup —
+      // even though the user's actual goal (stop the run) was already
+      // true. Idempotent: stopping an already-stopped run should succeed
+      // quietly, not error. Any OTHER status code (network error, 5xx)
+      // still surfaces as a real error below.
+      if (err instanceof ApiError && err.status === 400) {
+        resetAfterStop();
+      } else {
+        setControlError(err instanceof Error ? err.message : "Stop failed");
+      }
     }
     setLoading(false);
   }
@@ -617,9 +683,11 @@ export default function App() {
       <div
         style={{
           display: "grid",
-          // ConfigPanel matches the right pane's 570px width for a
-          // symmetrical layout — direct user request, 2026-07-16.
-          gridTemplateColumns: "570px 1fr 570px",
+          // Left sidebar narrowed 20% (was symmetric with the right pane at
+          // 570px each — direct user request, 2026-07-16, unused space).
+          // Freed width moved entirely to the right pane; middle stays
+          // untouched. See docs/DESIGN_DECISIONS.md.
+          gridTemplateColumns: "456px 1fr 684px",
           gap: 16,
           alignItems: "start",
         }}
@@ -649,6 +717,8 @@ export default function App() {
             pollError={pollError}
             startError={startError}
             controlError={controlError}
+            soundMuted={soundMuted}
+            onToggleSoundMuted={toggleSoundMuted}
           />
           <ExportBar experimentId={experimentId} runId={runId} />
           <ExperimentNotes experimentId={experimentId} />
@@ -669,6 +739,7 @@ export default function App() {
           </div>
           <ArchSchematic
             runId={runId}
+            config={config}
             onNodeClick={(nodeId, node) => {
               setSelectedNodeId(nodeId);
               setSelectedNode(node);

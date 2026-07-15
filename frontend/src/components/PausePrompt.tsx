@@ -118,7 +118,7 @@ export default function PausePrompt({
     return (
       <div className="panel" style={{ opacity: 0.5 }}>
         <h3>Prompt Model</h3>
-        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
+        <p style={{ fontSize: 15, color: "var(--text-dim)" }}>
           Pause or finish training to prompt the model and see its output quality.
         </p>
       </div>
@@ -270,10 +270,11 @@ export default function PausePrompt({
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="Enter a prompt..."
           disabled={diagnosticSession !== null}
+          style={{ fontSize: 17 }}
         />
       </div>
 
-      <div style={{ marginBottom: 8, fontSize: 12 }}>
+      <div style={{ marginBottom: 8, fontSize: 15 }}>
         {diagnosticSnapshot && (
           <span style={{ color: "var(--text-dim)" }}>
             {/* generated_token.position + 1 is the REAL current sequence
@@ -321,9 +322,17 @@ export default function PausePrompt({
       </div>
 
       {generatedTokens && (
-        <div style={{ marginTop: 8, fontSize: 12 }}>
+        <div style={{ marginTop: 8, fontSize: 19 }}>
           <div style={{ color: "var(--text-dim)", marginBottom: 4 }}>Output:</div>
-          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>{generatedTokens}</pre>
+          {/* index.css's global `pre { font-size: 12px }` rule (shared with
+              CodeView's Python source display) applies directly to this
+              element and overrides inheritance from the wrapper div above
+              regardless of its fontSize — needs its own explicit override,
+              scoped here only, not a global bump that would also resize
+              CodeView. Real bug, 2026-07-15: previous fix only touched the
+              wrapper, so this text never actually changed size. See
+              docs/DESIGN_DECISIONS.md. */}
+          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontSize: 19 }}>{generatedTokens}</pre>
         </div>
       )}
     </div>

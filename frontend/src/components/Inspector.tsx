@@ -99,7 +99,7 @@ const tabButtonStyle = (active: boolean): CSSProperties => ({
   border: "none",
   color: active ? "var(--accent)" : "var(--text-dim)",
   cursor: "pointer",
-  fontSize: 12,
+  fontSize: 15,
   fontWeight: active ? 600 : 400,
   paddingBottom: 4,
   borderBottom: active ? "2px solid var(--accent)" : "none",
@@ -112,7 +112,7 @@ function formatShape(dims: (string | number)[]): string {
 
 function Overview({ node }: { node: ArchitectureNode }) {
   const desc = NODE_DESCRIPTIONS[node.kind] || "No description available.";
-  return <p style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text)" }}>{desc}</p>;
+  return <p style={{ fontSize: 15, lineHeight: 1.6, color: "var(--text)" }}>{desc}</p>;
 }
 
 function Shapes({ node, snapshot, selectedNodeId }: { node: ArchitectureNode; snapshot: DiagnosticSnapshot | null; selectedNodeId: string | null }) {
@@ -120,10 +120,10 @@ function Shapes({ node, snapshot, selectedNodeId }: { node: ArchitectureNode; sn
   const runtimeData = selectedNodeId ? snapshot?.nodes[selectedNodeId] : null;
 
   return (
-    <div style={{ fontSize: 12 }}>
+    <div style={{ fontSize: 15 }}>
       {staticShapes.length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          <h4 style={{ fontSize: 11, color: "var(--accent)", marginBottom: 6 }}>Static Shapes</h4>
+          <h4 style={{ fontSize: 14, color: "var(--accent)", marginBottom: 6 }}>Static Shapes</h4>
           {staticShapes.map((shape, idx) => (
             <div key={idx} style={{ marginBottom: 4, color: "var(--text-dim)" }}>
               <strong>{shape.name}:</strong> {formatShape(shape.dims)}
@@ -134,7 +134,7 @@ function Shapes({ node, snapshot, selectedNodeId }: { node: ArchitectureNode; sn
 
       {runtimeData ? (
         <div>
-          <h4 style={{ fontSize: 11, color: "var(--accent)", marginBottom: 6 }}>Runtime Shapes (Step {snapshot?.generation_step})</h4>
+          <h4 style={{ fontSize: 14, color: "var(--accent)", marginBottom: 6 }}>Runtime Shapes (Step {snapshot?.generation_step})</h4>
           {runtimeData.input_shape && (
             <div style={{ marginBottom: 4, color: "var(--text-dim)" }}>
               <strong>input:</strong> {formatShape(runtimeData.input_shape)}
@@ -156,10 +156,10 @@ function Shapes({ node, snapshot, selectedNodeId }: { node: ArchitectureNode; sn
 function MathTab({ node }: { node: ArchitectureNode }) {
   const math = NODE_MATH[node.kind];
   if (!math) {
-    return <p style={{ fontSize: 12, color: "var(--text-dim)" }}>No mathematical formula available.</p>;
+    return <p style={{ fontSize: 15, color: "var(--text-dim)" }}>No mathematical formula available.</p>;
   }
   return (
-    <div style={{ fontSize: 12 }}>
+    <div style={{ fontSize: 15 }}>
       <div
         style={{
           fontFamily: "var(--font-mono)",
@@ -173,7 +173,7 @@ function MathTab({ node }: { node: ArchitectureNode }) {
       >
         {math.formula}
       </div>
-      <p style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text)" }}>{math.explanation}</p>
+      <p style={{ fontSize: 15, lineHeight: 1.6, color: "var(--text)" }}>{math.explanation}</p>
     </div>
   );
 }
@@ -181,10 +181,10 @@ function MathTab({ node }: { node: ArchitectureNode }) {
 function Config({ node }: { node: ArchitectureNode }) {
   const config = node.config || {};
   if (Object.keys(config).length === 0) {
-    return <p style={{ fontSize: 12, color: "var(--text-dim)" }}>No configuration parameters.</p>;
+    return <p style={{ fontSize: 15, color: "var(--text-dim)" }}>No configuration parameters.</p>;
   }
   return (
-    <div style={{ fontSize: 12 }}>
+    <div style={{ fontSize: 15 }}>
       {Object.entries(config).map(([key, val]) => (
         <div key={key} style={{ marginBottom: 6, display: "flex", justifyContent: "space-between" }}>
           <span style={{ color: "var(--text-dim)" }}>{key}:</span>
@@ -232,7 +232,7 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
   const entry = entries[clampedIndex];
 
   if (!entry) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No per-position data captured yet.</div>;
+    return <div style={{ fontSize: 15, color: "var(--text-dim)" }}>No per-position data captured yet.</div>;
   }
 
   // Direct user request, 2026-07-15: highlight "what actually got
@@ -249,7 +249,7 @@ function LmHeadStepper({ snapshot }: { snapshot: DiagnosticSnapshot }) {
     clampedIndex < entries.length - 1 ? entries[clampedIndex + 1]?.token : snapshot.generated_token?.text;
 
   return (
-    <div style={{ fontSize: 11 }}>
+    <div style={{ fontSize: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
         <button onClick={() => setIndex(Math.max(0, clampedIndex - 1))} disabled={clampedIndex === 0}>
           ◀
@@ -366,10 +366,10 @@ function VectorPreviewTable({
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{label}</div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)" }}>{label}</div>
         <CopyIconButton size={12} getText={tableText} title={`Copy all ${label} vectors (full precision, tab-separated)`} />
       </div>
-      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+      <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
         <thead>
           <tr>
             <th style={positionTableCellStyle}>Position</th>
@@ -414,7 +414,7 @@ function QKVTable({
   };
   return (
     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+      <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         Q/K/V Detail — last {qkv.positions.length} position{qkv.positions.length === 1 ? "" : "s"} (hover a cell for full vector, double-click to open in a tab)
       </div>
       <VectorPreviewTable label="Q" positions={qkv.positions} tokens={qkv.tokens} vectors={qkv.q} onOpenCell={(pos, v) => openCell("Q", pos, v)} />
@@ -445,7 +445,7 @@ function EmbeddingOneHotTable({
   const vocabSize = shape.length > 0 ? shape[shape.length - 1] : null;
 
   if (!positionTokens || positionTokens.length === 0 || vocabSize == null) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Not captured</div>;
+    return <div style={{ fontSize: 15, color: "var(--text-dim)", marginTop: 12 }}>Not captured</div>;
   }
 
   const oneHot = (id: number): number[] => {
@@ -456,10 +456,10 @@ function EmbeddingOneHotTable({
 
   return (
     <div style={{ marginTop: 12 }}>
-      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+      <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         Input Vectors (one-hot, width {vocabSize}) — hover for full vector, double-click to open in a tab
       </div>
-      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+      <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
         <thead>
           <tr>
             <th style={positionTableCellStyle}>Position</th>
@@ -515,7 +515,7 @@ function NodeVectorTable({
   };
   return (
     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+      <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         {inputPv ? "Input / Output Vectors" : "Output Vectors"} — last {outputPv.positions.length} position
         {outputPv.positions.length === 1 ? "" : "s"} (hover for full vector, double-click to open in a tab)
       </div>
@@ -558,7 +558,7 @@ function AttentionHeatmap({
     // Fall back to single-pair snapshot.attention (old backend or not available)
     if (!snapshot.attention.weights || !snapshot.attention.token_labels) {
       return (
-        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+        <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
           Attention data unavailable
         </div>
       );
@@ -569,7 +569,7 @@ function AttentionHeatmap({
     weights = snapshot.attention.weights;
   } else {
     return (
-      <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+      <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
         {snapshot.attention.reason ? `Not captured: ${snapshot.attention.reason}` : "Not captured"}
       </div>
     );
@@ -598,12 +598,12 @@ function AttentionHeatmap({
   return (
     <div>
       {hasMaps && blockNum !== null && head !== null && (
-        <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
+        <div style={{ marginBottom: 8, fontSize: 14, color: "var(--accent)" }}>
           Layer {blockNum + 1}, Head {head + 1}
         </div>
       )}
       {!hasMaps && snapshot.attention.available && (
-        <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
+        <div style={{ marginBottom: 8, fontSize: 14, color: "var(--accent)" }}>
           Layer {snapshot.attention.layer != null ? snapshot.attention.layer + 1 : "?"}, Head {snapshot.attention.head != null ? snapshot.attention.head + 1 : "?"}
         </div>
       )}
@@ -629,14 +629,14 @@ function AttentionHeatmap({
         <table
           style={{
             borderCollapse: "collapse",
-            fontSize: 10,
+            fontSize: 13,
             fontFamily: "var(--font-mono)",
           }}
         >
           <thead>
             <tr>
               <th
-                style={{ border: "1px solid var(--border)", padding: 4, textAlign: "center", width: 40, color: "var(--text-dim)", fontSize: 9 }}
+                style={{ border: "1px solid var(--border)", padding: 4, textAlign: "center", width: 40, color: "var(--text-dim)" }}
                 title="Rows = query position (attending from). Columns = key position (attended to)."
               >
                 Q\K
@@ -675,7 +675,6 @@ function AttentionHeatmap({
                     border: "1px solid var(--border)",
                     padding: 4,
                     textAlign: "right",
-                    fontSize: 9,
                     color: "var(--text-dim)",
                   }}
                   title={`Position ${windowStart + i + 1}`}
@@ -771,7 +770,7 @@ function LmHeadLogitsSlice({ snapshot }: { snapshot: DiagnosticSnapshot }) {
   const act = snapshot.activation_summaries;
   if (!act.available) {
     return (
-      <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 16 }}>
+      <div style={{ fontSize: 15, color: "var(--text-dim)", marginTop: 16 }}>
         {act.reason ? `Not captured: ${act.reason}` : "Not captured"}
       </div>
     );
@@ -783,10 +782,10 @@ function LmHeadLogitsSlice({ snapshot }: { snapshot: DiagnosticSnapshot }) {
 
   return (
     <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
+      <div style={{ fontSize: 14, color: "var(--text-dim)", marginBottom: 4 }}>
         LM Head Logits (first 8{vocabSize != null ? ` of ${vocabSize}` : ""}, raw — vocab index order, not ranked):
       </div>
-      <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+      <div style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
         [{act.value_slice.slice(0, 8).map((v) => v.toFixed(3)).join(", ")}]
       </div>
     </div>
@@ -819,19 +818,19 @@ function EmbeddingTable({
   }, [runId]);
 
   if (error) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Embedding table not available (no checkpoint yet, or unsupported template).</div>;
+    return <div style={{ fontSize: 15, color: "var(--text-dim)", marginTop: 12 }}>Embedding table not available (no checkpoint yet, or unsupported template).</div>;
   }
   if (!table) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 12 }}>Loading embedding table...</div>;
+    return <div style={{ fontSize: 15, color: "var(--text-dim)", marginTop: 12 }}>Loading embedding table...</div>;
   }
 
   return (
     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 8 }}>
+      <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         Token Embedding Table — {table.vocab_size} tokens × {table.n_embd} dims (hover for full vector, double-click to open in a tab)
       </div>
       <div style={{ maxHeight: 400, overflowY: "auto" }}>
-        <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+        <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
           <thead>
             <tr>
               <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Token</th>
@@ -862,14 +861,14 @@ function EmbeddingTable({
           table. I think they should both be on that tab." Only exists
           under pos_encoding="learned" — RoPE computes rotary embeddings on
           the fly, no table to show. See docs/DESIGN_DECISIONS.md. */}
-      <div style={{ fontSize: 11, color: "var(--accent)", margin: "16px 0 8px" }}>
+      <div style={{ fontSize: 14, color: "var(--accent)", margin: "16px 0 8px" }}>
         {table.position_embedding
           ? `Position Embedding Table — ${table.block_size} positions × ${table.n_embd} dims (hover for full vector, double-click to open in a tab)`
           : "Position Embedding Table"}
       </div>
       {table.position_embedding ? (
         <div style={{ maxHeight: 400, overflowY: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
             <thead>
               <tr>
                 <th style={{ ...positionTableCellStyle, position: "sticky", top: 0, background: "var(--surface)" }}>Position</th>
@@ -896,7 +895,7 @@ function EmbeddingTable({
           </table>
         </div>
       ) : (
-        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+        <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
           Not applicable — this model uses RoPE (rotary position encoding), which has no learned position table.
         </div>
       )}
@@ -947,7 +946,7 @@ function Runtime({
 
   if (isLoading) {
     return (
-      <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+      <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
         <p>Loading diagnostic snapshot...</p>
       </div>
     );
@@ -955,7 +954,7 @@ function Runtime({
 
   if (!snapshot) {
     return (
-      <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
+      <p style={{ fontSize: 15, color: "var(--text-dim)" }}>
         No diagnostic step has been run yet — enter a prompt and click <strong>&gt;</strong> in
         Prompt Model below.
       </p>
@@ -965,7 +964,7 @@ function Runtime({
   // Check if it's the lm_head
   if (selectedNodeId === "lm_head") {
     return (
-      <div style={{ fontSize: 12 }}>
+      <div style={{ fontSize: 15 }}>
         <div style={{ marginBottom: 8 }}>
           <strong style={{ color: "var(--accent)" }}>Logits Shape:</strong>
           <div style={{ color: "var(--text-dim)" }}>{formatShape(snapshot.lm_head.logits_shape)}</div>
@@ -1002,7 +1001,7 @@ function Runtime({
       snapshot.attention.available &&
       (snapshot.attention.layer !== currentBlock || snapshot.attention.head !== attentionHead);
     return (
-      <div style={{ fontSize: 12 }}>
+      <div style={{ fontSize: 15 }}>
         <strong style={{ color: "var(--accent)" }}>Attention Weights</strong>
         {/* Block is implied by selectedNodeId (this node) — only head needs
             picking here. Selecting a head doesn't retroactively affect the
@@ -1049,7 +1048,7 @@ function Runtime({
         {stale && (
           <div style={{
             marginBottom: 8, padding: "6px 8px", borderRadius: 4,
-            background: "rgba(234, 179, 8, 0.12)", color: "#eab308", fontSize: 11,
+            background: "rgba(234, 179, 8, 0.12)", color: "#eab308", fontSize: 14,
           }}>
             Showing captured data for Block {(snapshot.attention.layer ?? 0) + 1}, Head {(snapshot.attention.head ?? 0) + 1}
             {" "}— currently selected: Block {currentBlock != null ? currentBlock + 1 : "?"}, Head {attentionHead != null ? attentionHead + 1 : "?"}.
@@ -1073,12 +1072,12 @@ function Runtime({
 
   if (!runtimeData) {
     return (
-      <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Not captured</p>
+      <p style={{ fontSize: 15, color: "var(--text-dim)" }}>Not captured</p>
     );
   }
 
   return (
-    <div style={{ fontSize: 12 }}>
+    <div style={{ fontSize: 15 }}>
       {runtimeData.input_shape && (
         <div style={{ marginBottom: 6 }}>
           <strong style={{ color: "var(--accent)" }}>Input:</strong>
@@ -1092,7 +1091,12 @@ function Runtime({
         </div>
       )}
       {runtimeData.summary && (
-        <div>
+        // marginBottom separates this from the earlier/later stepper right
+        // below (applies to every node — LayerNorm, MLP, embedding,
+        // final_norm all share this same render path) — previously butted
+        // up against it with no gap. Direct user request, 2026-07-15. See
+        // docs/DESIGN_DECISIONS.md.
+        <div style={{ marginBottom: 12 }}>
           {/* Confirmed against the backend hook (register_diagnostic_hooks
               in each template's model.py): summary = _compute_summary(output)
               — always the OUTPUT tensor, never input. Made explicit here,
@@ -1100,7 +1104,7 @@ function Runtime({
               output you're showing, but just to make it clearer... so
               people aren't having to guess." See docs/DESIGN_DECISIONS.md. */}
           <strong style={{ color: "var(--accent)" }}>Output Summary Stats:</strong>
-          <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 4 }}>
+          <div style={{ color: "var(--text-dim)", fontSize: 14, marginTop: 4 }}>
             <div>mean: {runtimeData.summary.mean.toFixed(4)}</div>
             <div>std: {runtimeData.summary.std.toFixed(4)}</div>
             <div>L2 norm: {runtimeData.summary.l2_norm.toFixed(2)}</div>
@@ -1178,7 +1182,7 @@ export default function Inspector({
     return (
       <div className="panel">
         <h3>Inspector</h3>
-        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>Click a node in the architecture diagram to inspect it.</p>
+        <p style={{ fontSize: 15, color: "var(--text-dim)" }}>Click a node in the architecture diagram to inspect it.</p>
       </div>
     );
   }
@@ -1187,15 +1191,15 @@ export default function Inspector({
     <div className="panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Inspector</h3>
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+        <span style={{ fontSize: 14, color: "var(--text-dim)" }}>
           {currentStep != null ? `Step ${currentStep}` : ""}
         </span>
       </div>
 
       <div style={{ marginBottom: 12, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
-        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+        <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
           <strong style={{ color: "var(--text)" }}>{selectedNode.label}</strong>
-          <div style={{ fontSize: 11, marginTop: 2 }}>kind: {selectedNode.kind}</div>
+          <div style={{ fontSize: 14, marginTop: 2 }}>kind: {selectedNode.kind}</div>
         </div>
       </div>
 

@@ -1,10 +1,21 @@
 import { useState, useEffect } from "react";
-import { ArchitectureManifest, ArchitectureNode } from "../types";
-import { fetchArchitecture } from "../hooks/useApi";
+import { ArchitectureManifest, ArchitectureNode, ExperimentConfig } from "../types";
+import { fetchArchitecture, previewArchitecture } from "../hooks/useApi";
 import "./ArchSchematic.css";
+
+// Debounce for /architecture/preview while the user is still editing
+// ConfigPanel (e.g. dragging a layer-count slider) — avoids one request per
+// keystroke/tick. Direct user request, 2026-07-15.
+const PREVIEW_DEBOUNCE_MS = 400;
 
 interface Props {
   runId?: number | null;
+  // Live experiment config, used only when there's no runId yet — lets the
+  // diagram render before Start is clicked and update as structural fields
+  // (n_layer/n_head/n_embd/pos_encoding) change. Ignored once a run exists;
+  // the run's frozen config_snapshot takes over via runId. See
+  // docs/DESIGN_DECISIONS.md.
+  config?: ExperimentConfig | null;
   onNodeClick?: (nodeId: string, node: ArchitectureNode) => void;
   selectedNodeId?: string | null;
 }
@@ -57,6 +68,14 @@ function displayLabel(label: string) {
   return DISPLAY_LABELS[label] ?? label;
 }
 
+// Remote serverless workers can temporarily run an older manifest producer
+// than this frontend. Identify the shared Transformer/MoE block group by its
+// stable contract id as well as the current kind, rather than relying on the
+// human-readable MoE label or a single producer version.
+function isTransformerBlockGroup(node: ArchitectureNode) {
+  return node.id === "block" || node.kind === "transformer_block_group";
+}
+
 function NodeBox({ label, fullLabel, kind, isSelected, isExpanded, onClick, segmented }: BoxProps) {
   const colors = COLOR_MAP[kind] || { bg: "#e5e7eb", border: "#6b7280" };
 
@@ -93,7 +112,7 @@ function Arrow() {
   return <div className="arch-arrow" aria-hidden="true" />;
 }
 
-export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Props) {
+export default function ArchSchematic({ runId, config, onNodeClick, selectedNodeId }: Props) {
   const [manifest, setManifest] = useState<ArchitectureManifest | null>(null);
   const [selectedBlockIdx, setSelectedBlockIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -140,6 +159,32 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
     };
   }, [runId]);
 
+  // Preview mode — no run yet, just the experiment's (possibly still being
+  // edited) config. Debounced so dragging a slider in ConfigPanel doesn't
+  // fire one request per tick. Only active while there's no runId; once a
+  // run exists the effect above takes over and this one goes quiet — the
+  // run's frozen config_snapshot is what should drive the diagram from
+  // then on, not further live edits. Direct user request, 2026-07-15. See
+  // docs/DESIGN_DECISIONS.md.
+  useEffect(() => {
+    if (runId || !config) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      previewArchitecture(config)
+        .then((m) => {
+          if (!cancelled) setManifest(m);
+        })
+        .catch(() => {
+          if (!cancelled) setManifest(null);
+        });
+    }, PREVIEW_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [runId, config]);
+
   if (loading) {
     return <div className="panel"><h3>Architecture</h3><p>Loading...</p></div>;
   }
@@ -163,10 +208,23 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
 
       {/* Horizontal pipeline diagram */}
       <div className="arch-pipeline">
-        {nodes.map((node, i) => {
-          const isLast = i === nodes.length - 1;
-
-          if (node.kind === "transformer_block_group" && node.children && node.repeat_count) {
+        {/* Input/Output bookends — direct user request, 2026-07-15: no
+            indication anywhere of where data enters/exits the model.
+            "io" is deliberately not in COLOR_MAP, so NodeBox falls back to
+            its neutral gray — these are boundary labels, not real
+            computational nodes, and shouldn't be color-coded like one.
+            Shared by every template (transformer/MoE/RNN all render
+            through this same nodes.map). See docs/DESIGN_DECISIONS.md. */}
+        {nodes.length > 0 && (
+          <div className="arch-flow-item arch-flow-item--io">
+            <div className="arch-stage">
+              <NodeBox label="Input" kind="io" />
+            </div>
+          </div>
+        )}
+        {nodes.length > 0 && <Arrow />}
+        {nodes.map((node) => {
+          if (isTransformerBlockGroup(node) && node.children && node.repeat_count) {
             return (
               <div key={node.id} className="arch-flow-item arch-flow-item--block">
                 <div className="arch-stage">
@@ -202,7 +260,7 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
                     ))}
                   </div>
                 </div>
-                {!isLast && <Arrow />}
+                <Arrow />
               </div>
             );
           }
@@ -211,17 +269,24 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
             <div key={node.id} className="arch-flow-item">
               <div className="arch-stage">
                 <NodeBox
-                  label={displayLabel(node.label)}
+                  label={node.id === "final_norm" ? "Final\nLayerNorm" : displayLabel(node.label)}
                   fullLabel={node.label}
                   kind={node.kind}
                   isSelected={selectedNodeId === node.id}
                   onClick={() => onNodeClick?.(node.id, node)}
                 />
               </div>
-              {!isLast && <Arrow />}
+              <Arrow />
             </div>
           );
         })}
+        {nodes.length > 0 && (
+          <div className="arch-flow-item arch-flow-item--io">
+            <div className="arch-stage">
+              <NodeBox label="Output" kind="io" />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Second-level diagram for the selected block — per
@@ -235,7 +300,7 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
           doesn't exist). Direct user report, 2026-07-15. See
           docs/DESIGN_DECISIONS.md. */}
       {(() => {
-        const blockGroup = nodes.find((n) => n.kind === "transformer_block_group");
+        const blockGroup = nodes.find(isTransformerBlockGroup);
         if (!blockGroup?.children) return null;
         return (
           <div className="arch-block-detail">
