@@ -202,6 +202,23 @@ export default function App() {
   // requiring the user to click > again just to see a different head.
   useEffect(() => {
     if (diagnosticSessionId == null || runId == null || attentionBlock == null || attentionHead == null) return;
+
+    // Skip peek if all three conditions are met (attention_maps is current):
+    // 1. attention_maps is available (eager capture happened)
+    // 2. not showing Q/K/V detail (which is still on-demand per selected pair)
+    // 3. window offset is 0 (not browsing history, maps are for current window)
+    // Otherwise, peek is needed: for qkv_detail, offset ≠ 0, or attention_maps absent.
+    const hasCurrentMaps =
+      diagnosticSnapshot?.attention_maps?.available &&
+      diagnosticSnapshot.attention_maps.weights &&
+      !showQKVDetail &&
+      attentionWindowOffset === 0;
+
+    if (hasCurrentMaps) {
+      // Data already current, skip the network fetch
+      return;
+    }
+
     let cancelled = false;
     setDiagnosticLoading(true);
     peekDiagnostic(runId, diagnosticSessionId, {
@@ -220,7 +237,7 @@ export default function App() {
         if (!cancelled) setDiagnosticLoading(false);
       });
     return () => { cancelled = true; };
-  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset]);
+  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset, diagnosticSnapshot?.attention_maps?.available]);
 
   // Same idea as the attention peek effect above, for every OTHER node's
   // position_vectors window (LayerNorm, MLP, embedding, final_norm) —

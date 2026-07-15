@@ -243,6 +243,20 @@ export interface AttentionData {
   total_positions?: number;
 }
 
+export interface AttentionMaps {
+  available: boolean;
+  reason?: string;
+  // Windowed attention weights for ALL layers × ALL heads, captured eagerly
+  // on every step. Shape: weights[layer][head][window][window]. Each layer
+  // has n_head arrays; each head has a [window × window] weight matrix.
+  weights?: number[][][][];
+  token_labels?: string[];
+  window_start?: number;
+  total_positions?: number;
+  n_layer?: number;
+  n_head?: number;
+}
+
 export interface PositionToken {
   position: number;
   id: number;
@@ -269,6 +283,10 @@ export interface DiagnosticSnapshot {
   // Windowed token id+text per position, same window as every node's
   // position_vectors — used by the embedding node's one-hot input table.
   position_tokens: PositionToken[];
+  // Eagerly-captured attention weights for all layers × all heads, populated
+  // on every step/peek. Enables instant block/head switching in Inspector
+  // without network round-trips.
+  attention_maps?: AttentionMaps;
   complete: boolean;
 }
 

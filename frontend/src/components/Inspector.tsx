@@ -540,26 +540,41 @@ function AttentionHeatmap({
   windowOffset: number;
   onWindowOffsetChange: (offset: number) => void;
 }) {
-  const att = snapshot.attention;
-  if (!att.available) {
+  // Prefer eager attention_maps when available (all layers × all heads);
+  // fall back to on-demand snapshot.attention for old backends or when maps unavailable.
+  const hasMaps = snapshot.attention_maps?.available && snapshot.attention_maps?.weights;
+  let tokenLabels: string[];
+  let windowStart: number;
+  let totalPositions: number;
+  let weights: number[][];
+
+  if (hasMaps && blockNum !== null && head !== null) {
+    // Use data from attention_maps (TypeScript: maps are definitely defined here)
+    tokenLabels = snapshot.attention_maps!.token_labels ?? [];
+    windowStart = snapshot.attention_maps!.window_start ?? 0;
+    totalPositions = snapshot.attention_maps!.total_positions ?? tokenLabels.length;
+    weights = snapshot.attention_maps!.weights![blockNum]?.[head] ?? [];
+  } else if (snapshot.attention.available) {
+    // Fall back to single-pair snapshot.attention (old backend or not available)
+    if (!snapshot.attention.weights || !snapshot.attention.token_labels) {
+      return (
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          Attention data unavailable
+        </div>
+      );
+    }
+    tokenLabels = snapshot.attention.token_labels;
+    windowStart = snapshot.attention.window_start ?? 0;
+    totalPositions = snapshot.attention.total_positions ?? tokenLabels.length;
+    weights = snapshot.attention.weights;
+  } else {
     return (
       <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-        {att.reason ? `Not captured: ${att.reason}` : "Not captured"}
+        {snapshot.attention.reason ? `Not captured: ${snapshot.attention.reason}` : "Not captured"}
       </div>
     );
   }
 
-  if (!att.weights || !att.token_labels) {
-    return (
-      <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-        Attention data unavailable
-      </div>
-    );
-  }
-
-  const tokenLabels = att.token_labels;
-  const windowStart = att.window_start ?? 0;
-  const totalPositions = att.total_positions ?? tokenLabels.length;
   const windowSize = tokenLabels.length;
   // offset=0 is "most recent" (window's end sits at totalPositions); larger
   // offset shifts the window's end earlier. Can't shift the window's end
@@ -582,9 +597,16 @@ function AttentionHeatmap({
 
   return (
     <div>
-      <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
-        Layer {att.layer != null ? att.layer + 1 : "?"}, Head {att.head != null ? att.head + 1 : "?"}
-      </div>
+      {hasMaps && blockNum !== null && head !== null && (
+        <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
+          Layer {blockNum + 1}, Head {head + 1}
+        </div>
+      )}
+      {!hasMaps && snapshot.attention.available && (
+        <div style={{ marginBottom: 8, fontSize: 11, color: "var(--accent)" }}>
+          Layer {snapshot.attention.layer != null ? snapshot.attention.layer + 1 : "?"}, Head {snapshot.attention.head != null ? snapshot.attention.head + 1 : "?"}
+        </div>
+      )}
       {/* Heatmap window stepper — real user report, 2026-07-13: an
           unwindowed T x T grid "gets very busy very quickly" as a session
           grows. Shows the same DIAGNOSTIC_POSITION_WINDOW-wide slice as
@@ -619,7 +641,7 @@ function AttentionHeatmap({
               >
                 Q\K
               </th>
-              {att.token_labels.map((token, j) => (
+              {tokenLabels.map((token, j) => (
                 <th
                   key={j}
                   style={{
@@ -643,7 +665,7 @@ function AttentionHeatmap({
             </tr>
           </thead>
           <tbody>
-            {att.weights.map((row, i) => {
+            {weights.map((row, i) => {
               const rowMax = Math.max(...row);
               const rowMin = Math.min(...row.filter((_, j) => j <= i)); // only real (unmasked) values
               return (
@@ -710,8 +732,8 @@ function AttentionHeatmap({
           response from a trainer container built before that change would
           still have the old {position, q, k, v} shape and crash QKVTable's
           .positions.length access. See docs/DESIGN_DECISIONS.md. */}
-      {att.qkv_detail && Array.isArray(att.qkv_detail.positions) && (
-        <QKVTable qkv={att.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
+      {snapshot.attention.qkv_detail && Array.isArray(snapshot.attention.qkv_detail.positions) && (
+        <QKVTable qkv={snapshot.attention.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
       )}
     </div>
   );
@@ -953,9 +975,13 @@ function Runtime({
     // without this it silently looked like "changing Layer/Head does
     // nothing" (real bug report, 2026-07-14). Compare what's currently
     // selected against what the snapshot actually captured.
+    // UNLESS attention_maps is present (eager all-layer capture) — then the
+    // data is never stale, any (block, head) pair is always current.
     const blockMatch = selectedNodeId.match(/^block\.(\d+)\.attention$/);
     const currentBlock = blockMatch ? parseInt(blockMatch[1], 10) : null;
+    const hasMaps = snapshot.attention_maps?.available && snapshot.attention_maps.weights;
     const stale =
+      !hasMaps &&
       snapshot.attention.available &&
       (snapshot.attention.layer !== currentBlock || snapshot.attention.head !== attentionHead);
     return (
