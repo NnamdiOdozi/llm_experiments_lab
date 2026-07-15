@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ArchSchematic from "./ArchSchematic";
+import { fetchArchitecture } from "../hooks/useApi";
 
 // Real bug report, 2026-07-14: the numbered block buttons only ever set
 // ArchSchematic's local selectedBlockIdx — App's selectedNodeId (which
@@ -31,6 +32,7 @@ const manifest = {
         { id: "block.{i}.mlp", kind: "mlp", label: "Feed-Forward (dense)", config: {} },
       ],
     },
+    { id: "final_norm", kind: "layernorm", label: "Final LayerNorm", config: {} },
     { id: "lm_head", kind: "lm_head", label: "LM Head", config: {} },
   ],
 };
@@ -45,7 +47,7 @@ describe("ArchSchematic block selector", () => {
     render(
       <ArchSchematic runId={1} onNodeClick={onNodeClick} selectedNodeId="block.0.attention" />,
     );
-    await waitFor(() => expect(screen.getByText("Block 1 of 4")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "3" }));
 
@@ -58,10 +60,61 @@ describe("ArchSchematic block selector", () => {
   it("does not fire onNodeClick when no block-child node is selected", async () => {
     const onNodeClick = vi.fn();
     render(<ArchSchematic runId={1} onNodeClick={onNodeClick} selectedNodeId="embedding" />);
-    await waitFor(() => expect(screen.getByText("Block 1 of 4")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "2" }));
 
     expect(onNodeClick).not.toHaveBeenCalled();
+  });
+
+  it("uses concise diagram labels without changing the node passed to the inspector", async () => {
+    const onNodeClick = vi.fn();
+    render(<ArchSchematic runId={1} onNodeClick={onNodeClick} />);
+
+    await waitFor(() => expect(screen.getByText("T + P Embedding")).toBeInTheDocument());
+    expect(screen.getByText("Causal S. Attention")).toBeInTheDocument();
+    expect(screen.getByText("Feed Forward")).toBeInTheDocument();
+    expect(screen.getByText(/Final\s+LayerNorm/)).toBeInTheDocument();
+    expect(screen.getAllByText("LayerNorm")).toHaveLength(2);
+
+    fireEvent.click(screen.getByText("Causal S. Attention"));
+    expect(onNodeClick).toHaveBeenCalledWith(
+      "block.0.attention",
+      expect.objectContaining({ label: "Causal Self-Attention" }),
+    );
+  });
+
+  it("renders the selected block internals as a visually grouped detail region", async () => {
+    const { container } = render(<ArchSchematic runId={1} />);
+
+    await waitFor(() => expect(screen.getByText("Inside selected transformer block")).toBeInTheDocument());
+    expect(container.querySelector(".arch-node--expanded")).toBeInTheDocument();
+    expect(container.querySelector(".arch-block-detail")).toBeInTheDocument();
+  });
+
+  it("uses the same hierarchical top-row labels for an MoE transformer", async () => {
+    const block = manifest.nodes[1];
+    vi.mocked(fetchArchitecture).mockResolvedValueOnce({
+      ...manifest,
+      template: "moe",
+      nodes: [
+        manifest.nodes[0],
+        {
+          ...block,
+          label: "Transformer Block (MoE)",
+          children: [
+            ...block.children!.slice(0, 3),
+            { id: "block.{i}.moe", kind: "moe", label: "Mixture of Experts", config: {} },
+          ],
+        },
+        ...manifest.nodes.slice(2),
+      ],
+    });
+
+    render(<ArchSchematic runId={2} />);
+
+    await waitFor(() => expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument());
+    expect(screen.getByText(/Final\s+LayerNorm/)).toBeInTheDocument();
+    expect(screen.getByText("Experts")).toBeInTheDocument();
   });
 });

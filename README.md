@@ -21,7 +21,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 *Landing page — pick a preset to start from.*
 
-<img src="evidence/nebius-endpoint/React_dashboard.png" width="500" alt="Main dashboard — config, loss chart, training controls">
+<img src="evidence/nebius-endpoint/React_dashboard_v2.png" width="500" alt="Main dashboard — config, loss chart, training controls">
 
 *Main dashboard — config panel, live loss chart, and training controls.*
 

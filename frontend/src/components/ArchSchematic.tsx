@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { ArchitectureManifest, ArchitectureNode } from "../types";
 import { fetchArchitecture } from "../hooks/useApi";
+import "./ArchSchematic.css";
 
 interface Props {
   runId?: number | null;
@@ -10,10 +11,11 @@ interface Props {
 
 interface BoxProps {
   label: string;
+  fullLabel?: string;
   kind: string;
   isSelected?: boolean;
+  isExpanded?: boolean;
   onClick?: () => void;
-  small?: boolean;
   // Renders 3 small internal stripes to signal "multiple experts inside"
   // without making it look like 3 separately-clickable boxes — previously
   // this was 3 literal NodeBoxes all wired to the same node id, which read
@@ -38,34 +40,46 @@ const COLOR_MAP: Record<string, { bg: string; border: string }> = {
   transformer_block_group: { bg: "#e0e7ff", border: "#4f46e5" },
 };
 
-function NodeBox({ label, kind, isSelected, onClick, small, segmented }: BoxProps) {
+// Keep the architecture manifest's full technical labels intact for the
+// Inspector and data contract. These are display-only abbreviations for the
+// compact schematic, where the surrounding flow already supplies context.
+const DISPLAY_LABELS: Record<string, string> = {
+  "Token + Positional Embedding": "T + P Embedding",
+  "Final LayerNorm": "Final\nLayerNorm",
+  "LayerNorm (pre-attention)": "LayerNorm",
+  "LayerNorm (pre-MLP)": "LayerNorm",
+  "LayerNorm (pre-MLP/MoE)": "LayerNorm",
+  "Causal Self-Attention": "Causal S. Attention",
+  "Feed-Forward (dense)": "Feed Forward",
+};
+
+function displayLabel(label: string) {
+  return DISPLAY_LABELS[label] ?? label;
+}
+
+function NodeBox({ label, fullLabel, kind, isSelected, isExpanded, onClick, segmented }: BoxProps) {
   const colors = COLOR_MAP[kind] || { bg: "#e5e7eb", border: "#6b7280" };
 
   return (
     <div
+      className={`arch-node${isSelected ? " arch-node--selected" : ""}${isExpanded ? " arch-node--expanded" : ""}`}
       onClick={onClick}
+      title={fullLabel && fullLabel !== label ? fullLabel : undefined}
       style={{
-        minWidth: small ? 60 : 120,
-        padding: small ? "6px 6px" : "12px 10px",
-        borderRadius: 6,
         backgroundColor: colors.bg,
         border: `2px solid ${colors.border}`,
         cursor: onClick ? "pointer" : "default",
         borderColor: isSelected ? "#ff6b6b" : colors.border,
         boxShadow: isSelected ? "0 0 8px rgba(255, 107, 107, 0.5)" : "none",
-        textAlign: "center",
-        fontSize: small ? 10 : 12,
-        fontWeight: 500,
-        color: "#1a202c",
-        transition: "all 0.15s",
       }}
     >
       {segmented && (
-        <div style={{ display: "flex", gap: 2, justifyContent: "center", marginBottom: 3 }}>
+        <div className="arch-node__segments" aria-hidden="true">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              style={{ width: 6, height: 10, borderRadius: 2, backgroundColor: colors.border, opacity: 0.55 }}
+              className="arch-node__segment"
+              style={{ backgroundColor: colors.border }}
             />
           ))}
         </div>
@@ -76,16 +90,7 @@ function NodeBox({ label, kind, isSelected, onClick, small, segmented }: BoxProp
 }
 
 function Arrow() {
-  return (
-    <div
-      style={{
-        width: 20,
-        height: 2,
-        backgroundColor: "#666",
-        margin: "0 4px",
-      }}
-    />
-  );
+  return <div className="arch-arrow" aria-hidden="true" />;
 }
 
 export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Props) {
@@ -157,65 +162,45 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
       <h3>Architecture</h3>
 
       {/* Horizontal pipeline diagram */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 0,
-          overflowX: "auto",
-          padding: "12px 0",
-          marginBottom: 16,
-        }}
-      >
+      <div className="arch-pipeline">
         {nodes.map((node, i) => {
           const isLast = i === nodes.length - 1;
 
           if (node.kind === "transformer_block_group" && node.children && node.repeat_count) {
             return (
-              <div key={node.id} style={{ display: "flex", alignItems: "center" }}>
-                <NodeBox
-                  label={`Block ${selectedBlockIdx + 1} of ${node.repeat_count}`}
-                  kind="transformer_block_group"
-                  onClick={() => onNodeClick?.(`block.${selectedBlockIdx}`, node)}
-                />
+              <div key={node.id} className="arch-flow-item arch-flow-item--block">
+                <div className="arch-stage">
+                  <NodeBox
+                    label={`Transformer\nBlock ${selectedBlockIdx + 1} of ${node.repeat_count}`}
+                    fullLabel={node.label}
+                    kind="transformer_block_group"
+                    isExpanded
+                    onClick={() => onNodeClick?.(`block.${selectedBlockIdx}`, node)}
+                  />
 
-                {/* Block selector: small numbered buttons. Real bug report,
-                    2026-07-14: these previously only set local
-                    selectedBlockIdx — App's selectedNodeId (the source of
-                    truth for the Inspector, the peek effect, and even the
-                    staleness warning) never changed, so switching block
-                    silently did nothing in the Runtime inspector. If a node
-                    inside the block is currently selected, remap its id to
-                    the newly-picked block so the whole selection follows.
-                    See docs/DESIGN_DECISIONS.md. */}
-                <div style={{ display: "flex", gap: 4, marginLeft: 8, marginRight: 8 }}>
-                  {Array.from({ length: node.repeat_count }).map((_, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => {
-                        setSelectedBlockIdx(idx);
-                        const m = selectedNodeId?.match(/^block\.\d+\.(.+)$/);
-                        if (m && node.children) {
-                          const child = node.children.find((c) => c.id === `block.{i}.${m[1]}`);
-                          if (child) onNodeClick?.(`block.${idx}.${m[1]}`, child);
-                        }
-                      }}
-                      style={{
-                        width: 24,
-                        height: 24,
-                        borderRadius: 4,
-                        border: selectedBlockIdx === idx ? "2px solid #0284c7" : "1px solid #999",
-                        background: selectedBlockIdx === idx ? "#0284c7" : "#f0f0f0",
-                        color: selectedBlockIdx === idx ? "#fff" : "#333",
-                        cursor: "pointer",
-                        fontSize: 11,
-                        fontWeight: 600,
-                        transition: "all 0.15s",
-                      }}
-                    >
-                      {idx + 1}
-                    </button>
-                  ))}
+                  {/* Keep block selection behavior unchanged; only its visual
+                      placement and sizing move into the selected stage. When
+                      a child is selected, changing blocks must also remap the
+                      Inspector selection to that block. See the 2026-07-14
+                      entry in docs/DESIGN_DECISIONS.md. */}
+                  <div className="arch-block-selector" aria-label="Choose transformer block">
+                    {Array.from({ length: node.repeat_count }).map((_, idx) => (
+                      <button
+                        key={idx}
+                        className={`arch-block-selector__button${selectedBlockIdx === idx ? " is-active" : ""}`}
+                        onClick={() => {
+                          setSelectedBlockIdx(idx);
+                          const m = selectedNodeId?.match(/^block\.\d+\.(.+)$/);
+                          if (m && node.children) {
+                            const child = node.children.find((c) => c.id === `block.{i}.${m[1]}`);
+                            if (child) onNodeClick?.(`block.${idx}.${m[1]}`, child);
+                          }
+                        }}
+                      >
+                        {idx + 1}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 {!isLast && <Arrow />}
               </div>
@@ -223,13 +208,16 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
           }
 
           return (
-            <div key={node.id} style={{ display: "flex", alignItems: "center" }}>
-              <NodeBox
-                label={node.label}
-                kind={node.kind}
-                isSelected={selectedNodeId === node.id}
-                onClick={() => onNodeClick?.(node.id, node)}
-              />
+            <div key={node.id} className="arch-flow-item">
+              <div className="arch-stage">
+                <NodeBox
+                  label={displayLabel(node.label)}
+                  fullLabel={node.label}
+                  kind={node.kind}
+                  isSelected={selectedNodeId === node.id}
+                  onClick={() => onNodeClick?.(node.id, node)}
+                />
+              </div>
               {!isLast && <Arrow />}
             </div>
           );
@@ -250,46 +238,42 @@ export default function ArchSchematic({ runId, onNodeClick, selectedNodeId }: Pr
         const blockGroup = nodes.find((n) => n.kind === "transformer_block_group");
         if (!blockGroup?.children) return null;
         return (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 12, marginBottom: 16 }}>
-            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-              Inside Block {selectedBlockIdx + 1}:
-            </span>
-            {blockGroup.children.map((child, i) => {
-              const nodeId = child.id.replace("{i}", String(selectedBlockIdx));
-              const isMoe = child.kind === "moe";
-              return (
-                <div key={child.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  {isMoe ? (
-                    <NodeBox
-                      small
-                      segmented
-                      label="Experts"
-                      kind="moe"
-                      isSelected={selectedNodeId === nodeId}
-                      onClick={() => onNodeClick?.(nodeId, child)}
-                    />
-                  ) : (
-                    <NodeBox
-                      small
-                      label={child.label}
-                      kind={child.kind}
-                      isSelected={selectedNodeId === nodeId}
-                      onClick={() => onNodeClick?.(nodeId, child)}
-                    />
-                  )}
-                  {i < blockGroup.children!.length - 1 && <Arrow />}
-                </div>
-              );
-            })}
+          <div className="arch-block-detail">
+            <div className="arch-block-detail__heading">
+              <span className="arch-block-detail__branch" aria-hidden="true">↳</span>
+              <span>Inside selected transformer block</span>
+              <strong>Block {selectedBlockIdx + 1}</strong>
+            </div>
+            <div className="arch-block-detail__flow">
+              {blockGroup.children.map((child, i) => {
+                const nodeId = child.id.replace("{i}", String(selectedBlockIdx));
+                const isMoe = child.kind === "moe";
+                return (
+                  <div key={child.id} className="arch-flow-item arch-flow-item--detail">
+                    <div className="arch-stage">
+                      <NodeBox
+                        segmented={isMoe}
+                        label={isMoe ? "Experts" : displayLabel(child.label)}
+                        fullLabel={child.label}
+                        kind={child.kind}
+                        isSelected={selectedNodeId === nodeId}
+                        onClick={() => onNodeClick?.(nodeId, child)}
+                      />
+                    </div>
+                    {i < blockGroup.children!.length - 1 && <Arrow />}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         );
       })()}
 
       {/* Summary stats */}
       {manifest && (
-        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          <div>Template: <strong>{manifest.template}</strong></div>
-          <div>Parameters: <strong>{manifest.param_count.toLocaleString()}</strong> total, <strong>{manifest.trainable_param_count.toLocaleString()}</strong> trainable</div>
+        <div className="arch-summary">
+          <div>Template <strong>{manifest.template}</strong></div>
+          <div>Parameters <strong>{manifest.param_count.toLocaleString()}</strong> total · <strong>{manifest.trainable_param_count.toLocaleString()}</strong> trainable</div>
         </div>
       )}
     </div>
