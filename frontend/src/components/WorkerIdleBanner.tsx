@@ -54,6 +54,29 @@ export default function WorkerIdleBanner({ device }: Props) {
 
   if (!status || status.worker_status === "none") return null;
 
+  // Part 9: Handle terminal/unavailable states (SHUTTING_DOWN, FAILED, STOPPED)
+  if (status.worker_status === "shutting_down") {
+    return (
+      <div style={{
+        background: "var(--orange)", color: "#1a1a1a", padding: "8px 16px",
+        borderRadius: 6, marginBottom: 12, fontSize: 13,
+      }}>
+        This {device.toUpperCase()} worker is shutting down. A new one will be provisioned for the next run.
+      </div>
+    );
+  }
+
+  if (status.worker_status === "failed") {
+    return (
+      <div style={{
+        background: "var(--red)", color: "#fff", padding: "8px 16px",
+        borderRadius: 6, marginBottom: 12, fontSize: 13,
+      }}>
+        This {device.toUpperCase()} worker encountered an error. Starting a run will provision a new one.
+      </div>
+    );
+  }
+
   if (status.worker_status === "stopped") {
     if (stoppedDismissed || !sawReadyRef.current) return null;
     return (
