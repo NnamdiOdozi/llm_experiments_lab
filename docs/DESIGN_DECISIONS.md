@@ -3681,6 +3681,42 @@ Factory requests in the log) before debugging the data path. Tool
 descriptions are load-bearing: a stale precondition in prose disables a
 working tool as effectively as deleting it.
 
+## §78: Q/K/V joined the eager capture — the panel-open peek was the last 2s
+
+**Problem (user report, 2026-07-15, minutes after §76 shipped):** block/head
+switching still took ~2s. Log showed peeks on every click despite maps being
+present in the live snapshot (verified server-side). Cause: the user had the
+Q/K/V vectors panel open — §76 deliberately left qkv_detail per-pair
+on-demand, so showQKVDetail=true kept App's peek firing, and each peek was
+now ~1s SLOWER than pre-§76 because it also recomputed all 24 maps it didn't
+need.
+
+**Fix (810a0aa/285c795):** the §76 single pass also emits
+`attention_maps.qkv[layer][head] = {q,k,v}` (windowed per-position vectors,
+4dp, ~220 KB/step — all heads come from the same fused QKV, so marginal
+compute is ~nil) plus a shared `positions` list. Inspector's QKV table reads
+maps first; App's skip condition drops the !showQKVDetail requirement (an
+open panel only forces a peek if maps lack qkv). Remaining network on
+selection changes: none — only window-stepping and old-image fallback peek.
+
+Invariants:
+- `_trim_diagnostic_snapshot` MUST strip `attention_maps.qkv` before the
+  snapshot reaches the LLM — this is the same raw-float class that blew the
+  128k context in the qkv_detail incident. Weights stay (small). Test pins it.
+- The single-pair qkv_detail fallback must render when maps exist WITHOUT
+  qkv (a §76-only backend): the guard is `!snapshot.attention_maps?.qkv`,
+  not `!hasMaps` — the first Sonnet draft used the latter, which rendered no
+  vectors at all in that state.
+- In `_compute_all_attention`'s loop, never name a local q/k/v/x — those are
+  the live tensors (a draft shadowed `v` inside the qkv comprehension; it
+  worked only by comprehension-scoping luck).
+- Oracle extended: maps qkv must match single-pair qkv_detail per pair
+  (mutation-verified by swapping q/k slices).
+
+Implementation note: partially built by a Sonnet subagent that died mid-task
+on a spend limit; orchestrator completed the fallback fix, backend tests,
+and shadowing cleanup, Sonnet finished the frontend tests on resume.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
