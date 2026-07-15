@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, CSSProperties } from "react";
 import { useChatStream } from "../hooks/useChatStream";
 import { setChatMessageFeedback } from "../hooks/useApi";
 import { ChatMessage } from "../types";
+import { CopyIconButton } from "./CopyIconButton";
 
 interface Props {
   experimentId: number;
@@ -47,12 +48,6 @@ export default function ChatPanel({ experimentId }: Props) {
     if (!input.trim() || loading) return;
     sendMessage(input);
     setInput("");
-  }
-
-  async function handleCopy(id: number, content: string) {
-    await navigator.clipboard.writeText(content);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId((current) => (current === id ? null : current)), 1500);
   }
 
   function currentFeedback(m: ChatMessage): "up" | "down" | null {
@@ -140,22 +135,16 @@ export default function ChatPanel({ experimentId }: Props) {
             )}
             {m.role === "assistant" && m.content !== "" && (
               <div style={{ display: "flex", gap: 10, paddingTop: 4 }}>
-                <button
-                  onClick={() => handleCopy(m.id, m.content)}
+                <CopyIconButton
+                  size={14}
+                  getText={() => m.content}
                   title="Copy response"
-                  style={iconButtonStyle}
-                >
-                  {copiedId === m.id ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <rect x="9" y="9" width="11" height="11" rx="2" />
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                    </svg>
-                  )}
-                </button>
+                  copied={copiedId === m.id}
+                  onCopied={() => {
+                    setCopiedId(m.id);
+                    setTimeout(() => setCopiedId((current) => (current === m.id ? null : current)), 1500);
+                  }}
+                />
                 <button
                   onClick={() => handleFeedback(m, "up")}
                   title="Good response"

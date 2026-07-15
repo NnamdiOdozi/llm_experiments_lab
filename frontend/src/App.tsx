@@ -16,6 +16,7 @@ import ExperimentNotes from "./components/ExperimentNotes";
 import ChatPanel from "./components/ChatPanel";
 import WorkerIdleBanner from "./components/WorkerIdleBanner";
 import OpenRunsPage from "./components/OpenRunsPage";
+import { CopyIconButton } from "./components/CopyIconButton";
 import { useActivityHeartbeat } from "./hooks/useActivityHeartbeat";
 import {
   startTraining,
@@ -57,35 +58,6 @@ function loadSession(): { experimentId: number; runId: number | null; config: Ex
 // dynamic ids type-check without enumerating every possible id.
 type RightPaneTab = string;
 
-// Icon button, not spelled-out text — direct user request, 2026-07-15
-// ("I think it looks better"). Same copy/checkmark glyph pair used in
-// ChatPanel.tsx and Inspector.tsx's CopyIconButton, reused here for icon
-// consistency across the app. See docs/DESIGN_DECISIONS.md.
-function CopyIconButton({ getText, title }: { getText: () => string; title: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(getText());
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-      title={title}
-      style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", padding: 0, lineHeight: 0 }}
-    >
-      {copied ? (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="9" y="9" width="11" height="11" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      )}
-    </button>
-  );
-}
 
 const positionTableCellStyle: CSSProperties = {
   border: "1px solid var(--border)",
@@ -824,7 +796,7 @@ export default function App() {
                         matching this tab's single-column layout, pastes as
                         a single spreadsheet column. Direct user request,
                         2026-07-15. See docs/DESIGN_DECISIONS.md. */}
-                    <CopyIconButton getText={() => t.content.join("\n")} title="Copy full vector" />
+                    <CopyIconButton size={14} getText={() => t.content.join("\n")} title="Copy full vector" />
                     <button onClick={() => closeDataTab(t.id)}>Close</button>
                   </div>
                 </div>

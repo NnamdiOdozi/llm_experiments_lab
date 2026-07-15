@@ -2,6 +2,7 @@ import { useState, useEffect, CSSProperties } from "react";
 import { ArchitectureNode, DiagnosticSnapshot } from "../types";
 import { fetchEmbeddingTable } from "../hooks/useApi";
 import { WindowStepper } from "./WindowStepper";
+import { CopyIconButton } from "./CopyIconButton";
 
 interface Props {
   runId: number | null;
@@ -334,36 +335,6 @@ function truncatedVector(v: number[], edgeLen = 6): { preview: string; full: str
   };
 }
 
-// Icon button, not spelled-out text — direct user request, 2026-07-15
-// ("I think it looks better"). Same copy/checkmark glyph pair already
-// used in ChatPanel.tsx, reused here for icon consistency across the app
-// rather than inventing a new one. Brief checkmark confirmation on click,
-// same pattern as ChatPanel's own copy button. See docs/DESIGN_DECISIONS.md.
-function CopyIconButton({ getText, title }: { getText: () => string; title: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(getText());
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-      title={title}
-      style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", padding: 0, lineHeight: 0 }}
-    >
-      {copied ? (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="9" y="9" width="11" height="11" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      )}
-    </button>
-  );
-}
 
 // Shared by QKVTable/NodeVectorTable — one vector-kind (Q, K, V, Input,
 // Output) rendered as its own Position(+Token)/Value table. Previously Q/K/V
@@ -396,7 +367,7 @@ function VectorPreviewTable({
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
         <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{label}</div>
-        <CopyIconButton getText={tableText} title={`Copy all ${label} vectors (full precision, tab-separated)`} />
+        <CopyIconButton size={12} getText={tableText} title={`Copy all ${label} vectors (full precision, tab-separated)`} />
       </div>
       <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "var(--font-mono)", width: "100%" }}>
         <thead>
