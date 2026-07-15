@@ -288,7 +288,32 @@ def _transformer_eval(model, dataset: CharDataset, device: str, num_iters: int) 
     return out
 
 
-def train_transformer(ws: WorkerState):
+@torch.no_grad()
+def _moe_eval(model, dataset, device: str, num_iters: int) -> dict[str, dict[str, float]]:
+    model.eval()
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(num_iters)
+        drop_rates = torch.zeros(num_iters)
+        for k in range(num_iters):
+            x, y = dataset.get_batch(split, device)
+            _, loss, drop_rate = model(x, y)
+            losses[k] = loss.item()
+            drop_rates[k] = drop_rate if isinstance(drop_rate, float) else drop_rate.item()
+        out[split] = {"loss": losses.mean().item(), "drop_rate": drop_rates.mean().item()}
+    model.train()
+    return out
+
+
+def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row):
+    """Unified training loop for character-level LMs (transformer/MoE).
+
+    Args:
+        ws: WorkerState with config, device, etc.
+        template_key: "transformer" or "moe" — determines model registry lookup
+        eval_fn: Callable that returns dict with loss (and drop_rate for MoE)
+        build_metric_row: Callable that builds metric dict from eval results
+    """
     config = ws.config
     train_cfg = config["training"]
     device = ws.device
@@ -298,7 +323,7 @@ def train_transformer(ws: WorkerState):
     text = load_tiny_shakespeare()
     ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
 
-    template = TEMPLATE_REGISTRY["transformer"]
+    template = TEMPLATE_REGISTRY[template_key]
     ws.model = template["build_model"](config).to(device)
     opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
     ws.optimizer = opt_cls(ws.model.parameters(), lr=train_cfg["learning_rate"])
@@ -328,7 +353,13 @@ def train_transformer(ws: WorkerState):
         ws.current_step = step
 
         xb, yb = ws.dataset.get_batch("train", device)
-        _, loss = ws.model(xb, yb)
+        fwd_output = ws.model(xb, yb)
+        # Unpack forward output: transformer returns (logits, loss),
+        # MoE returns (logits, loss, drop_rate)
+        if len(fwd_output) == 3:
+            _, loss, _ = fwd_output
+        else:
+            _, loss = fwd_output
         ws.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         ws.optimizer.step()
@@ -340,15 +371,9 @@ def train_transformer(ws: WorkerState):
             return
 
         if step > 0 and step % log_interval == 0:
-            losses = _transformer_eval(ws.model, ws.dataset, device, num_eval_iters)
-            ws.write_metric({
-                "step": step,
-                "train_loss": round(losses["train"], 4),
-                "val_loss": round(losses["val"], 4),
-                "learning_rate": lr,
-                "elapsed_seconds": round(time.time() - ws.started_at, 1),
-                "param_count": _param_count(ws.model),
-            })
+            eval_results = eval_fn(ws.model, ws.dataset, device, num_eval_iters)
+            metric_row = build_metric_row(step, eval_results, lr, ws.started_at, ws.model)
+            ws.write_metric(metric_row)
             ws.save_checkpoint(step)
 
     ws.save_checkpoint(max_iters)
@@ -356,90 +381,40 @@ def train_transformer(ws: WorkerState):
     ws.set_status(RunStatus.COMPLETED)
 
 
-# ── MoE ─────────────────────────────────────────────────────────────
+def _build_transformer_metric_row(step: int, eval_results: dict, lr: float, started_at: float, model) -> dict:
+    """Build metric row dict for transformer eval results."""
+    return {
+        "step": step,
+        "train_loss": round(eval_results["train"], 4),
+        "val_loss": round(eval_results["val"], 4),
+        "learning_rate": lr,
+        "elapsed_seconds": round(time.time() - started_at, 1),
+        "param_count": _param_count(model),
+    }
 
 
-@torch.no_grad()
-def _moe_eval(model, dataset, device: str, num_iters: int) -> dict[str, dict[str, float]]:
-    model.eval()
-    out = {}
-    for split in ("train", "val"):
-        losses = torch.zeros(num_iters)
-        drop_rates = torch.zeros(num_iters)
-        for k in range(num_iters):
-            x, y = dataset.get_batch(split, device)
-            _, loss, drop_rate = model(x, y)
-            losses[k] = loss.item()
-            drop_rates[k] = drop_rate if isinstance(drop_rate, float) else drop_rate.item()
-        out[split] = {"loss": losses.mean().item(), "drop_rate": drop_rates.mean().item()}
-    model.train()
-    return out
+def _build_moe_metric_row(step: int, eval_results: dict, lr: float, started_at: float, model) -> dict:
+    """Build metric row dict for MoE eval results, including drop rates."""
+    return {
+        "step": step,
+        "train_loss": round(eval_results["train"]["loss"], 4),
+        "val_loss": round(eval_results["val"]["loss"], 4),
+        "train_drop_rate": round(eval_results["train"]["drop_rate"] * 100, 1),
+        "val_drop_rate": round(eval_results["val"]["drop_rate"] * 100, 1),
+        "learning_rate": lr,
+        "elapsed_seconds": round(time.time() - started_at, 1),
+        "param_count": _param_count(model),
+    }
+
+
+def train_transformer(ws: WorkerState):
+    """Train a transformer LM on tiny_shakespeare."""
+    _train_char_lm(ws, "transformer", _transformer_eval, _build_transformer_metric_row)
 
 
 def train_moe(ws: WorkerState):
-    config = ws.config
-    train_cfg = config["training"]
-    device = ws.device
-
-    ws.set_status(RunStatus.STARTING)
-
-    text = load_tiny_shakespeare()
-    ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
-
-    template = TEMPLATE_REGISTRY["moe"]
-    ws.model = template["build_model"](config).to(device)
-    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
-    ws.optimizer = opt_cls(ws.model.parameters(), lr=train_cfg["learning_rate"])
-
-    if ws.resume:
-        ws.load_checkpoint()
-
-    ws.sync_metadata("tiny_shakespeare")
-
-    ws.started_at = time.time()
-    ws.set_status(RunStatus.RUNNING)
-    max_iters = train_cfg["max_iters"]
-    log_interval = train_cfg["eval_interval"]
-    num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
-    lr = train_cfg["learning_rate"]
-
-    torch.manual_seed(settings.random_seed)
-    # Fresh runs start at 1, not 0 — same off-by-one fix as
-    # train_transformer above, see §73.
-    start_step = ws.current_step + 1 if ws.resume else 1
-
-    for step in range(start_step, max_iters + 1):
-        ws.current_step = step
-
-        xb, yb = ws.dataset.get_batch("train", device)
-        _, loss, _ = ws.model(xb, yb)
-        ws.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        ws.optimizer.step()
-        ws.yield_gpu(step)
-        ws.maybe_update_progress()
-
-        # Check pause/stop AFTER training step so checkpoint = completed step
-        if ws.check_pause(step):
-            return
-
-        if step > 0 and step % log_interval == 0:
-            metrics = _moe_eval(ws.model, ws.dataset, device, num_eval_iters)
-            ws.write_metric({
-                "step": step,
-                "train_loss": round(metrics["train"]["loss"], 4),
-                "val_loss": round(metrics["val"]["loss"], 4),
-                "train_drop_rate": round(metrics["train"]["drop_rate"] * 100, 1),
-                "val_drop_rate": round(metrics["val"]["drop_rate"] * 100, 1),
-                "learning_rate": lr,
-                "elapsed_seconds": round(time.time() - ws.started_at, 1),
-                "param_count": _param_count(ws.model),
-            })
-            ws.save_checkpoint(step)
-
-    ws.save_checkpoint(max_iters)
-    sync_update_training_run(ws.run_id, checkpoint_path=str(artifacts.checkpoint_path(ws.run_id)))
-    ws.set_status(RunStatus.COMPLETED)
+    """Train a MoE LM on tiny_shakespeare."""
+    _train_char_lm(ws, "moe", _moe_eval, _build_moe_metric_row)
 
 
 # ── RNN ─────────────────────────────────────────────────────────────
