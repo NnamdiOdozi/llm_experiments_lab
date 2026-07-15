@@ -1,6 +1,7 @@
 import { useState, useEffect, CSSProperties } from "react";
 import { ArchitectureNode, DiagnosticSnapshot } from "../types";
 import { fetchEmbeddingTable } from "../hooks/useApi";
+import { WindowStepper } from "./WindowStepper";
 
 interface Props {
   runId: number | null;
@@ -519,53 +520,6 @@ function EmbeddingOneHotTable({
   );
 }
 
-// Direct user request, 2026-07-15: "a stepper that allows that window to
-// slide backwards in time" for every node with a position_vectors view —
-// same shape/stride-1 pattern as the attention heatmap's stepper. Shared
-// by every generic node (LayerNorm, MLP, embedding, final_norm) via
-// Runtime below — one stepper controls the shared node_window_offset,
-// same as attention's single stepper controlling both the heatmap and
-// qkv_detail. See docs/DESIGN_DECISIONS.md.
-function NodeWindowStepper({
-  pv, totalPositions, windowOffset, onWindowOffsetChange,
-}: {
-  pv: import("../types").NodePositionVectors;
-  totalPositions: number;
-  windowOffset: number;
-  onWindowOffsetChange: (offset: number) => void;
-}) {
-  const windowSize = pv.positions.length;
-  const windowStart = pv.positions[0] ?? 0;
-  const maxOffset = Math.max(0, totalPositions - windowSize);
-  const canShiftEarlier = windowOffset < maxOffset;
-  const canShiftLater = windowOffset > 0;
-
-  if (totalPositions <= windowSize) return null;
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
-      <button
-        onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + 1))}
-        disabled={!canShiftEarlier}
-        title="Shift window one position earlier"
-        style={{ fontSize: 11, padding: "2px 6px" }}
-      >
-        ◀ Earlier
-      </button>
-      <span style={{ color: "var(--text-dim)" }}>
-        Positions {windowStart + 1}–{windowStart + windowSize} of {totalPositions}
-      </span>
-      <button
-        onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - 1))}
-        disabled={!canShiftLater}
-        title="Shift window one position later"
-        style={{ fontSize: 11, padding: "2px 6px" }}
-      >
-        Later ▶
-      </button>
-    </div>
-  );
-}
 
 // Same Colab-style table as QKVTable, generalized to any node's raw
 // input/output vectors (embedding, layernorm, mlp, etc.) — no token text
@@ -640,9 +594,6 @@ function AttentionHeatmap({
   // offset shifts the window's end earlier. Can't shift the window's end
   // past totalPositions (offset < 0, meaningless) or its start before 0
   // (offset so large the window would run off the front of the sequence).
-  const maxOffset = Math.max(0, totalPositions - windowSize);
-  const canShiftEarlier = windowOffset < maxOffset;
-  const canShiftLater = windowOffset > 0;
 
   // Per-row normalization, not global: each row is its own probability
   // distribution (sums to 1), so comparing within a row is what's actually
@@ -673,27 +624,13 @@ function AttentionHeatmap({
           ("discontinuous", direct user report 2026-07-15). See
           docs/DESIGN_DECISIONS.md. */}
       {totalPositions > windowSize && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
-          <button
-            onClick={() => onWindowOffsetChange(Math.min(maxOffset, windowOffset + 1))}
-            disabled={!canShiftEarlier}
-            title="Shift window one position earlier"
-            style={{ fontSize: 11, padding: "2px 6px" }}
-          >
-            ◀ Earlier
-          </button>
-          <span style={{ color: "var(--text-dim)" }}>
-            Positions {windowStart + 1}–{windowStart + windowSize} of {totalPositions}
-          </span>
-          <button
-            onClick={() => onWindowOffsetChange(Math.max(0, windowOffset - 1))}
-            disabled={!canShiftLater}
-            title="Shift window one position later"
-            style={{ fontSize: 11, padding: "2px 6px" }}
-          >
-            Later ▶
-          </button>
-        </div>
+        <WindowStepper
+          windowStart={windowStart}
+          windowSize={windowSize}
+          totalPositions={totalPositions}
+          offset={windowOffset}
+          onOffsetChange={onWindowOffsetChange}
+        />
       )}
       <div style={{ overflowX: "auto" }}>
         <table
@@ -1165,12 +1102,13 @@ function Runtime({
           sequence length as everywhere else in this snapshot
           (generated_token.position + 1) — one forward pass, one sequence
           length, applies to every node in it. See docs/DESIGN_DECISIONS.md. */}
-      {runtimeData.position_vectors && (
-        <NodeWindowStepper
-          pv={runtimeData.position_vectors}
+      {runtimeData.position_vectors && runtimeData.position_vectors.positions.length < ((snapshot.generated_token?.position ?? runtimeData.position_vectors.positions[runtimeData.position_vectors.positions.length - 1]) + 1) && (
+        <WindowStepper
+          windowStart={runtimeData.position_vectors.positions[0] ?? 0}
+          windowSize={runtimeData.position_vectors.positions.length}
           totalPositions={(snapshot.generated_token?.position ?? runtimeData.position_vectors.positions[runtimeData.position_vectors.positions.length - 1]) + 1}
-          windowOffset={nodeWindowOffset}
-          onWindowOffsetChange={onNodeWindowOffsetChange}
+          offset={nodeWindowOffset}
+          onOffsetChange={onNodeWindowOffsetChange}
         />
       )}
       {selectedNodeId === "embedding" ? (
