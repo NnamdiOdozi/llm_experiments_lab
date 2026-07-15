@@ -504,6 +504,8 @@ def _compute_all_attention(
 
             # Weights array: [layer][head][window][window]
             weights_all_layers = []
+            # QKV array: [layer][head] = {q, k, v per-position arrays}
+            qkv_all_layers = []
 
             # Single pass through all blocks
             for layer in range(n_layer):
@@ -528,6 +530,22 @@ def _compute_all_attention(
                 ]
                 weights_all_layers.append(weights_this_layer)
 
+                # Capture windowed Q/K/V for all heads (same window as weights/heatmap).
+                # q/k/v are [B, n_head, T, head_size]; one window slice per head,
+                # rounded to 4dp. NOTE: don't name a loop variable q/k/v/x here —
+                # those are the live tensors.
+                def _rounded_rows(t):
+                    return [[round(val, 4) for val in row] for row in t.tolist()]
+                qkv_this_layer = [
+                    {
+                        "q": _rounded_rows(q[0, head, start:end, :]),
+                        "k": _rounded_rows(k[0, head, start:end, :]),
+                        "v": _rounded_rows(v[0, head, start:end, :]),
+                    }
+                    for head in range(n_head)
+                ]
+                qkv_all_layers.append(qkv_this_layer)
+
                 # Advance to next layer (must handle MoE tuple return; see DESIGN_DECISIONS §67)
                 x = block(x)
                 if isinstance(x, tuple):
@@ -538,9 +556,11 @@ def _compute_all_attention(
                 "window_start": start,
                 "total_positions": T,
                 "token_labels": token_labels,
+                "positions": list(range(start, end)),
                 "n_layer": n_layer,
                 "n_head": n_head,
                 "weights": weights_all_layers,
+                "qkv": qkv_all_layers,
             }
     except Exception as e:
         training_log.warning("All-attention capture failed: %s", e)

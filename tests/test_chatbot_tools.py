@@ -206,6 +206,14 @@ async def test_get_diagnostic_snapshot_strips_raw_vectors_to_avoid_context_blowu
                 "weights": [[1.0]],
                 "qkv_detail": {"positions": [0], "tokens": ["h"], "q": [[0.0] * 32], "k": [[0.0] * 32], "v": [[0.0] * 32]},
             },
+            # Eager all-pairs capture: weights are small and must survive,
+            # but the per-pair qkv arrays (~220KB/step) must be stripped —
+            # same context-blowup class as attention.qkv_detail above.
+            "attention_maps": {
+                "available": True, "n_layer": 1, "n_head": 1,
+                "weights": [[[[1.0]]]],
+                "qkv": [[{"q": [[0.0] * 32], "k": [[0.0] * 32], "v": [[0.0] * 32]}]],
+            },
             "lm_head": {"top_k": [{"rank": 1, "token": "e"}]},
         }
 
@@ -221,6 +229,8 @@ async def test_get_diagnostic_snapshot_strips_raw_vectors_to_avoid_context_blowu
 
     assert "qkv_detail" not in result["snapshot"]["attention"]
     assert result["snapshot"]["attention"]["weights"] == [[1.0]]
+    assert "qkv" not in result["snapshot"]["attention_maps"]
+    assert result["snapshot"]["attention_maps"]["weights"] == [[[[1.0]]]]
     assert result["snapshot"]["lm_head"]["top_k"][0]["token"] == "e"
 
 

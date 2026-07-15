@@ -2248,26 +2248,37 @@ async def test_attention_maps_oracle_matches_single_pair_path(temp_db, client, m
     assert resp.status_code == 200
     snapshot = resp.json()
 
+    def _assert_close_grid(all_grid, single_grid, label):
+        assert len(all_grid) == len(single_grid), f"{label}: shape mismatch"
+        for i, (all_row, single_row) in enumerate(zip(all_grid, single_grid)):
+            assert len(all_row) == len(single_row), f"{label} row {i}: length mismatch"
+            for j, (all_val, single_val) in enumerate(zip(all_row, single_row)):
+                # Allow rounding difference (maps are rounded to 4 decimals)
+                assert abs(all_val - single_val) < 0.0001, \
+                    f"{label} [{i}][{j}]: {all_val} vs {single_val}"
+
     # Now compare attention_maps values against the single-pair path for layers 1 and 3, heads 2 and 5
     test_pairs = [(1, 2), (3, 5)]
     for layer, head in test_pairs:
         # Get all-attention value from the snapshot's attention_maps
         all_weights = snapshot["attention_maps"]["weights"][layer][head]
 
-        # Get single-pair value via the on-demand path
+        # Get single-pair value via the on-demand path (with qkv_detail so the
+        # eager maps' Q/K/V can be cross-checked against the same oracle)
         resp = await client.post(
             f"/api/training/{run_id}/diagnostics/{session_id}/peek",
-            json={"attention_layer": layer, "attention_head": head, "attention_window_offset": 0},
+            json={"attention_layer": layer, "attention_head": head, "attention_window_offset": 0, "qkv_detail": True},
         )
         assert resp.status_code == 200
         single_snapshot = resp.json()
         single_weights = single_snapshot["attention"]["weights"]
 
-        # Should match (within float rounding to 4 decimals)
-        assert len(all_weights) == len(single_weights), f"Layer {layer} head {head}: window shape mismatch"
-        for i, (all_row, single_row) in enumerate(zip(all_weights, single_weights)):
-            assert len(all_row) == len(single_row), f"Row {i}: length mismatch"
-            for j, (all_val, single_val) in enumerate(zip(all_row, single_row)):
-                # Allow rounding difference (4 decimals)
-                assert abs(all_val - single_val) < 0.0001, \
-                    f"Layer {layer} head {head} [{i}][{j}]: {all_val} vs {single_val}"
+        _assert_close_grid(all_weights, single_weights, f"weights layer {layer} head {head}")
+
+        # Eager Q/K/V agreement: maps.qkv[layer][head] must match the
+        # single-pair qkv_detail arrays for the same pair and window.
+        maps_qkv = snapshot["attention_maps"]["qkv"][layer][head]
+        single_qkv = single_snapshot["attention"]["qkv_detail"]
+        for key in ("q", "k", "v"):
+            _assert_close_grid(maps_qkv[key], single_qkv[key], f"qkv.{key} layer {layer} head {head}")
+        assert snapshot["attention_maps"]["positions"] == single_qkv["positions"]
