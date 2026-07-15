@@ -2107,3 +2107,167 @@ async def test_get_embedding_table_omits_position_table_when_rope(temp_db, clien
     data = resp.json()
     assert data["block_size"] is None
     assert data["position_embedding"] is None
+
+
+async def test_attention_maps_captured_on_every_step(temp_db, client, monkeypatch, tmp_path):
+    """Eager all-layer × all-head attention capture produces attention_maps
+    on every step, with correct shape and window metadata."""
+    import torch
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "transformer",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "learned", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+        "inference": {"temperature": 0.8, "max_new_tokens": 50},
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    # Start a diagnostic session
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/start", json={"prompt": "hello", "top_k": 5, "max_prompt_tokens": 100})
+    assert resp.status_code == 200
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # Step without requesting attention — attention_maps should still be captured
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={"top_k": 5})
+    assert resp.status_code == 200
+    snapshot = resp.json()
+    assert "attention_maps" in snapshot
+    maps = snapshot["attention_maps"]
+    assert maps["available"] is True
+    assert maps["n_layer"] == 4
+    assert maps["n_head"] == 6
+    assert len(maps["weights"]) == 4  # 4 layers
+    assert len(maps["weights"][0]) == 6  # 6 heads per layer
+    assert len(maps["weights"][0][0]) > 0  # windowed weights
+    assert maps["window_start"] is not None
+    assert maps["total_positions"] is not None
+
+
+async def test_attention_maps_work_for_moe(temp_db, client, monkeypatch, tmp_path):
+    """Attention maps also work for MoE models, exercising the tuple-unwrap
+    path for all layers (not just block 0)."""
+    import torch
+    from backend.training import artifacts
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "moe",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "num_experts": 8, "top_k": 2, "capacity_factor": 1.25,
+            "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+        "inference": {"temperature": 0.8, "max_new_tokens": 50},
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["moe"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/start", json={"prompt": "hello", "top_k": 5, "max_prompt_tokens": 100})
+    assert resp.status_code == 200
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # Step and check attention_maps (MoE returns tuples, testing the unwrap path)
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={"top_k": 5})
+    assert resp.status_code == 200
+    snapshot = resp.json()
+    maps = snapshot["attention_maps"]
+    assert maps["available"] is True
+    assert maps["n_layer"] == 4
+    assert maps["n_head"] == 6
+
+
+async def test_attention_maps_oracle_matches_single_pair_path(temp_db, client, monkeypatch, tmp_path):
+    """Oracle test: for the same (layer, head) pair and window offset,
+    _compute_all_attention weights match _compute_attention_weights values.
+    Tests both transformer and rope-based attention."""
+    import torch
+    from backend.training import artifacts, diagnostics
+    from backend.training.templates import TEMPLATE_REGISTRY
+
+    config = {
+        "template": "transformer",
+        "device": "cpu",
+        "model": {
+            "vocab_size": 65, "block_size": 128, "n_embd": 192, "n_head": 6,
+            "n_layer": 4, "dropout": 0.1, "pos_encoding": "rope", "activation": "gelu",
+        },
+        "training": {
+            "batch_size": 64, "learning_rate": 3e-4, "max_iters": 1000,
+            "eval_interval": 20, "eval_iters": 2, "optimizer": "adamw",
+        },
+        "inference": {"temperature": 0.8, "max_new_tokens": 50},
+    }
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    exp_id = temp_db
+    run_id = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    rd = artifacts.run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "config.json").write_text(json.dumps(config))
+    model = TEMPLATE_REGISTRY["transformer"]["build_model"](config)
+    torch.save({"model_state": model.state_dict(), "config": config}, artifacts.checkpoint_path(run_id))
+    artifacts.write_status(run_id, {"status": RunStatus.PAUSED, "current_step": 10, "total_steps": 100})
+    await db.update_training_run(run_id, status=RunStatus.PAUSED, device="cpu", execution_backend="local")
+
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/start", json={"prompt": "hello", "top_k": 5, "max_prompt_tokens": 100})
+    assert resp.status_code == 200
+    session_id = resp.json()["diagnostic_session_id"]
+
+    # Take a step to generate some tokens
+    resp = await client.post(f"/api/training/{run_id}/diagnostics/{session_id}/step", json={"top_k": 5})
+    assert resp.status_code == 200
+    snapshot = resp.json()
+
+    # Now compare attention_maps values against the single-pair path for layers 1 and 3, heads 2 and 5
+    test_pairs = [(1, 2), (3, 5)]
+    for layer, head in test_pairs:
+        # Get all-attention value from the snapshot's attention_maps
+        all_weights = snapshot["attention_maps"]["weights"][layer][head]
+
+        # Get single-pair value via the on-demand path
+        resp = await client.post(
+            f"/api/training/{run_id}/diagnostics/{session_id}/peek",
+            json={"attention_layer": layer, "attention_head": head, "attention_window_offset": 0},
+        )
+        assert resp.status_code == 200
+        single_snapshot = resp.json()
+        single_weights = single_snapshot["attention"]["weights"]
+
+        # Should match (within float rounding to 4 decimals)
+        assert len(all_weights) == len(single_weights), f"Layer {layer} head {head}: window shape mismatch"
+        for i, (all_row, single_row) in enumerate(zip(all_weights, single_weights)):
+            assert len(all_row) == len(single_row), f"Row {i}: length mismatch"
+            for j, (all_val, single_val) in enumerate(zip(all_row, single_row)):
+                # Allow rounding difference (4 decimals)
+                assert abs(all_val - single_val) < 0.0001, \
+                    f"Layer {layer} head {head} [{i}][{j}]: {all_val} vs {single_val}"

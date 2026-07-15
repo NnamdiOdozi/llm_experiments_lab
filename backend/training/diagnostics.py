@@ -69,6 +69,11 @@ class DiagnosticSnapshot:
     # Windowed [{position, id, token}, ...] — same window as position_vectors
     # on every node. See docs/DESIGN_DECISIONS.md.
     position_tokens: list[dict] = field(default_factory=list)
+    # Eagerly-captured attention weights for ALL layers × ALL heads on every step,
+    # windowed to the most recent DIAGNOSTIC_POSITION_WINDOW positions.
+    # Schema: {available, window_start, total_positions, token_labels, n_layer, n_head, weights}
+    # Enables instant block/head switching in the Inspector without round-trip peeks.
+    attention_maps: dict = field(default_factory=lambda: {"available": False, "reason": "Not captured"})
     complete: bool = True
 
     def to_dict(self) -> dict:
@@ -83,6 +88,7 @@ class DiagnosticSnapshot:
             "activation_summaries": self.activation_summaries,
             "lm_head": self.lm_head,
             "position_tokens": self.position_tokens,
+            "attention_maps": self.attention_maps,
             "complete": self.complete,
         }
 
@@ -389,22 +395,8 @@ def _compute_attention_weights(
                     x = x[0]
 
             B, T, C = x.shape
-            x_ln = block.ln1(x)
-            q, k, v = attn.qkv(x_ln).split(C, dim=-1)
-            q = q.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
-            k = k.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
-            v = v.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
-
-            # Apply RoPE exactly like MultiHeadSelfAttention.forward does —
-            # previously skipped here, so for rope models (MoE's default,
-            # or a transformer configured with pos_encoding="rope") the
-            # heatmap and Q/K vectors were the attention of a position-
-            # blind model, not what the trained model actually computes.
-            # V is deliberately untouched (rope only rotates Q/K). Fable
-            # review, 2026-07-14 — see docs/DESIGN_DECISIONS.md §68.
-            if getattr(attn, "pos_encoding", "learned") == "rope":
-                q = attn.rope(q)
-                k = attn.rope(k)
+            # Use shared core (§67/§68 fixes).
+            q, k, v = _layer_qkv(block, x)
 
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(attn.head_size)
             causal_mask = torch.tril(torch.ones(T, T, device=session.device, dtype=torch.bool))
@@ -446,6 +438,113 @@ def _compute_attention_weights(
     except Exception as e:
         training_log.warning("Attention capture failed for layer=%d head=%d qkv_detail=%s: %s", layer, head, qkv_detail, e)
         return None
+
+
+def _layer_qkv(block, x):
+    """Shared core: given a block and its input x (post-prior-blocks), extract
+    Q/K/V with ln1 applied and RoPE if configured (DESIGN_DECISIONS §67/§68).
+
+    Returns (q, k, v) shaped [B, n_head, T, head_size], ready for attention.
+    No error handling here — exceptions bubble up to the caller.
+    """
+    attn = block.attn
+    B, T, C = x.shape
+    x_ln = block.ln1(x)
+    q, k, v = attn.qkv(x_ln).split(C, dim=-1)
+    q = q.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
+    k = k.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
+    v = v.view(B, T, attn.n_head, attn.head_size).transpose(1, 2)
+    if getattr(attn, "pos_encoding", "learned") == "rope":
+        q = attn.rope(q)
+        k = attn.rope(k)
+    return q, k, v
+
+
+def _compute_all_attention(
+    session: "DiagnosticSession",
+    window_offset: int = 0,
+) -> dict:
+    """Eagerly compute attention weights for ALL layers × ALL heads in ONE pass.
+
+    Single forward propagation through the model; at each layer, extract Q/K/V
+    and compute attention for all heads before advancing to the next layer.
+
+    Returns a dict with keys:
+    - available: True if successful
+    - window_start, total_positions: window metadata
+    - token_labels: tokens in the windowed range
+    - n_layer, n_head: counts
+    - weights: [layer][head][w][w] list of windowed softmax weights
+    Or {"available": False, "reason": "..."} on error.
+    """
+    try:
+        model = session.model
+        if not hasattr(model, "blocks") or len(model.blocks) == 0:
+            return {"available": False, "reason": "Model has no blocks"}
+
+        all_tokens = session.prompt_tokens + session.token_history
+        n_layer = len(model.blocks)
+        device = session.device
+
+        with torch.inference_mode():
+            idx = torch.tensor([all_tokens], dtype=torch.long, device=device)
+
+            # Embed and apply positional encoding (once)
+            x = model.token_emb(idx)
+            if hasattr(model, "pos_emb"):
+                x = x + model.pos_emb(torch.arange(x.shape[1], device=device))
+
+            T = x.shape[1]
+            # Shared windowing: same logic as _compute_attention_weights
+            window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+            end = max(window, T - max(window_offset, 0))
+            start = end - window
+
+            token_labels = [session.tokenizer.decode([tid]) for tid in all_tokens[start:end]]
+
+            # Weights array: [layer][head][window][window]
+            weights_all_layers = []
+
+            # Single pass through all blocks
+            for layer in range(n_layer):
+                block = model.blocks[layer]
+                attn = block.attn
+
+                # Extract Q/K/V using shared core (§67/§68 fixes applied here)
+                q, k, v = _layer_qkv(block, x)
+                head_size = attn.head_size
+                n_head = attn.n_head
+
+                # Compute attention for all heads in this layer
+                scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_size)
+                causal_mask = torch.tril(torch.ones(T, T, device=device, dtype=torch.bool))
+                scores = scores.masked_fill(~causal_mask, float("-inf"))
+                full_weights = torch.softmax(scores, dim=-1)[0]  # [n_head, T, T]
+
+                # Window and convert to list for each head
+                weights_this_layer = [
+                    full_weights[head, start:end, start:end].tolist()
+                    for head in range(n_head)
+                ]
+                weights_all_layers.append(weights_this_layer)
+
+                # Advance to next layer (must handle MoE tuple return; see DESIGN_DECISIONS §67)
+                x = block(x)
+                if isinstance(x, tuple):
+                    x = x[0]
+
+            return {
+                "available": True,
+                "window_start": start,
+                "total_positions": T,
+                "token_labels": token_labels,
+                "n_layer": n_layer,
+                "n_head": n_head,
+                "weights": weights_all_layers,
+            }
+    except Exception as e:
+        training_log.warning("All-attention capture failed: %s", e)
+        return {"available": False, "reason": "Capture failed"}
 
 
 def _compute_activation_extras(vector: torch.Tensor) -> dict:
@@ -696,6 +795,17 @@ def _execute_forward_pass(
             result = _compute_attention_weights(session, layer, head, qkv_detail=qkv_detail, window_offset=attention_window_offset)
             attention_data = result if result is not None else {"available": False, "reason": "Capture failed"}
 
+        # Eagerly capture all-layer × all-head attention on every step/peek.
+        # Round to 4 decimals to keep payload reasonable (~25-35KB).
+        all_attention_maps = _compute_all_attention(session, window_offset=attention_window_offset)
+        if all_attention_maps.get("available"):
+            # Round all weights to 4 decimals
+            for layer_weights in all_attention_maps.get("weights", []):
+                for head_weights in layer_weights:
+                    for row in head_weights:
+                        for i in range(len(row)):
+                            row[i] = round(row[i], 4)
+
         activation_data = _compute_activation_extras(logits_last)
 
         return DiagnosticSnapshot(
@@ -705,6 +815,7 @@ def _execute_forward_pass(
             generated_token=generated_token,
             nodes=nodes_dict,
             attention=attention_data,
+            attention_maps=all_attention_maps,
             activation_summaries=activation_data,
             lm_head=lm_head_data,
             position_tokens=position_tokens,

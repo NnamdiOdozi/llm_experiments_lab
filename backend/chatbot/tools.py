@@ -340,6 +340,7 @@ def _trim_diagnostic_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     attention = snapshot.get("attention")
     if isinstance(attention, dict) and "qkv_detail" in attention:
         trimmed["attention"] = {k: v for k, v in attention.items() if k != "qkv_detail"}
+    # Keep attention_maps as-is (small windowed weights are already context-friendly)
     return trimmed
 
 
