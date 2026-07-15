@@ -126,3 +126,133 @@ async def test_stop_idle_workers_skips_non_ready_sessions(temp_db, monkeypatch):
     count = await idle_monitor.stop_idle_workers()
 
     assert count == 0
+
+
+# --- T7: Reconciler updates error to failed (Part 5 / D6) ---
+async def test_reconciler_updates_error_to_failed(temp_db, monkeypatch):
+    """Part 5 / D6: Reconciler converges ERROR endpoint status to FAILED."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-error",
+    )
+
+    async def fake_get_endpoint(endpoint_id):
+        return {"status": {"state": "ERROR"}}
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    await idle_monitor.reconcile_worker_sessions()
+
+    session = await db.get_worker_session("worker-cpu")
+    assert session["worker_status"] == WorkerStatus.FAILED
+
+
+# --- T8: Reconciler updates stopping to shutting_down (Part 5 / D6) ---
+async def test_reconciler_updates_stopping_to_shutting_down(temp_db, monkeypatch):
+    """Part 5 / D6: Reconciler maps STOPPING → SHUTTING_DOWN (gives SHUTTING_DOWN its writer)."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-stopping",
+    )
+
+    async def fake_get_endpoint(endpoint_id):
+        return {"status": {"state": "STOPPING"}}
+
+    async def fake_probe(url):
+        return True
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
+
+    await idle_monitor.reconcile_worker_sessions()
+
+    session = await db.get_worker_session("worker-cpu")
+    assert session["worker_status"] == WorkerStatus.SHUTTING_DOWN
+
+
+async def test_reconciler_skips_sessions_locked_by_a_provisioning_task(temp_db, monkeypatch):
+    """A live provisioning task owns its session (holds the per-device lock);
+    the reconciler must not fight it — no live-state fetch, no DB write."""
+    from backend.nebius import worker_manager
+
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.STARTING, nebius_endpoint_id="aiendpoint-midflight",
+    )
+
+    async def fail_if_called(endpoint_id):
+        raise AssertionError("reconciler must not query a locked session's endpoint")
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fail_if_called)
+
+    lock = worker_manager._lock_for("worker-cpu")
+    async with lock:
+        await idle_monitor.reconcile_worker_sessions()
+
+    session = await db.get_worker_session("worker-cpu")
+    assert session["worker_status"] == WorkerStatus.STARTING  # untouched
+
+
+async def test_reconciler_one_session_failure_does_not_stop_the_scan(temp_db, monkeypatch):
+    """One session's CLI failure must not prevent the others from converging."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY, nebius_endpoint_id="aiendpoint-cli-broken",
+    )
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session(
+        "worker-gpu", worker_status=WorkerStatus.STARTING, nebius_endpoint_id="aiendpoint-actually-stopped",
+    )
+
+    async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-cli-broken":
+            # Not a NebiusEndpointError (that maps to exists=False) — an
+            # unexpected crash, e.g. malformed CLI output.
+            raise RuntimeError("unexpected CLI output")
+        return {"status": {"state": "STOPPED"}}
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    await idle_monitor.reconcile_worker_sessions()
+
+    gpu = await db.get_worker_session("worker-gpu")
+    assert gpu["worker_status"] == WorkerStatus.STOPPED  # still converged
+
+
+async def test_stop_idle_workers_recheck_skips_worker_touched_after_scan_read(temp_db, monkeypatch):
+    """TOCTOU guard: a worker claimed (touched) between the scan's session
+    read and the stop call must not be stopped under its new run."""
+    # Nonzero timeout: overdue per the ancient last_activity_at below, but a
+    # fresh touch puts it comfortably back under the limit (timeout=0 would
+    # make even a just-touched worker count as idle).
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", idle_timeout_seconds=3600)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY, nebius_endpoint_id="aiendpoint-claimed",
+        last_activity_at="2020-01-01 00:00:00",
+    )
+
+    real_get = db.get_worker_session
+    touched = {"done": False}
+
+    async def get_and_touch(session_id):
+        # Simulate a run claiming the worker between the scan's list read
+        # and the pre-stop re-check: the FIRST re-fetch inside
+        # stop_idle_workers sees a freshly touched clock.
+        if not touched["done"]:
+            touched["done"] = True
+            await db.touch_worker_session(session_id)
+        return await real_get(session_id)
+
+    async def fail_if_called(endpoint_id):
+        raise AssertionError("must not stop a worker that was touched after the scan read")
+
+    monkeypatch.setattr(db, "get_worker_session", get_and_touch)
+    monkeypatch.setattr(endpoints_client, "stop_endpoint", fail_if_called)
+
+    count = await idle_monitor.stop_idle_workers()
+
+    assert count == 0
+    session = await real_get("worker-cpu")
+    assert session["worker_status"] == WorkerStatus.READY

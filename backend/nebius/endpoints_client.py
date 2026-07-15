@@ -149,6 +149,22 @@ async def find_running_endpoint(name: str) -> dict | None:
     return await find_endpoint(name, "RUNNING")
 
 
+async def find_endpoint_any_state(name: str) -> dict | None:
+    """Live Nebius endpoint matching name, any state, or None.
+
+    Part 3 / D3: Adoption fix — replaces the separate find_running_endpoint +
+    find_endpoint(...,"STOPPED") pair. A console-started or console-stopped
+    endpoint in any transient state (STARTING, STOPPING, RUNNING, STOPPED)
+    should be adopted, never duplicated. Only ERROR endpoints are recreated
+    (via delete + create flow in ensure_worker). Returns the endpoint dict
+    or None if not found.
+    """
+    for ep in await list_endpoints():
+        if ep.get("metadata", {}).get("name") == name:
+            return ep
+    return None
+
+
 async def get_endpoint(endpoint_id: str) -> dict:
     """Current lifecycle status + public URL for an endpoint."""
     output = await _run_cli("ai", "endpoint", "get", endpoint_id, "--format", "json")
@@ -207,3 +223,21 @@ async def start_endpoint(endpoint_id: str) -> None:
 
 async def stop_endpoint(endpoint_id: str) -> None:
     await _run_cli("ai", "endpoint", "stop", "--id", endpoint_id)
+
+
+async def delete_endpoint(endpoint_id: str) -> None:
+    """Delete an endpoint via CLI.
+
+    Part 2 / D2: ERROR endpoints can only be recovered by deletion, not
+    restart — this is the only recovery path for an endpoint that's stuck
+    in ERROR state (confirmed by Nebius support). If the endpoint is already
+    gone (NotFound), treat as success (idempotent). Any other failure re-raises
+    so it's visible in logs instead of being silently swallowed.
+    """
+    try:
+        await _run_cli("ai", "endpoint", "delete", "--id", endpoint_id)
+    except NebiusEndpointError as exc:
+        if "notfound" not in str(exc).lower():
+            raise
+        # Endpoint already gone — deletion is idempotent; treat as success
+        pass

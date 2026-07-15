@@ -130,6 +130,19 @@ class Settings(BaseSettings):
     # checking live status on timeout before assuming deleted, so an
     # under-estimate here is no longer as costly as it used to be.
     nebius_endpoint_start_timeout_seconds: int = 300
+    # Bounded retry for start_endpoint rejections (Part 7 / D7) — when the
+    # poll loop observes a settled STOPPED and start hasn't succeeded since,
+    # retry start_endpoint up to this many times total (initial attempt +
+    # retries), with poll intervals as natural spacing between attempts.
+    nebius_endpoint_start_max_retries: int = 3
+    # Polling interval for _start_remote_run's busy-wait loop (Part 7 / D1) —
+    # when WorkerBusyError is raised, poll db.get_worker_session at this
+    # interval until READY or timeout.
+    worker_busy_poll_interval_seconds: int = 5
+    # Timeout for _start_remote_run's busy-wait loop (Part 7 / D1) —
+    # wait this long for a busy worker to become READY before marking the run
+    # FAILED. Default = ready_timeout + 60s buffer for one final retry cycle.
+    worker_busy_wait_timeout_seconds: int = 420  # 360 + 60
 
     @field_validator("nebius_subnet_id")
     @classmethod

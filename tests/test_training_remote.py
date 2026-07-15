@@ -744,3 +744,89 @@ async def test_list_open_runs_include_terminal_skips_live_proxy_for_terminal_run
     assert resp.status_code == 200
     runs = {r["id"]: r for r in resp.json()}
     assert runs[run_id]["status"] == "cancelled"
+
+
+# --- T5: Busy wait retries until ready (Part 7 / D1) ---
+async def test_busy_wait_retries_until_ready(temp_db, client, monkeypatch):
+    """Part 7 / D1: _start_remote_run with a busy worker should poll and wait
+    until it becomes READY, not immediately fail with run left QUEUED forever."""
+    exp_id = temp_db
+    monkeypatch.setattr(training_module.settings, "worker_busy_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(training_module.settings, "worker_busy_wait_timeout_seconds", 1.0)
+
+    busy_call_count = [0]
+
+    async def fake_ensure_worker(device):
+        busy_call_count[0] += 1
+        if busy_call_count[0] < 3:
+            raise worker_manager.WorkerBusyError("still busy")
+        # Third call: worker ready
+        await db.update_worker_session("worker-cpu", worker_status=WorkerStatus.READY,
+            nebius_endpoint_id="aiendpoint-abc123", endpoint_url="https://cpu.tunnel.nebius.cloud")
+        return await db.get_worker_session("worker-cpu")
+
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+
+    fake_client = FakeAsyncClient([
+        FakeResponse({"id": 99}),
+        FakeResponse({"run_id": 7, "status": "queued"}),
+    ])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    await created_tasks[0]
+
+    db_run = await db.get_training_run(run_id)
+    assert db_run["status"] == "running"  # Should transition to RUNNING, not stuck QUEUED
+    assert busy_call_count[0] >= 3  # At least 3 attempts
+
+
+# --- T6: Busy wait timeout fails run (Part 7 / D1) ---
+async def test_busy_wait_timeout_fails_run(temp_db, client, monkeypatch):
+    """Part 7 / D1: If worker never becomes READY within timeout, mark run FAILED."""
+    exp_id = temp_db
+    monkeypatch.setattr(training_module.settings, "worker_busy_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(training_module.settings, "worker_busy_wait_timeout_seconds", 0.05)
+
+    async def fake_ensure_worker(device):
+        raise worker_manager.WorkerBusyError("always busy")
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    run_id = resp.json()["run_id"]
+    await created_tasks[0]
+
+    db_run = await db.get_training_run(run_id)
+    assert db_run["status"] == "failed"
+    assert "did not become ready" in db_run["error_message"].lower()

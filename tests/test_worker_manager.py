@@ -16,17 +16,14 @@ async def temp_db(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_live_endpoint_found_by_default(monkeypatch):
-    """create_new_worker() now checks for a live RUNNING endpoint and a
-    STOPPED one before creating fresh — default every test to "neither
-    found" (matching behavior before those checks existed) so each test
+    """Part 3 / D3: create_new_worker() now checks for an endpoint in any state
+    using find_endpoint_any_state before creating fresh — default every test
+    to "none found" (matching behavior before adoption existed) so each test
     doesn't need its own boilerplate mock for them. Tests that actually
-    exercise adoption/restart override these themselves."""
-    async def fake_find_running_endpoint(name):
+    exercise adoption override this themselves."""
+    async def fake_find_endpoint_any_state(name):
         return None
-    async def fake_find_endpoint(name, state):
-        return None
-    monkeypatch.setattr(endpoints_client, "find_running_endpoint", fake_find_running_endpoint)
-    monkeypatch.setattr(endpoints_client, "find_endpoint", fake_find_endpoint)
+    monkeypatch.setattr(endpoints_client, "find_endpoint_any_state", fake_find_endpoint_any_state)
 
 
 @pytest.fixture(autouse=True)
@@ -254,32 +251,50 @@ async def test_ensure_worker_serializes_concurrent_calls_for_same_device(temp_db
     assert successes[0]["nebius_endpoint_id"] == "aiendpoint-fresh"
 
 
-async def test_ensure_worker_skips_straight_to_create_when_shutting_down(temp_db, monkeypatch):
+async def test_ensure_worker_settles_then_starts_when_endpoint_shutting_down(temp_db, monkeypatch):
+    """Contract updated with the decision-table rework: DB SHUTTING_DOWN is
+    now just the reconciler's cache of Nebius STOPPING — live state decides.
+    The old behavior ("skip straight to create") paid for a duplicate
+    endpoint; now a STOPPING endpoint is adopted, the poll loop waits for it
+    to settle to STOPPED, and only then issues the start. No create, and no
+    blind start into a still-stopping endpoint (the §79a overlap hazard)."""
     await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
     await db.update_worker_session(
         "worker-cpu", worker_status=WorkerStatus.SHUTTING_DOWN, nebius_endpoint_id="aiendpoint-dying",
     )
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
 
-    async def fail_if_called(endpoint_id):
-        raise AssertionError("should not attempt to start a worker that's shutting down")
+    calls = {"gets": 0, "starts": 0}
 
-    async def fake_create_endpoint(**kwargs):
-        return "aiendpoint-fresh"
+    async def fake_start_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-dying"
+        calls["starts"] += 1
+
+    async def fail_if_created(**kwargs):
+        raise AssertionError("should adopt and restart the settling endpoint, not create a duplicate")
 
     async def fake_get_endpoint(endpoint_id):
-        return {
-            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
-            "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
-        }
+        calls["gets"] += 1
+        base = {"spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"}}
+        if calls["gets"] <= 2:
+            # Still settling — no start may be issued while STOPPING.
+            assert calls["starts"] == 0, "start_endpoint fired while endpoint was still STOPPING"
+            return {**base, "status": {"state": "STOPPING"}}
+        if calls["starts"] == 0:
+            return {**base, "status": {"state": "STOPPED"}}
+        return {**base, "status": {"state": "RUNNING", "public_endpoints": ["https://revived.tunnel.nebius.cloud"]}}
 
-    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
-    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_created)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
 
     worker = await worker_manager.ensure_worker("cpu")
 
-    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+    assert calls["starts"] == 1
+    assert worker["nebius_endpoint_id"] == "aiendpoint-dying"
     assert worker["worker_status"] == WorkerStatus.READY
+    assert worker["endpoint_url"] == "https://revived.tunnel.nebius.cloud"
 
 
 async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicating(temp_db, monkeypatch):
@@ -287,10 +302,10 @@ async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicatin
     out-of-band (e.g. via scripts/create_nebius_endpoint.py before it wrote
     to the DB) was already RUNNING, but the app's DB had no row for it —
     ensure_worker created a second, duplicate CPU endpoint. Must adopt the
-    live one by name instead."""
-    async def fake_find_running_endpoint(name):
+    live one by name instead. Part 3 / D3 now searches any state, not just RUNNING."""
+    async def fake_find_endpoint_any_state(name):
         assert name == "llm-lab-cpu-trainer"
-        return {"metadata": {"id": "aiendpoint-adopted"}}
+        return {"metadata": {"id": "aiendpoint-adopted"}, "status": {"state": "RUNNING"}}
 
     async def fail_if_called(**kwargs):
         raise AssertionError("should not create a duplicate when a live RUNNING endpoint already exists")
@@ -302,7 +317,7 @@ async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicatin
             "status": {"state": "RUNNING", "public_endpoints": ["https://adopted.tunnel.nebius.cloud"]},
         }
 
-    monkeypatch.setattr(endpoints_client, "find_running_endpoint", fake_find_running_endpoint)
+    monkeypatch.setattr(endpoints_client, "find_endpoint_any_state", fake_find_endpoint_any_state)
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
 
@@ -316,13 +331,12 @@ async def test_ensure_worker_adopts_existing_live_endpoint_instead_of_duplicatin
 async def test_create_new_worker_restarts_stopped_endpoint_instead_of_creating(temp_db, monkeypatch):
     """A stopped endpoint the app's DB doesn't know about (e.g. the local
     worker_sessions row was lost, or it was created out-of-band) should be
-    restarted, not abandoned in favor of a brand new one — this was the
-    2026-07-12 GPU incident: a stopped endpoint sat idle while a second one
-    got created for the same device type."""
-    async def fake_find_endpoint(name, state):
+    adopted and restarted, not abandoned — this was the 2026-07-12 GPU incident:
+    a stopped endpoint sat idle while a second one got created. Part 3 / D3 now
+    uses find_endpoint_any_state which finds it in any state."""
+    async def fake_find_endpoint_any_state(name):
         assert name == "llm-lab-gpu-trainer"
-        assert state == "STOPPED"
-        return {"metadata": {"id": "aiendpoint-restarted"}}
+        return {"metadata": {"id": "aiendpoint-restarted"}, "status": {"state": "STOPPED"}}
 
     async def fail_if_called(**kwargs):
         raise AssertionError("should not create a new endpoint when a stopped one already exists")
@@ -339,7 +353,7 @@ async def test_create_new_worker_restarts_stopped_endpoint_instead_of_creating(t
             "status": {"state": "RUNNING", "public_endpoints": ["https://restarted.tunnel.nebius.cloud"]},
         }
 
-    monkeypatch.setattr(endpoints_client, "find_endpoint", fake_find_endpoint)
+    monkeypatch.setattr(endpoints_client, "find_endpoint_any_state", fake_find_endpoint_any_state)
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
@@ -369,19 +383,36 @@ async def test_create_new_worker_resets_stale_idle_clock(temp_db, monkeypatch):
         last_activity_at="2020-01-01 00:00:00",
     )
 
+    # Stateful fake: STOPPED until start_endpoint is called, RUNNING after —
+    # keeps this exercising the restart path under the decision-table flow
+    # (a fake that's RUNNING from the outset would take the adopt-in-place
+    # branch and never restart anything).
+    started = {"called": False}
+
     async def fake_start_endpoint(endpoint_id):
         assert endpoint_id == "aiendpoint-old"
+        started["called"] = True
 
     async def fake_get_endpoint(endpoint_id):
+        if not started["called"]:
+            return {"spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"}, "status": {"state": "STOPPED"}}
         return {
             "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
             "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
         }
 
+    async def fail_if_created(**kwargs):
+        raise AssertionError("must restart the stopped endpoint, not create a new one")
+
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_created)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
 
     await worker_manager.ensure_worker("cpu")
+
+    assert started["called"]
 
     session = await db.get_worker_session("worker-cpu")
     from backend.nebius.idle_monitor import seconds_since
@@ -389,6 +420,11 @@ async def test_create_new_worker_resets_stale_idle_clock(temp_db, monkeypatch):
 
 
 async def test_ensure_worker_debounces_when_already_provisioning(temp_db, monkeypatch):
+    """Real incident, 2026-07-15: ensure_worker checked worker_status blindly.
+    If DB says PROVISIONING but Nebius endpoint is actually gone (manual stop) or
+    in a contradicting state, we'd raise WorkerBusyError forever. Must verify
+    against live state — only treat as busy if endpoint is genuinely mid-flight
+    (STARTING or RUNNING). See docs/DESIGN_DECISIONS.md §79a."""
     await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
     await db.update_worker_session(
         "worker-cpu", worker_status=WorkerStatus.PROVISIONING, nebius_endpoint_id="aiendpoint-existing",
@@ -398,9 +434,9 @@ async def test_ensure_worker_debounces_when_already_provisioning(temp_db, monkey
         raise AssertionError("should not create or start a second worker while one is already mid-provision")
 
     async def fake_get_endpoint(endpoint_id):
-        # Nebius agrees it's genuinely still provisioning — the busy claim
-        # is real, must not be treated as stale. See docs/DESIGN_DECISIONS.md.
-        return {"status": {"state": "PROVISIONING"}}
+        # Nebius agrees it's genuinely still mid-flight — the busy claim is real.
+        # STARTING is the actual Nebius state for a provisioning endpoint.
+        return {"status": {"state": "STARTING"}}
 
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_called)
@@ -469,18 +505,34 @@ async def test_ensure_worker_ignores_stale_busy_status_when_endpoint_was_stopped
 
 
 async def test_ensure_worker_starts_stopped_endpoint(temp_db, monkeypatch):
+    """Regression test: a stopped endpoint should be restarted, not abandoned.
+    If DB says STOPPED but Nebius still has the endpoint (even if dead for a moment),
+    start_endpoint should be called to restart it."""
     await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
     await db.update_worker_session(
         "worker-gpu", worker_status=WorkerStatus.STOPPED, nebius_endpoint_id="aiendpoint-existing",
+        endpoint_url="https://existing.tunnel.nebius.cloud",
     )
 
+    # Stateful fake: the endpoint stays STOPPED until start_endpoint is
+    # actually issued, then reports RUNNING. (The old fake reported RUNNING
+    # from the outset — under the decision-table flow that's the adopt-in-
+    # place case, where NOT issuing a start command is the whole point.)
     started = {}
 
     async def fake_start_endpoint(endpoint_id):
         started["endpoint_id"] = endpoint_id
 
     async def fake_get_endpoint(endpoint_id):
-        return {"status": {"state": "RUNNING", "public_endpoints": ["https://restarted.tunnel.nebius.cloud"]}}
+        if "endpoint_id" not in started:
+            return {"spec": {"platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb"}, "status": {"state": "STOPPED"}}
+        return {
+            "spec": {"platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://restarted.tunnel.nebius.cloud"]}
+        }
+
+    async def fake_probe(url):
+        return True  # Tunnel is reachable
 
     async def fail_if_called(**kwargs):
         raise AssertionError("should not create a new endpoint when one already exists")
@@ -488,6 +540,9 @@ async def test_ensure_worker_starts_stopped_endpoint(temp_db, monkeypatch):
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
 
     worker = await worker_manager.ensure_worker("cuda")
 
@@ -540,6 +595,7 @@ async def test_ensure_worker_keeps_waiting_when_start_times_out_but_endpoint_sti
     await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
     await db.update_worker_session(
         "worker-gpu", worker_status=WorkerStatus.STOPPED, nebius_endpoint_id="aiendpoint-slow",
+        endpoint_url="https://slow.tunnel.nebius.cloud",
     )
 
     async def fake_start_endpoint(endpoint_id):
@@ -550,11 +606,18 @@ async def test_ensure_worker_keeps_waiting_when_start_times_out_but_endpoint_sti
 
     async def fake_get_endpoint(endpoint_id):
         assert endpoint_id == "aiendpoint-slow"
-        return {"status": {"state": "RUNNING", "public_endpoints": ["https://slow.tunnel.nebius.cloud"]}}
+        return {
+            "spec": {"platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://slow.tunnel.nebius.cloud"]}
+        }
+
+    async def fake_probe(url):
+        return True
 
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_called)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
 
     worker = await worker_manager.ensure_worker("cuda")
 
@@ -639,6 +702,13 @@ async def test_ensure_worker_retries_start_once_endpoint_settles_to_stopped(temp
     monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 10)
     monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 1)
 
+    # New-contract sequence: while the endpoint is mid-STOPPING the decision
+    # table deliberately issues NO start at all (the old code fired blindly
+    # into STOPPING and got rejected — one fewer overlapping op now). The
+    # poll loop then observes settled STOPPED and issues the start; if that
+    # is rejected (still-settling race), the NEXT STOPPED observation
+    # retries. So: STOPPING → STOPPED (start #1 rejected) → STOPPED
+    # (start #2 accepted) → RUNNING.
     start_calls = {"count": 0}
 
     async def fake_start_endpoint(endpoint_id):
@@ -653,25 +723,235 @@ async def test_ensure_worker_retries_start_once_endpoint_settles_to_stopped(temp
 
     async def fake_get_endpoint(endpoint_id):
         get_calls["count"] += 1
+        base = {"metadata": {"id": endpoint_id}, "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"}}
         if get_calls["count"] == 1:
-            # The fallback check right after the first start_endpoint()
-            # failure — endpoint still exists, just not up yet.
-            return {"status": {"state": "STOPPING"}}
-        if get_calls["count"] == 2:
-            # First poll-loop iteration — settled to STOPPED, should
-            # trigger exactly one retry of start_endpoint().
-            return {"status": {"state": "STOPPED"}}
-        return {"status": {"state": "RUNNING", "public_endpoints": ["https://recovered.tunnel.nebius.cloud"]}}
+            # Decision-table live check — still mid-STOPPING, no start issued.
+            return {**base, "status": {"state": "STOPPING"}}
+        if start_calls["count"] < 2:
+            # Settled to STOPPED; stays STOPPED until a start is ACCEPTED.
+            return {**base, "status": {"state": "STOPPED"}}
+        return {
+            **base,
+            "status": {"state": "RUNNING", "public_endpoints": ["https://recovered.tunnel.nebius.cloud"]}
+        }
 
     async def fake_sleep(seconds):
         pass
 
+    async def fake_probe(url):
+        return True
+
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
     monkeypatch.setattr(worker_manager.asyncio, "sleep", fake_sleep)
 
     worker = await worker_manager.ensure_worker("cpu")
 
-    assert start_calls["count"] == 2  # initial (rejected) + exactly one retry
+    assert start_calls["count"] == 2  # first settle-start (rejected) + exactly one retry
     assert worker["worker_status"] == WorkerStatus.READY
     assert worker["endpoint_url"] == "https://recovered.tunnel.nebius.cloud"
+
+
+# --- T1: ERROR endpoint deleted not restarted (Part 2 / D2) ---
+async def test_error_endpoint_deleted_not_restarted(temp_db, monkeypatch):
+    """Part 2 / D2: ERROR endpoints can only be recovered by deletion, not restart.
+    When ensure_worker encounters an ERROR state endpoint, it must delete and recreate,
+    never attempt start_endpoint on it."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-error", endpoint_url="https://error.tunnel.nebius.cloud",
+    )
+
+    deleted_ids = []
+    created_count = 0
+
+    async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-error":
+            return {"status": {"state": "ERROR"}}
+        elif endpoint_id == "aiendpoint-fresh":
+            return {
+                "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+                "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
+            }
+        raise endpoints_client.NebiusEndpointError(f"unknown endpoint {endpoint_id}")
+
+    async def fake_delete_endpoint(endpoint_id):
+        deleted_ids.append(endpoint_id)
+
+    async def fake_start_endpoint(endpoint_id):
+        raise endpoints_client.NebiusEndpointError("should not start ERROR endpoint")
+
+    async def fake_create_endpoint(**kwargs):
+        nonlocal created_count
+        created_count += 1
+        return "aiendpoint-fresh"
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "delete_endpoint", fake_delete_endpoint)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert "aiendpoint-error" in deleted_ids
+    assert created_count == 1
+    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+
+
+# --- T2: Adoption endpoint in any state (Part 3 / D3) ---
+async def test_adoption_endpoint_in_any_state(temp_db, monkeypatch):
+    """Part 3 / D3: create_new_worker must adopt endpoints in any transient state,
+    not just RUNNING or STOPPED. A console-started or console-stopped endpoint should
+    never be duplicated."""
+    async def fake_find_endpoint_any_state(name):
+        # Return endpoint in STARTING state (mid-provision)
+        return {"metadata": {"id": "aiendpoint-starting"}, "status": {"state": "STARTING"}}
+
+    async def fail_if_create_called(**kwargs):
+        raise AssertionError("should not create when endpoint exists in STARTING state")
+
+    async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-starting":
+            return {
+                "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+                "status": {"state": "RUNNING", "public_endpoints": ["https://adopted.tunnel.nebius.cloud"]},
+            }
+        raise endpoints_client.NebiusEndpointError(f"unknown {endpoint_id}")
+
+    monkeypatch.setattr(endpoints_client, "find_endpoint_any_state", fake_find_endpoint_any_state)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_if_create_called)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["nebius_endpoint_id"] == "aiendpoint-starting"
+    assert worker["worker_status"] == WorkerStatus.READY
+
+
+# --- T3: Dead tunnel stops before recreate (Part 2 / D4) ---
+async def test_dead_tunnel_stops_before_recreate(temp_db, monkeypatch):
+    """Part 2 / D4: When an endpoint's tunnel is dead (RUNNING but unreachable),
+    stop it first before creating a new one. This prevents orphaned endpoints burning money."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.READY,
+        nebius_endpoint_id="aiendpoint-dead", endpoint_url="https://dead.tunnel.nebius.cloud",
+    )
+
+    stopped_ids = []
+    created_count = 0
+
+    async def fake_get_endpoint(endpoint_id):
+        if endpoint_id == "aiendpoint-dead":
+            return {"status": {"state": "RUNNING"}}
+        elif endpoint_id == "aiendpoint-fresh":
+            return {
+                "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+                "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
+            }
+        raise endpoints_client.NebiusEndpointError(f"unknown {endpoint_id}")
+
+    async def fake_probe(url):
+        if url == "https://dead.tunnel.nebius.cloud":
+            return False  # Dead tunnel
+        return True
+
+    async def fake_stop_endpoint(endpoint_id):
+        stopped_ids.append(endpoint_id)
+
+    async def fake_create_endpoint(**kwargs):
+        nonlocal created_count
+        created_count += 1
+        return "aiendpoint-fresh"
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
+    monkeypatch.setattr(endpoints_client, "stop_endpoint", fake_stop_endpoint)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert "aiendpoint-dead" in stopped_ids
+    assert created_count == 1
+    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+
+
+# --- T4: Start retries bounded (Part 7 / D7) ---
+async def test_start_retries_bounded(temp_db, monkeypatch):
+    """Part 7 / D7: Poll loop retries start_endpoint up to max_retries attempts
+    (default 3) when STOPPED is observed, not just once forever."""
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_start_max_retries", 2)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    # Without this the loop runs ready_timeout/0.01 = tens of thousands of
+    # iterations — this single missing patch once cost the suite 370s.
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
+
+    start_attempts = 0
+
+    async def fake_create_endpoint(**kwargs):
+        return "aiendpoint-test"
+
+    async def fake_get_endpoint(endpoint_id):
+        nonlocal start_attempts
+        # Always return STOPPED so retry logic keeps triggering
+        return {"status": {"state": "STOPPED"}}
+
+    async def fake_start_endpoint(endpoint_id):
+        nonlocal start_attempts
+        start_attempts += 1
+        # Fail each time to force retries
+        raise endpoints_client.NebiusEndpointError("start rejected")
+
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
+
+    with pytest.raises(worker_manager.WorkerProvisionError):
+        await worker_manager.ensure_worker("cpu")
+
+    # Should be max_retries attempts (2) within poll loop, not unlimited retries
+    assert start_attempts <= 2
+
+
+async def test_ensure_worker_adopts_running_endpoint_with_unknown_reachability_in_place(temp_db, monkeypatch):
+    """Regression pin for a review-caught bug: a session with no stored
+    endpoint_url has reachable=None (unknown — the probe never ran), and the
+    dead-tunnel branch used `not reachable`, so None was treated like a
+    CONFIRMED-dead tunnel: the healthy RUNNING endpoint was stopped and a
+    duplicate created. Unknown reachability must adopt in place — no stop,
+    no create, no start — and let the poll loop record the URL."""
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+    await db.update_worker_session(
+        "worker-cpu", worker_status=WorkerStatus.STOPPED, nebius_endpoint_id="aiendpoint-healthy",
+        # deliberately NO endpoint_url — reachability cannot be probed
+    )
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
+
+    async def fake_get_endpoint(endpoint_id):
+        return {
+            "spec": {"platform": "cpu-d3", "preset": "4vcpu-16gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://healthy.tunnel.nebius.cloud"]},
+        }
+
+    async def fail_stop(endpoint_id):
+        raise AssertionError("must not stop a RUNNING endpoint whose reachability is merely unknown")
+
+    async def fail_create(**kwargs):
+        raise AssertionError("must not create a duplicate for a healthy RUNNING endpoint")
+
+    async def fail_start(endpoint_id):
+        raise AssertionError("must not issue start on an already-RUNNING endpoint (§79a overlap)")
+
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(endpoints_client, "stop_endpoint", fail_stop)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fail_create)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_start)
+
+    worker = await worker_manager.ensure_worker("cpu")
+
+    assert worker["worker_status"] == WorkerStatus.READY
+    assert worker["nebius_endpoint_id"] == "aiendpoint-healthy"
+    assert worker["endpoint_url"] == "https://healthy.tunnel.nebius.cloud"

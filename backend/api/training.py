@@ -3,6 +3,7 @@
 import asyncio
 import itertools
 import json
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -195,18 +196,45 @@ async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
     would receive it).
     """
     try:
-        try:
-            worker = await worker_manager.ensure_worker(device)
-        except worker_manager.WorkerBusyError as exc:
-            # Not a failure — a different request already has this device's
-            # worker mid-provision. Leave the run's own status untouched (no
-            # FAILED) so the user can just retry once the worker's ready,
-            # instead of spawning a second endpoint for the same device.
-            training_log.info("Worker busy, run not started — run_id=%d: %s", run_id, exc)
-            return
-        except worker_manager.WorkerProvisionError as exc:
-            await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
-            training_log.error("Worker provisioning failed — run_id=%d: %s", run_id, exc)
+        # Part 7 / D1: Bounded wait on WorkerBusyError. When a different run has the
+        # worker mid-provisioning, instead of failing immediately, poll the worker
+        # status until it becomes READY (then re-call ensure_worker for fast-path
+        # reuse) or until we time out. This prevents WorkerBusyError from leaving
+        # the run QUEUED forever — a background task can afford to wait.
+        # The fast WorkerBusyError for HTTP callers inside ensure_worker stays
+        # exactly as is.
+        start_time = time.monotonic()
+        end_time = start_time + settings.worker_busy_wait_timeout_seconds
+        while time.monotonic() < end_time:
+            try:
+                worker = await worker_manager.ensure_worker(device)
+                break  # Got the worker, proceed to dispatch
+            except worker_manager.WorkerBusyError as exc:
+                remaining = end_time - time.monotonic()
+                if remaining <= 0:
+                    # Timeout reached
+                    await db.update_training_run(
+                        run_id, status=RunStatus.FAILED,
+                        error_message=f"Worker busy; did not become ready within {settings.worker_busy_wait_timeout_seconds}s",
+                    )
+                    training_log.error(
+                        "Worker busy timeout — run_id=%d device=%s: %s", run_id, device, exc,
+                    )
+                    return
+                # Not yet timeout — wait and retry
+                wait_time = min(settings.worker_busy_poll_interval_seconds, remaining)
+                await asyncio.sleep(wait_time)
+            except worker_manager.WorkerProvisionError as exc:
+                await db.update_training_run(run_id, status=RunStatus.FAILED, error_message=str(exc))
+                training_log.error("Worker provisioning failed — run_id=%d: %s", run_id, exc)
+                return
+        else:
+            # Shouldn't reach here (loop exits via break or return above), but safety
+            await db.update_training_run(
+                run_id, status=RunStatus.FAILED,
+                error_message=f"Worker busy; did not become ready within {settings.worker_busy_wait_timeout_seconds}s",
+            )
+            training_log.error("Worker busy timeout (via loop exit) — run_id=%d", run_id)
             return
 
         endpoint_url = worker["endpoint_url"]
