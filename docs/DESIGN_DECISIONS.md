@@ -4058,6 +4058,66 @@ Tests: `tests/test_worker_manager.py` —
 `_when_already_starting` updated to mock `get_endpoint` confirming the
 busy status is genuinely real, since the check now verifies it.
 
+## §80: Endpoint scheduling made holistic — decision table + reconciler + busy-wait
+
+**Problem (user report + deep review, 2026-07-15):** jobs started around
+endpoint stop/start transitions froze, failed, or "queued indefinitely."
+The §79 fixes were sound but point patches: `worker_status` had five
+writers, no owner, and no reconciliation, so every new edge case (stale
+STARTING, console-started endpoint, ERROR state, dead tunnel) needed
+another "verify against Nebius here too" patch. The deep dive found seven
+concrete remaining defects; the two that explain the headline symptom:
+a busy-bounced run stayed QUEUED forever (QUEUED is in ACTIVE_STATUSES →
+silently ate one of the 3 serverless slots, user never told), and ERROR
+endpoints — only recoverable by deletion per Nebius support — got
+start-command + 6-minute-poll-burn on every attempt.
+
+**Design (commits a16154d, 7150c4e; Sonnet implementation over three
+supervised rounds, review-fixed):**
+- `_live_state(session)` = Nebius state + tunnel probe; every decision in
+  `ensure_worker` (now an explicit table, documented in its docstring)
+  reads this, never a bare DB status. ERROR → delete + create (only
+  auto-delete trigger, only on an explicit start attempt); confirmed dead
+  tunnel → stop + create; STOPPING → adopt, settle-then-start in the poll
+  loop; RUNNING/STARTING with unknown reachability → adopt in place.
+- `create_new_worker` adopts by name in ANY state (find_endpoint_any_state)
+  — console start/stop can no longer produce same-name duplicates or
+  overlapping start commands.
+- Reconciler (idle_monitor loop, each scan): converges DB status to live
+  state, skips sessions whose per-device lock is held (a provisioning task
+  owns them), tolerates per-session CLI failures. Nebius STOPPING maps to
+  SHUTTING_DOWN — first-ever writer for that enum value.
+- `_start_remote_run` on WorkerBusyError waits (bounded,
+  worker_busy_wait_timeout_seconds) for READY then dispatches, else marks
+  the run FAILED with a retry message. ensure_worker's fast WorkerBusyError
+  for HTTP callers is unchanged.
+- Idle stop re-checks status + idle right before stopping (TOCTOU).
+- Poll loop start-retry is a bounded counter (nebius_endpoint_start_max_retries).
+
+**Invariants / do-not-regress:**
+- Dead-tunnel handling requires `live["reachable"] is False` — an actual
+  failed probe. `not reachable` treated None (unknown: no stored URL yet)
+  as dead and stopped/recreated HEALTHY endpoints — the review caught this
+  in the subagent's draft; a mutation-verified pin test
+  (test_ensure_worker_adopts_running_endpoint_with_unknown_reachability_in_place)
+  guards it.
+- Never start_endpoint on live RUNNING (§79a) or ERROR; never auto-delete
+  except state==ERROR.
+- Worker fakes in tests MUST mock create/start/get/find — two tests were
+  found invoking the REAL nebius CLI mid-suite (unmocked create_endpoint),
+  and a missing ready-timeout monkeypatch once cost 370s of 0.01s-interval
+  polling (suite 545s → 49s after fixes). Autouse fixtures in
+  test_worker_manager.py cover find/probe defaults.
+- Old-contract tests deliberately rewritten (stateful fakes: STOPPED until
+  start is called): starts_stopped, retries-settle, stale-idle-clock, and
+  skips-to-create-when-SHUTTING_DOWN — the last is now
+  settles-then-starts (SHUTTING_DOWN is a reconciler cache; live state
+  decides, adopting beats paying for a duplicate).
+
+Known-open: reconciler only scans non-terminal sessions, so a console-
+resurrected STOPPED endpoint shows stale status in the UI until the next
+start attempt (which adopts it correctly). Deliberate scope cut.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
