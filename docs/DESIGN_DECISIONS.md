@@ -3542,6 +3542,33 @@ train_transformer with a counting optimizer (dataset/DB monkeypatched,
 everything under tmp_path) — exactly max_iters steps, current_step still
 ends at max_iters. Confirmed failing pre-fix. Full suite 213 passed.
 
+## §74: Demo fixtures moved out of the main bundle via dynamic import
+
+**Problem (Fable review, 2026-07-15):** ~230 lines of demo fixture data
+(`FIXTURE_MANIFEST`, `FIXTURE_SNAPSHOT_WITH_ATTENTION`, `FIXTURE_SNAPSHOT`,
+plus the inline `/diagnostics/start` response) lived at module scope in
+`useApi.ts`. Every real user's browser downloaded them even though they are
+only reachable behind `?use_fixtures=true`.
+
+**Fix:** fixtures now live in `frontend/src/fixtures/diagnostics.ts` and are
+loaded with `await import("../fixtures/diagnostics")` *inside* each
+`useFixtures()` branch. The dynamic import is the load-bearing part: a
+static top-level import would re-create the same bloat under a new filename,
+whereas dynamic import makes Vite emit a separate chunk
+(`dist/assets/diagnostics-*.js`, ~5.8 kB) that only demo sessions fetch.
+Five consumers (`fetchArchitecture`, `startDiagnostic`, `stepDiagnostic`,
+`peekDiagnostic`, `getDiagnosticSession`) became `async function` — callers
+are unaffected since they already returned Promises.
+`generateDiagnosticStream` was already an async generator.
+
+**Do not** convert the dynamic imports back to static ones during refactors
+— tree-shaking will NOT remove the fixtures (they're referenced), and the
+demo data would silently return to the production bundle.
+
+Verified: post-build, `grep -c "diag-17" dist/assets/index-*.js` → 0 (was 1)
+and the marker appears only in the diagnostics chunk. Frontend suite 55
+passed, build clean.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

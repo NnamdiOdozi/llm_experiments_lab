@@ -87,9 +87,11 @@ For remote runs, `/generate` and `/finalize` are proxied, so `_persist_diagnosti
 
 **Refactor shape:** one `_train_char_lm(ws, template_key, eval_fn, build_metric_row)` — the two public functions become 3-line wrappers. `_transformer_eval`/`_moe_eval` are themselves ~80% identical and could merge behind a "returns extra drop_rate field" flag, but that's second-order. Note `tests/test_train_loop_steps.py` (§73) counts optimizer steps through `train_transformer` — it must keep passing.
 
-### 3. `useApi.ts` fixtures in the production bundle (~230 of 549 lines)
+### 3. `useApi.ts` fixtures in the production bundle (~230 of 549 lines) — ✅ FIXED 2026-07-15
 
 `FIXTURE_MANIFEST` (~50 lines), `FIXTURE_SNAPSHOT_WITH_ATTENTION` (~110), `FIXTURE_SNAPSHOT` (~65) live in the main API module, shipped to every user, used only behind `?use_fixtures=true`. Move to e.g. `src/fixtures/diagnostics.ts`; if bundle size matters, gate behind a dynamic `import()` so they tree-shake/lazy-load. The dozen `if (useFixtures())` branches stay — only the data moves.
+
+**Done (DESIGN_DECISIONS §74):** all four fixture blocks (the three above plus the inline `/diagnostics/start` response) moved to `src/fixtures/diagnostics.ts`, loaded via dynamic `import()` inside the `useFixtures()` branches. Vite emits them as a separate ~5.8 kB chunk that real users never download — verified `grep "diag-17"` finds nothing in the main dist chunk.
 
 ### 4. Copy-icon button defined three times
 
