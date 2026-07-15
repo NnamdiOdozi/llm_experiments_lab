@@ -3649,6 +3649,38 @@ Key invariants:
 Trainer image rebuild required for remote runs (joins the §67/§68/§71/§72/
 §75 rebuild list); the fallback keeps stale-image remotes functional.
 
+## §77: Assistant refused attention questions — stale system-prompt gate, not code
+
+**Problem (user report, 2026-07-15, right after §76 landed):** with the new
+backend running and a fresh `>>` completed, the Lab Assistant still
+answered "no diagnostic snapshot has been captured... open the Inspector
+panel, step through a forward pass". Diagnosis order matters here: the
+capture itself was proven working (log showed diagnostics/start + step +
+generate all 200), run ordering was correct (list_runs_for_experiment is id
+DESC, so the default tool run was the right one), and the keyword gate
+offered the tools ("attention"/"head"/digits all match _LOOKUP_HINT_RE).
+The tell was in the chatbot log: exactly ONE "Token Factory request" per
+turn — a tool call would produce a follow-up request. The model never
+called the tool. Its refusal text paraphrased the system prompt, which
+described get_diagnostic_snapshot as working only "while the user has the
+Inspector's diagnostics panel open ... and has stepped through", attention
+"(if computed)" — and the injected log tail (dominated by 2s status polls)
+showed no diagnostics lines, so the model concluded the prerequisites were
+unmet and answered from priors.
+
+**Fix (49c5929):** rewrote that sentence in backend/chatbot/context.py —
+snapshots exist automatically after any step/generate on a prompted run,
+attention is captured for all layers/heads (§76), ALWAYS call the tool
+before answering internal-value questions, never infer absence from log
+lines, and attention_maps is 0-based [layer][head] (convert 1-based user
+phrasing).
+
+**Lesson:** when the grounding model gives a wrong "data unavailable"
+answer, check whether it actually made the tool call (one vs two Token
+Factory requests in the log) before debugging the data path. Tool
+descriptions are load-bearing: a stale precondition in prose disables a
+working tool as effectively as deleting it.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
