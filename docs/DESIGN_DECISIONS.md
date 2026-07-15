@@ -3717,11 +3717,12 @@ Implementation note: partially built by a Sonnet subagent that died mid-task
 on a spend limit; orchestrator completed the fallback fix, backend tests,
 and shadowing cleanup, Sonnet finished the frontend tests on resume.
 
-## §79 — Two deferred issues (raised 2026-07-15, intentionally not yet fixed)
+## §79 — Endpoint guard/lock and access to old runs
 
-Both flagged during a live session; user has a presentation and explicitly
-asked to defer both until after it. Recorded here so they aren't lost.
-Status: **open, no code changed for either.**
+Both flagged during a live session (2026-07-15); user initially asked to
+defer both until after a presentation, then asked to go ahead the same
+day. **Status: implemented and tested (backend 229/229, frontend 79/79),
+not yet committed** — see each subsection for what actually changed.
 
 ### 79a. Overlapping Nebius Start commands can corrupt an endpoint into ERROR
 
@@ -3750,15 +3751,54 @@ still polling Nebius server-side, that coroutine keeps running. A retry
 click lands a second call while the first is still alive in the unlocked
 gap.
 
-**Proposed fix (not yet implemented):** an `asyncio.Lock` per session_id
-(only two exist — `worker-cpu`/`worker-gpu`, so a small dict-of-locks is
-enough) wrapping the entire check-then-act sequence in `ensure_worker()`,
-so two calls for the same device type can never both pass the status check
-before one commits `STARTING`.
+**Fixed (uncommitted, 2026-07-15):** `backend/nebius/worker_manager.py`
+now has an `asyncio.Lock` per session_id (`_session_locks` /
+`_lock_for()`), wrapping `ensure_worker()`'s entire check-then-act
+sequence — read status through commit of STARTING/reuse-READY — so two
+calls for the same device type can never both pass the status check
+before one commits. Deliberately does NOT hold the lock across the
+multi-minute poll-for-RUNNING loop, so a second concurrent caller still
+gets today's fast `WorkerBusyError` rather than silently blocking for up
+to `nebius_endpoint_ready_timeout_seconds`.
 
-Caveat: reasoned from our own code + that day's logs, not from Nebius's
-internal operation timestamps — plausible root cause, not proven beyond
-doubt. Worth fixing on its own merits regardless (it's a real TOCTOU race).
+While building this, live-caught a second, related bug the lock alone
+wouldn't have fixed: a same-day incident where a CPU endpoint reported
+`State: RUNNING` (container logs clean, no crash) while its public
+tunnel returned a bare non-JSON 404 for every path. The old READY
+liveness check only ever inspected Nebius's reported *state*. Added
+`endpoints_client.probe_endpoint_url()` — an actual `GET
+{endpoint_url}/api/experiments`, success defined narrowly as
+`200 + valid JSON list` (this app's real shape), not just "not a 5xx" —
+and wired it into the READY check alongside the existing state check.
+
+Building *that* then surfaced a third bug in the existing fallback
+logic: when a READY endpoint fails the (now-stricter) liveness check,
+the code used to fall into `start_endpoint()` on that same endpoint id —
+which, for the new "state=RUNNING but tunnel dead" case, means starting
+an endpoint Nebius already reports as running. That's precisely the
+overlapping-operation pattern Nebius support described as the ERROR
+trigger in the first place, just reached via a different path than the
+race this section opened with. Added an explicit
+`endpoint_confirmed_running_but_unreachable` flag so that case routes
+straight to `create_new_worker()` instead, alongside the existing
+SHUTTING_DOWN/gone cases — `start_endpoint()` is now only ever attempted
+when the endpoint is confirmed to exist and NOT be RUNNING.
+
+Tests: `tests/test_worker_manager.py` —
+`test_ensure_worker_serializes_concurrent_calls_for_same_device` (two
+concurrent `ensure_worker()` calls via `asyncio.gather`, asserts
+`create_endpoint` is entered at most once and the second call gets
+`WorkerBusyError`, not a second create),
+`test_ensure_worker_reprovisions_when_ready_endpoint_tunnel_is_dead`
+(state RUNNING + probe False → routes to `create_new_worker`, asserts
+`start_endpoint` is never called on the dead-tunnel id).
+
+Caveat, still true: reasoned from our own code + that day's logs, not
+from Nebius's internal operation timestamps for the *original* email —
+plausible root cause, not proven beyond doubt for that specific
+incident. The tunnel-probe bug and the dangerous restart-on-RUNNING
+fallback it exposed, though, were directly observed and reproduced live
+in this same session, not inferred.
 
 ### 79b. No way to reopen a run once it's terminal (completed/failed/stopped)
 
@@ -3788,14 +3828,42 @@ already stored, already read successfully by other routes today. So a
 reopened terminal run's UI should show config + charts, and should NOT
 offer prompt/diagnostics (those need live weights that no longer exist).
 
-**Proposed direction (not yet implemented):** generalize "Open Runs" into
-a filterable "Runs" view (status chips: Active / Paused / Completed /
-Failed / All) instead of a page that silently excludes history — same
-list UI, same already-generic `handleReopenRun`, just stop filtering the
-query. Matches the standard pattern used by W&B/MLflow/GitHub
-Actions-style run lists. Avoid over-building — this app has a handful of
-runs per experiment, not thousands; one filterable table is the right
-size, not a folder/tag/search hierarchy.
+**Fixed (uncommitted, 2026-07-15):** `db.list_open_runs()` renamed to
+`db.list_runs(include_terminal: bool = False, limit: int = 200)` — the
+terminal-status filter is now conditional, plus a sane row cap (not real
+pagination — this app has a handful of runs per experiment, not
+thousands, per the original "avoid over-building" note here). The
+`GET /api/training/open` route gained `?include_terminal=true`; its
+live-status-overlay proxy call (for remote runs) is now also skipped for
+any run that's already terminal locally — nothing to refresh, no reason
+to spend a round-trip on a dead run's now-irrelevant endpoint.
+
+`OpenRunsPage.tsx` ("Open Runs" → "Runs") gained status filter chips
+(Active / Completed / Failed / Cancelled / All), defaulting to Active so
+existing behavior is unchanged unless asked — matches the standard
+pattern used by W&B/MLflow/GitHub Actions-style run lists, not a
+bespoke hierarchy. The reopen mechanism itself
+(`App.tsx::handleReopenRun`) needed no changes — it was already generic.
+Stop is hidden (not shown-disabled) for a terminal run's row.
+
+`PausePrompt`'s `canPrompt` gate extended from `paused || completed` to
+`paused || <any terminal status>`, reusing the existing
+`TERMINAL_RUN_STATUSES` set — a local run's checkpoint persists on the
+controller's own disk regardless of terminal status (periodic saves
+during training, not just at the end), so a reopened local
+failed/cancelled run can be prompted too, not just a completed one. No
+new frontend plumbing needed for the remote-run case: the backend
+already raises `HTTPException(400, "No checkpoint available for this
+run")` when there genuinely isn't one, which the existing UI already
+surfaces as a normal error.
+
+Tests: `tests/test_db_open_runs.py` —
+`test_list_runs_include_terminal_returns_everything`,
+`test_list_runs_respects_limit`;
+`tests/test_training_remote.py` —
+`test_list_open_runs_include_terminal_skips_live_proxy_for_terminal_run`;
+`frontend/.../OpenRunsPage.test.tsx` — default-filter, filter-click,
+Stop-hidden-for-terminal.
 
 Related, answered live (not a bug, just worth noting alongside this):
 reopening an experiment today shows the *last-saved* `config_json` for
@@ -3835,22 +3903,160 @@ Confirmed this is not something a user should have to know how to do.
 manual DB surgery, when someone deletes an endpoint out from under the app
 (a supported, expected action — not misuse).
 
-**Proposed direction (not yet implemented):**
-- Cancelling/stopping a run should also reset any `worker_session` it was
-  the sole owner of back to a clean state (not just cancel the run's own
-  task in isolation) — probably the more targeted fix, addresses this
-  exact sequence directly.
-- Independently, `worker_status` values like `STARTING`/`PROVISIONING`
-  should probably carry a staleness check — e.g. idle_monitor (already a
-  periodic background scanner, per §7-ish idle-timeout logic) could also
-  verify a long-STARTING session's endpoint is still genuinely live via
-  `get_endpoint()`, and clear/reset it if the endpoint's gone or the
-  status hasn't moved in an unreasonable amount of time. This is the more
-  general fix — covers manual out-of-band deletion regardless of how the
-  orphaning happened, not just via Stop.
-- Both together would also help 79a: a lock alone prevents new overlapping
-  starts, but doesn't recover a session already wedged by other means
-  (like this one).
+**Fixed (uncommitted, 2026-07-15):** `stop_training`'s cancel-in-flight-
+provisioning path now also resets the run's `worker_session` — after
+cancelling the task and marking the run CANCELLED, it looks up that
+device's session and, only if it's still genuinely mid-flight
+(`PROVISIONING`/`STARTING` — never touches a session that already
+reached READY, which could by then be serving a *different* run), resets
+it to `WorkerStatus.NONE`. The narrower, targeted fix from the two
+proposed here, not the broader idle_monitor staleness check — that
+remains a real idea for the general "manual out-of-band deletion, not
+via Stop" case, still open, not implemented.
+
+Tests: `tests/test_training_remote.py` —
+`test_stop_training_releases_orphaned_worker_session` (mid-flight session
+gets reset to `none`), `test_stop_training_leaves_ready_worker_session_alone`
+(a session that already reached READY, simulating a different run now
+depending on it, is untouched by an unrelated run's stop).
+
+### 79d. A freshly (re)provisioned worker inherited a stale idle clock
+
+Live symptom, 2026-07-15: requested a new serverless GPU run, the app
+restarted the worker, and the idle-timeout warning banner ("this CUDA
+worker will stop in 4m 27s") showed immediately — while actively on the
+dashboard, which should reset the idle clock via
+`useActivityHeartbeat`/`POST /workers/{device}/heartbeat`.
+
+Root cause: `create_new_worker()` and every STARTING/PROVISIONING
+transition in `ensure_worker()` (`backend/nebius/worker_manager.py`)
+only ever updated `worker_status`, never `last_activity_at`. A worker
+being reused/restarted inherited whatever `last_activity_at` it already
+had — sometimes from long before, close to its own old idle-timeout
+already — instead of starting its clock fresh. The heartbeat mechanism
+itself was never broken; the restart path just handed it a worker whose
+clock was already most of the way to expired. Confirmed idle_monitor
+itself was never at real risk of stopping a mid-provisioning worker
+(`stop_idle_workers()` already skips anything not `READY`) — this was a
+display/confusion bug with a real but narrower risk: a worker sitting
+READY-and-near-expiry when a new run claims it could still show a
+stale, alarming countdown until its next real activity touch.
+
+**Fixed (uncommitted, 2026-07-15):** added `db.touch_worker_session()`
+at all three transition points — the end of `create_new_worker()`, and
+both `STARTING`-commit sites in `ensure_worker()` (the direct
+`start_endpoint()` success path and the "timed out but still exists,
+continuing to wait" fallback). A (re)provisioned worker's idle clock now
+always starts fresh at the moment it's claimed.
+
+Test: `tests/test_worker_manager.py::test_create_new_worker_resets_stale_idle_clock`
+— a worker with `last_activity_at` set to 2020 gets restarted; asserts
+`seconds_idle` afterward is under 10 seconds.
+
+### 79e. Reopening a finished remote run showed no loss curves at all
+
+Direct user report, 2026-07-15, surfaced by testing 79b's own fix: opened
+a completed run via the new Completed filter — no loss curves, no
+metrics.
+
+Root cause: `GET /{run_id}/metrics` (`backend/api/training.py`) always
+proxies to the remote container for any `nebius_endpoint` run, with no
+exception for a terminal one. A finished run's container (and its
+`metrics.jsonl`) is gone forever once the run ends — the proxy call
+always fails, and the failure raised straight to a 502 instead of ever
+falling back to the DB-persisted copy this same route already writes
+(`train_loss_history`/`val_loss_history`, added for the chatbot's
+loss-trend grounding — see the sync test right above this section).
+
+**Fixed (uncommitted, 2026-07-15):** new `_merge_persisted_metrics()`
+reconstructs a metrics list from those two columns (merged by `step` —
+`train_loss_history` is the base since it's recorded every step,
+`val_loss_history` a sparser subset only at eval steps) and the proxy's
+`except` clause now returns that instead of a bare 502, when it has
+anything to return. A run that never got any metrics synced at all
+(failed before its first eval) still correctly surfaces the 502 — there
+being no persisted fallback and an empty list would be indistinguishable
+from "hasn't started yet."
+
+Chat/Assistant history checked alongside this and found structurally
+fine — `ChatPanel` is keyed on `experimentId` (not `runId`), which
+`handleReopenRun` already sets correctly, and `useChatStream`'s effect
+correctly refetches on that change. Likely explained by the specific
+experiment reopened genuinely having no prior chat messages, not a
+second bug — flagged as unconfirmed rather than fixed.
+
+Tests: `tests/test_training_remote.py` —
+`test_get_metrics_falls_back_to_persisted_history_when_remote_container_is_gone`,
+`test_get_metrics_returns_502_when_no_persisted_fallback_exists`.
+
+### 79f. A rejected start command was never retried; a stale busy status blocked everything after
+
+Two related bugs, both hit live testing the 79a/79d fixes on 2026-07-15,
+same root pattern as 79d: a worker transition our own code doesn't
+actively re-verify.
+
+**79f-1 — rejected start, never retried.** User manually stopped the CPU
+endpoint, then started a new run seconds later. The `start_endpoint()`
+call landed while it was still mid-STOPPING and Nebius explicitly
+rejected it (`rpc error: code = Internal desc = internal error` — not a
+timeout, a flat rejection). The existing handler treats every
+`start_endpoint()` failure identically ("maybe just slow, keep passively
+polling `get_endpoint()` for RUNNING") — correct for an ambiguous
+timeout, wrong here: nothing was ever accepted, so polling for RUNNING
+could only ever time out. Confirmed live: the endpoint sat cleanly
+STOPPED (its stop had long since finished) while the poll loop kept
+checking for RUNNING and finding nothing, for the full budget, then
+correctly (if slowly) failed the run.
+
+**Fixed (uncommitted, 2026-07-15):** the poll loop itself now retries
+`start_endpoint()` once, the moment it observes the endpoint has settled
+into `STOPPED` — bounded to a single retry (not a tight retry storm, to
+avoid feeding back into the overlapping-operation problem this whole
+area exists to avoid), rather than only ever attempting the start once
+before entering a purely passive wait.
+
+**79f-2 — stale busy status blocks everything, forever, with no
+self-heal.** Immediately hit testing 79f-1's fix: stopped the CPU
+endpoint a *second* time, started a new run — instantly rejected with
+"already being provisioned", even though nothing was. The
+`WorkerBusyError` guard (`PROVISIONING`/`STARTING` check) trusted
+`worker_status` completely blindly — unlike the `READY` path a few lines
+above it, which already verifies against Nebius before trusting it. Once
+this status goes stale (endpoint stopped/errored/deleted out-of-band
+while our DB still believes it's mid-flight), nothing ever re-checks or
+clears it — every future Start for that device rejects forever until
+manual DB surgery. This is the more general fix flagged as still-open in
+79c's original writeup ("independently, worker_status values... should
+probably carry a staleness check"), now confirmed necessary and
+implemented, not just theorized.
+
+**Fixed (uncommitted, 2026-07-15):** the busy check now verifies the
+endpoint's real state via `get_endpoint()` before trusting a
+`PROVISIONING`/`STARTING` claim. Deliberately conservative in which
+direction it errs: only `STOPPED`/`STOPPING`/`ERROR` states (or the
+endpoint being gone entirely) count as stale; any state it doesn't
+recognize defaults to "assume still genuinely busy", so an unfamiliar
+Nebius status string can't misfire against an actually-legitimate
+concurrent request. Known residual gap: an `ERROR`-state endpoint falls
+through to attempting `start_endpoint()` on it (same as `STOPPED`), which
+may not actually work — every `ERROR`-state endpoint encountered this
+session needed manual deletion, not a restart, to recover. Not solved
+here; still requires manual intervention if hit.
+
+Live-unblocked both incidents by hand in the moment (manual
+`nebius ai endpoint start`, then a direct `worker_status='none'` DB
+reset) — same as every prior stuck-endpoint incident today; the fixes
+prevent recurrence going forward but don't retroactively rescue an
+already-in-flight background task running the old code (backend has no
+`--reload`; a stuck run started before a restart stays stuck under the
+old logic until it naturally times out).
+
+Tests: `tests/test_worker_manager.py` —
+`test_ensure_worker_retries_start_once_endpoint_settles_to_stopped`,
+`test_ensure_worker_ignores_stale_busy_status_when_endpoint_was_stopped_out_of_band`
+— plus `test_ensure_worker_debounces_when_already_provisioning`/
+`_when_already_starting` updated to mock `get_endpoint` confirming the
+busy status is genuinely real, since the check now verifies it.
 
 ## File Layout
 

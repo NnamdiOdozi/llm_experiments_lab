@@ -750,7 +750,17 @@ export default function App() {
           {runId != null && (
             <PausePrompt
               runId={runId}
-              canPrompt={runStatus?.status === "paused" || runStatus?.status === "completed"}
+              // Was paused||completed only — a local run's checkpoint
+              // persists on the controller's own disk regardless of
+              // terminal status (periodic saves during training, not just
+              // at the end), so a reopened local failed/cancelled run can
+              // still be prompted too. A remote run's checkpoint dies with
+              // its container either way — the backend already handles
+              // that gracefully (HTTPException(400, "No checkpoint
+              // available for this run")) rather than needing a frontend-
+              // side check here. Direct user request, 2026-07-15. See
+              // docs/DESIGN_DECISIONS.md §79b.
+              canPrompt={runStatus?.status === "paused" || (runStatus != null && TERMINAL_RUN_STATUSES.has(runStatus.status))}
               attentionBlock={attentionBlock}
               attentionHead={attentionHead}
               showQKVDetail={showQKVDetail}

@@ -23,7 +23,7 @@ from backend.training.runner import (
     get_run_status,
 )
 from backend.training.status import RunStatus, TERMINAL_STATUSES
-from backend.training.worker_status import device_type_for, session_id_for
+from backend.training.worker_status import WorkerStatus, device_type_for, session_id_for
 from config.settings import settings
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -329,10 +329,11 @@ def _is_remote(db_run: dict | None) -> bool:
 
 
 @router.get("/open")
-async def list_open_runs():
-    """Every non-terminal run across all experiments — feeds the Experiments
-    page so a stuck run can be found and stopped even outside its own
-    session's browser state.
+async def list_open_runs(include_terminal: bool = False):
+    """Runs across all experiments — feeds the Runs page so a stuck run can
+    be found and stopped, or (include_terminal=true) a finished/failed/
+    stopped one can be reopened for its config and metrics history. Direct
+    user request, 2026-07-15 — see docs/DESIGN_DECISIONS.md §79b.
 
     For remote runs, overlays live status/step from the remote endpoint —
     _start_remote_run never updates the local status column past QUEUED
@@ -340,16 +341,19 @@ async def list_open_runs():
     are set there), so the local row alone is permanently stale for any
     remote run once it starts actually training. Found live 2026-07-12: a
     successfully-running remote run showed QUEUED/step 0 forever in this
-    list. db.list_open_runs()'s terminal-status filter also only sees the
-    stale local status, so a remote run that's genuinely completed/failed
-    would otherwise never drop out of this list either — filtered again
-    here after the live overlay. Graceful per-run degradation: a proxy
-    failure logs and keeps the stale local value rather than breaking the
-    whole list. See docs/DESIGN_DECISIONS.md.
+    list. Only attempted for runs not already known-terminal locally —
+    once a run is genuinely done, its status can't change further, so
+    there's nothing to refresh and no reason to spend a proxy round-trip
+    on it. db.list_runs()'s own terminal filter (when include_terminal is
+    false) also only sees the stale local status, so a remote run that's
+    genuinely completed/failed would otherwise never drop out of this list
+    either — filtered again here after the live overlay. Graceful per-run
+    degradation: a proxy failure logs and keeps the stale local value
+    rather than breaking the whole list. See docs/DESIGN_DECISIONS.md.
     """
-    runs = await db.list_open_runs()
+    runs = await db.list_runs(include_terminal=include_terminal)
     for run in runs:
-        if not _is_remote(run):
+        if not _is_remote(run) or run["status"] in TERMINAL_STATUSES:
             continue
         try:
             live = await _proxy(run, "GET", "/api/training/{run_id}/status")
@@ -362,6 +366,8 @@ async def list_open_runs():
         run["status"] = live.get("status", run["status"])
         run["current_step"] = live.get("current_step", run["current_step"])
         run["total_steps"] = live.get("total_steps", run["total_steps"])
+    if include_terminal:
+        return runs
     return [r for r in runs if r["status"] not in TERMINAL_STATUSES]
 
 
@@ -431,6 +437,26 @@ async def stop_training(run_id: int):
     if task is not None and not task.done():
         task.cancel()
         await db.update_training_run(run_id, status=RunStatus.CANCELLED)
+        # Real incident, 2026-07-15: cancelling this task only ever touched
+        # the run's own row — the worker_session this run's ensure_worker()
+        # call was mid-provisioning stayed wedged at STARTING/PROVISIONING
+        # forever (the background coroutine that would have self-healed it
+        # died with the cancelled task), permanently blocking every future
+        # Start for that device with "already being provisioned". Reset it
+        # here so cancelling actually releases what it was holding — only
+        # if it's still genuinely mid-flight (not READY), so a worker that
+        # finished and is now serving something else is never touched. See
+        # docs/DESIGN_DECISIONS.md §79c.
+        cancelled_run = await db.get_training_run(run_id)
+        session_id = session_id_for(device_type_for(cancelled_run["device"]))
+        worker_session = await db.get_worker_session(session_id)
+        if worker_session is not None and worker_session["worker_status"] in (
+            WorkerStatus.PROVISIONING, WorkerStatus.STARTING,
+        ):
+            await db.update_worker_session(session_id, worker_status=WorkerStatus.NONE)
+            training_log.info(
+                "Released orphaned worker_session after cancel — run_id=%d session_id=%s", run_id, session_id,
+            )
         training_log.info("STOP (cancelled in-flight provisioning) run_id=%d", run_id)
         return {"run_id": run_id, "status": "stopping"}
 
@@ -578,6 +604,30 @@ def read_metrics_from_disk(run_id: int) -> list[dict]:
     return metrics
 
 
+def _merge_persisted_metrics(db_run: dict) -> list[dict]:
+    """Reconstruct a metrics list from train_loss_history/val_loss_history —
+    the DB-persisted mirror get_metrics() itself writes below while a
+    remote run is still alive. Needed because those two columns are saved
+    as separate filtered lists (see the write below), not the original
+    merged shape the frontend expects. Merges by "step", train rows as the
+    base (train_loss is recorded every step; val_loss only every
+    eval_interval, so val rows are a subset)."""
+    train_rows = json.loads(db_run.get("train_loss_history") or "[]")
+    val_rows = json.loads(db_run.get("val_loss_history") or "[]")
+    val_by_step = {r["step"]: r for r in val_rows if "step" in r}
+    merged = []
+    seen_steps = set()
+    for row in train_rows:
+        step = row.get("step")
+        merged.append({**row, **val_by_step[step]} if step in val_by_step else row)
+        seen_steps.add(step)
+    for row in val_rows:
+        if row.get("step") not in seen_steps:
+            merged.append(row)
+    merged.sort(key=lambda r: r.get("step", 0))
+    return merged
+
+
 @router.get("/{run_id}/metrics")
 async def get_metrics(run_id: int):
     db_run = await db.get_training_run(run_id)
@@ -594,6 +644,23 @@ async def get_metrics(run_id: int):
         try:
             metrics = await _proxy(db_run, "GET", "/api/training/{run_id}/metrics")
         except httpx.HTTPError as exc:
+            # Real bug, 2026-07-15: this used to raise straight to a 502 —
+            # correct while the run is genuinely still alive and the proxy
+            # glitched, but permanently wrong for a TERMINAL remote run,
+            # whose container (and metrics.jsonl) is gone forever once it
+            # ends. Direct user report: reopening a finished run showed no
+            # loss curves at all. Fall back to what was already persisted
+            # to the DB while the run was alive (see the write a few lines
+            # below) rather than erroring — matches this route's own
+            # existing degrade-gracefully pattern for stale proxy data
+            # elsewhere (Open Runs' live-status overlay). See
+            # docs/DESIGN_DECISIONS.md.
+            fallback = _merge_persisted_metrics(db_run)
+            if fallback:
+                training_log.info(
+                    "Remote metrics proxy failed, serving persisted fallback — run_id=%d: %s", run_id, exc,
+                )
+                return fallback
             raise HTTPException(502, f"Remote metrics fetch failed: {exc}")
         if metrics:
             # Mirrors what train_worker.py::write_metric() does for local

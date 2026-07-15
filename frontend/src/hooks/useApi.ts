@@ -120,8 +120,8 @@ export interface OpenRun {
   started_at: string | null;
 }
 
-export function fetchOpenRuns() {
-  return api<OpenRun[]>("/training/open");
+export function fetchOpenRuns(includeTerminal: boolean = false) {
+  return api<OpenRun[]>(`/training/open${includeTerminal ? "?include_terminal=true" : ""}`);
 }
 
 export function fetchRunStatus(runId: number) {

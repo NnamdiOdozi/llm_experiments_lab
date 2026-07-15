@@ -228,7 +228,7 @@ async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
     # hasn't started yet (or whose started_at otherwise doesn't line up with
     # true creation order) can sort ahead of a genuinely newer run. id is an
     # AUTOINCREMENT primary key, always monotonic at creation time, never
-    # NULL — the same pattern list_open_runs() already uses correctly.
+    # NULL — the same pattern list_runs() already uses correctly.
     # Found live 2026-07-12: the chatbot's "latest run" (runs[0] here) was a
     # stale, already-cancelled earlier run instead of the actual paused run
     # at step 307, misleading the chatbot's whole grounding. See
@@ -242,20 +242,35 @@ async def list_runs_for_experiment(experiment_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def list_open_runs() -> list[dict]:
-    """Every run not in a terminal state, across all experiments — the set a
-    user would want to see/stop from an "Experiments" overview page.
+async def list_runs(include_terminal: bool = False, limit: int = 200) -> list[dict]:
+    """Runs across all experiments — the set a user would want to see/stop
+    (or, with include_terminal, browse the history of) from a Runs page.
+
+    Real gap, 2026-07-15: this used to always exclude terminal runs
+    (completed/failed/cancelled) with no way to see them again once they
+    ended — no UI path back to any run's config/metrics after the fact.
+    See docs/DESIGN_DECISIONS.md §79b. `limit` is a sane cap, not real
+    pagination — this app has a handful of runs per experiment, not
+    thousands; not worth building more than that yet.
     """
-    statuses = tuple(TERMINAL_STATUSES)
-    placeholders = ",".join("?" for _ in statuses)
     db = await get_db()
-    cursor = await db.execute(
-        f"SELECT training_runs.*, experiments.name AS experiment_name "
-        f"FROM training_runs JOIN experiments ON experiments.id = training_runs.experiment_id "
-        f"WHERE training_runs.status NOT IN ({placeholders}) "
-        f"ORDER BY training_runs.id DESC",
-        statuses,
-    )
+    if include_terminal:
+        cursor = await db.execute(
+            "SELECT training_runs.*, experiments.name AS experiment_name "
+            "FROM training_runs JOIN experiments ON experiments.id = training_runs.experiment_id "
+            "ORDER BY training_runs.id DESC LIMIT ?",
+            (limit,),
+        )
+    else:
+        statuses = tuple(TERMINAL_STATUSES)
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await db.execute(
+            f"SELECT training_runs.*, experiments.name AS experiment_name "
+            f"FROM training_runs JOIN experiments ON experiments.id = training_runs.experiment_id "
+            f"WHERE training_runs.status NOT IN ({placeholders}) "
+            f"ORDER BY training_runs.id DESC LIMIT ?",
+            statuses + (limit,),
+        )
     rows = await cursor.fetchall()
     await db.close()
     return [dict(r) for r in rows]

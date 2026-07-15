@@ -19,6 +19,7 @@ from backend.api import training as training_module
 from backend.main import app
 from backend.nebius import worker_manager
 from backend.training.status import RunStatus
+from backend.training.worker_status import WorkerStatus
 from tests.conftest import FakeResponse, FakeAsyncClient
 
 
@@ -176,6 +177,104 @@ async def test_stop_training_cancels_in_flight_provisioning(temp_db, client, mon
 
     db_run = await db.get_training_run(run_id)
     assert db_run["status"] == "cancelled"
+
+
+async def test_stop_training_releases_orphaned_worker_session(temp_db, client, monkeypatch):
+    """Real incident, 2026-07-15: cancelling an in-flight provisioning task
+    only ever touched the run's own row — the worker_session it was mid-
+    provisioning stayed wedged at STARTING forever (the background coroutine
+    that would have self-healed it died with the cancelled task), blocking
+    every future Start for that device with "already being provisioned".
+    Stop must release what it was holding. See docs/DESIGN_DECISIONS.md §79c.
+    """
+    exp_id = temp_db
+    worker_call_started = asyncio.Event()
+
+    async def fake_ensure_worker(device):
+        # Simulate ensure_worker() having already committed STARTING before
+        # being cancelled mid-flight — this is the exact state a real
+        # cancelled provisioning attempt leaves behind.
+        await db.update_worker_session("worker-cpu", worker_status=WorkerStatus.STARTING)
+        worker_call_started.set()
+        await asyncio.Event().wait()  # never resolves on its own — only via cancellation
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+
+    await asyncio.wait_for(worker_call_started.wait(), timeout=2)
+
+    stop_resp = await client.post(f"/api/training/{run_id}/stop")
+    assert stop_resp.status_code == 200
+
+    await asyncio.gather(created_tasks[0], return_exceptions=True)
+
+    worker_session = await db.get_worker_session("worker-cpu")
+    assert worker_session["worker_status"] == "none"
+
+
+async def test_stop_training_leaves_ready_worker_session_alone(temp_db, client, monkeypatch):
+    """The release-on-cancel fix must only touch a session that's still
+    genuinely mid-flight — a worker that already finished provisioning and
+    is now READY (potentially serving a *different* run) must never be
+    reset just because some other run's stop happened to race past it."""
+    exp_id = temp_db
+    worker_call_started = asyncio.Event()
+
+    async def fake_ensure_worker(device):
+        # Unlike the test above: this worker already reached READY before
+        # the cancel arrives — simulates a different run now depending on it.
+        await db.update_worker_session(
+            "worker-cpu", worker_status=WorkerStatus.READY,
+            nebius_endpoint_id="aiendpoint-in-use", endpoint_url="https://cpu.tunnel.nebius.cloud",
+        )
+        worker_call_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
+    await db.create_worker_session("worker-cpu", "cpu", "nebius_endpoint", 1800)
+
+    created_tasks = []
+    orig_create_task = training_module.asyncio.create_task
+
+    def capturing_create_task(coro):
+        task = orig_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(training_module.asyncio, "create_task", capturing_create_task)
+
+    resp = await client.post(
+        "/api/training/start",
+        json={"experiment_id": exp_id, "device": "cpu", "backend": "nebius_endpoint"},
+    )
+    run_id = resp.json()["run_id"]
+    await asyncio.wait_for(worker_call_started.wait(), timeout=2)
+
+    stop_resp = await client.post(f"/api/training/{run_id}/stop")
+    assert stop_resp.status_code == 200
+
+    await asyncio.gather(created_tasks[0], return_exceptions=True)
+
+    worker_session = await db.get_worker_session("worker-cpu")
+    assert worker_session["worker_status"] == "ready"
+    assert worker_session["nebius_endpoint_id"] == "aiendpoint-in-use"
 
 
 async def test_execution_backend_is_correct_while_still_provisioning(temp_db, client, monkeypatch):
@@ -494,6 +593,63 @@ async def test_get_metrics_syncs_loss_history_to_local_row_for_remote_run(temp_d
     assert train_history[-1]["train_loss"] == 1.5
 
 
+async def test_get_metrics_falls_back_to_persisted_history_when_remote_container_is_gone(temp_db, client, monkeypatch):
+    """Direct user report, 2026-07-15: reopening a finished remote run
+    showed no loss curves at all. Root cause: get_metrics() always proxied
+    to the remote container for a nebius_endpoint run, even a terminal
+    one whose container (and metrics.jsonl) is long gone by the time you
+    reopen it — the proxy failure raised straight to a 502 instead of
+    falling back to what was already mirrored into train_loss_history/
+    val_loss_history while the run was still alive (see the test above).
+    See docs/DESIGN_DECISIONS.md."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+        status="completed",
+    )
+    await db.update_training_run(
+        run_id,
+        train_loss_history=json.dumps([
+            {"step": 20, "train_loss": 1.8},
+            {"step": 40, "train_loss": 1.5},
+        ]),
+        val_loss_history=json.dumps([{"step": 40, "val_loss": 1.6}]),
+    )
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session("worker-gpu", endpoint_url="https://gpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([FakeResponse({}, status_code=502)])  # container long gone
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get(f"/api/training/{run_id}/metrics")
+
+    assert resp.status_code == 200
+    metrics = resp.json()
+    assert len(metrics) == 2
+    assert metrics[0] == {"step": 20, "train_loss": 1.8}
+    assert metrics[1] == {"step": 40, "train_loss": 1.5, "val_loss": 1.6}  # merged by step
+
+
+async def test_get_metrics_returns_502_when_no_persisted_fallback_exists(temp_db, client, monkeypatch):
+    """A run that never got any metrics synced at all (e.g. failed before
+    its first eval) genuinely has nothing to fall back to — must still
+    surface the proxy failure, not silently return an empty list that
+    looks identical to "hasn't started yet"."""
+    run_id = await db.create_training_run(
+        temp_db, "cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", 600)
+    await db.update_worker_session("worker-gpu", endpoint_url="https://gpu.tunnel.nebius.cloud")
+
+    fake_client = FakeAsyncClient([FakeResponse({}, status_code=502)])
+    monkeypatch.setattr(training_module.httpx, "AsyncClient", lambda timeout=30: fake_client)
+
+    resp = await client.get(f"/api/training/{run_id}/metrics")
+
+    assert resp.status_code == 502
+
+
 async def test_list_open_runs_overlays_live_status_for_remote_run(temp_db, client, monkeypatch):
     """Regression test (2026-07-12): _start_remote_run never updates local
     status past its QUEUED creation default after handoff — a genuinely
@@ -562,3 +718,29 @@ async def test_list_open_runs_excludes_remote_run_that_is_actually_terminal_live
 
     assert resp.status_code == 200
     assert run_id not in {r["id"] for r in resp.json()}
+
+
+async def test_list_open_runs_include_terminal_skips_live_proxy_for_terminal_run(temp_db, client, monkeypatch):
+    """Direct user request, 2026-07-15 — reopening a finished run's config
+    and metrics needs a way to see it in this list at all. Once a run's
+    local status is already terminal, its status can't change further, so
+    the live-overlay proxy call (which exists to catch a remote run whose
+    LOCAL status lags reality) must be skipped for it — nothing to refresh,
+    and no reason to spend a round-trip (or risk one failing) on a dead
+    run's now-irrelevant endpoint. See docs/DESIGN_DECISIONS.md §79b."""
+    run_id = await db.create_training_run(
+        temp_db, "cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-abc123", remote_run_id=7,
+    )
+    await db.update_training_run(run_id, status="cancelled")
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("must not proxy a live status check for an already-terminal run")
+
+    monkeypatch.setattr(training_module, "_proxy", fail_if_called)
+
+    resp = await client.get("/api/training/open?include_terminal=true")
+
+    assert resp.status_code == 200
+    runs = {r["id"]: r for r in resp.json()}
+    assert runs[run_id]["status"] == "cancelled"

@@ -11,6 +11,8 @@ import asyncio
 import json
 import re
 
+import httpx
+
 from config.settings import settings
 
 
@@ -159,6 +161,32 @@ def extract_public_url(endpoint: dict) -> str | None:
         if url.startswith("https://"):
             return url
     return None
+
+
+async def probe_endpoint_url(url: str) -> bool:
+    """Is this endpoint's public tunnel actually routing to a live container?
+
+    Real incident, 2026-07-15: a CPU endpoint reported State: RUNNING (and
+    its container's own logs showed a clean, uninterrupted startup, no
+    crash) while its public tunnel URL returned a bare, non-JSON 404 for
+    every path — Nebius's own gateway responding, not this app. This app's
+    GET /api/experiments always returns 200 with a JSON list when it's
+    genuinely alive; anything else (wrong status, non-JSON body, timeout,
+    connection error) means the tunnel isn't actually reaching a live
+    container, even though Nebius's reported endpoint *state* — the only
+    thing ensure_worker()'s READY liveness check inspected before this —
+    said RUNNING the whole time. Deliberately checking for the specific
+    success shape rather than "not a 5xx", since the failure mode here
+    was a 404, not a 500. See docs/DESIGN_DECISIONS.md.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{url}/api/experiments")
+        if resp.status_code != 200:
+            return False
+        return isinstance(resp.json(), list)
+    except (httpx.HTTPError, ValueError):
+        return False
 
 
 async def get_logs(endpoint_id: str, tail: int = 200) -> str:

@@ -9,18 +9,38 @@ interface Props {
   onReopen: (run: OpenRun) => void;
 }
 
+// Direct user request, 2026-07-15: once a run finished/failed/stopped,
+// there was no way back to it at all — active-only was the entire
+// contents of this page. "Active" stays the default so today's behavior
+// is unchanged unless asked; the other filters are what's new. See
+// docs/DESIGN_DECISIONS.md §79b.
+const FILTERS = ["Active", "Completed", "Failed", "Cancelled", "All"] as const;
+type Filter = (typeof FILTERS)[number];
+
+function matchesFilter(status: string, filter: Filter): boolean {
+  if (filter === "All") return true;
+  if (filter === "Active") return status !== "completed" && status !== "failed" && status !== "cancelled";
+  return status === filter.toLowerCase();
+}
+
 export default function OpenRunsPage({ onClose, onReopen }: Props) {
   const [runs, setRuns] = useState<OpenRun[] | null>(null);
   const [stoppingId, setStoppingId] = useState<number | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>("Active");
 
   function load() {
-    fetchOpenRuns().then(setRuns);
+    // Only the "Active" filter can be served by the cheap default query —
+    // everything else needs terminal runs included, then filtered further
+    // client-side (this app has a handful of runs per experiment, not
+    // thousands — not worth a separate query per filter).
+    fetchOpenRuns(filter !== "Active").then(setRuns);
   }
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter]);
 
   async function handleStop(runId: number) {
     setStoppingId(runId);
@@ -41,11 +61,33 @@ export default function OpenRunsPage({ onClose, onReopen }: Props) {
     }
   }
 
+  const visibleRuns = runs?.filter((r) => matchesFilter(r.status, filter)) ?? null;
+
   return (
     <div style={{ maxWidth: 900, margin: "40px auto", padding: "0 20px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h1 style={{ fontSize: 20 }}>Open Runs</h1>
+        <h1 style={{ fontSize: 20 }}>Runs</h1>
         <button onClick={onClose}>← Back</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        {FILTERS.map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            style={{
+              fontSize: 12,
+              padding: "4px 10px",
+              borderRadius: 999,
+              border: f === filter ? "1px solid var(--accent)" : "1px solid var(--border)",
+              background: f === filter ? "var(--accent)" : "transparent",
+              color: f === filter ? "#fff" : "var(--text-dim)",
+              cursor: "pointer",
+            }}
+          >
+            {f}
+          </button>
+        ))}
       </div>
 
       {stopError && (
@@ -54,13 +96,17 @@ export default function OpenRunsPage({ onClose, onReopen }: Props) {
         </div>
       )}
 
-      {runs == null ? (
+      {visibleRuns == null ? (
         <p style={{ color: "var(--text-dim)" }}>Loading...</p>
-      ) : runs.length === 0 ? (
-        <p style={{ color: "var(--text-dim)" }}>No open runs — nothing currently running or paused.</p>
+      ) : visibleRuns.length === 0 ? (
+        <p style={{ color: "var(--text-dim)" }}>
+          {filter === "Active" ? "No active runs — nothing currently running or paused." : `No ${filter.toLowerCase()} runs.`}
+        </p>
       ) : (
         <div className="panel">
-          {runs.map((r) => (
+          {visibleRuns.map((r) => {
+            const isTerminal = r.status === "completed" || r.status === "failed" || r.status === "cancelled";
+            return (
             <div
               key={r.id}
               style={{
@@ -85,12 +131,18 @@ export default function OpenRunsPage({ onClose, onReopen }: Props) {
                   Step {r.current_step} / {r.total_steps}
                 </span>
                 <button onClick={() => onReopen(r)}>Open</button>
-                <button onClick={() => handleStop(r.id)} disabled={stoppingId === r.id}>
-                  {stoppingId === r.id ? "Stopping..." : "Stop"}
-                </button>
+                {/* A terminal run has nothing left to stop — hidden rather
+                    than shown-but-a-no-op, direct user request, 2026-07-15.
+                    See docs/DESIGN_DECISIONS.md §79b. */}
+                {!isTerminal && (
+                  <button onClick={() => handleStop(r.id)} disabled={stoppingId === r.id}>
+                    {stoppingId === r.id ? "Stopping..." : "Stop"}
+                  </button>
+                )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
