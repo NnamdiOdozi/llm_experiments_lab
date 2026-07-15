@@ -3569,6 +3569,45 @@ Verified: post-build, `grep -c "diag-17" dist/assets/index-*.js` → 0 (was 1)
 and the marker appears only in the diagnostics chunk. Frontend suite 55
 passed, build clean.
 
+## §75: DRY refactor pass — five duplications extracted (2026-07-15)
+
+Behavior-preserving refactors of the duplications catalogued in
+docs/Fable Codebase Review.md ("Code bloat / DRY"). One commit each, full
+suites (backend 213 / frontend 55 + build) green after every one. Things
+future refactors must not regress:
+
+- **WindowStepper** (`df6a39b`): `frontend/src/components/WindowStepper.tsx`
+  replaces `NodeWindowStepper` and the inline stepper in `AttentionHeatmap`
+  (both in Inspector.tsx). Hide conditions stay at the call sites.
+- **CopyIconButton** (`1f9d00a`): one component, `size` prop (12 Inspector /
+  14 App+ChatPanel), two modes — uncontrolled (self-managed 1.5 s `copied`
+  state) for Inspector/App, controlled (`copied` + `onCopied` props) for
+  ChatPanel, whose per-message `copiedId` keying must stay in ChatPanel so
+  the checkmark shows only on the copied message.
+- **Diagnostic hook factory** (`4c6d8f6`): shared `make_hook_for_diagnostics`
+  + `_get_position_vectors` in `backend/training/diagnostics.py`; both model
+  templates' `register_diagnostic_hooks` are now thin registration loops.
+  The factory is tuple-tolerant (MoE blocks emit `(tensor, drop_rate)`).
+  Two invariants: templates still RETURN the collected hook handles (§66
+  eviction depends on it), and the import of the factory is deferred inside
+  the method — hoisting it to module top level risks a circular import
+  (diagnostics.py itself loads models from the templates).
+- **`_train_char_lm` merge** (`92419cb`): `train_transformer`/`train_moe` are
+  wrappers around one loop parameterized by registry key, `eval_fn`, and
+  `build_metric_row` (MoE adds drop_rate fields). Forward-output arity is
+  checked via `len()` at runtime. The §73 `start_step = … else 1` fix and
+  comment are preserved. `OPTIMIZERS`/`load_tiny_shakespeare`/
+  `sync_update_training_run` must stay looked-up at CALL time, not captured
+  at import — `tests/test_train_loop_steps.py` monkeypatches them.
+- **Test fakes** (`7dcb5e5`): `FakeResponse`/`FakeAsyncClient` live once in
+  `tests/conftest.py`, imported by test_training_remote.py and
+  test_diagnostics.py.
+
+Remote note: `4c6d8f6` and `92419cb` touch `backend/training/` — they join
+§67/§68/§71/§72 on the list of changes that need a trainer-image rebuild
+(`scripts/build_push_trainer_*.sh`) before they reach serverless runs.
+Deliberately still deferred: db.py connection boilerplate (review item 7).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

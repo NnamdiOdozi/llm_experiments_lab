@@ -2,7 +2,9 @@
 
 Deep review of the full codebase (~9k lines read: all major backend — `training.py`, `diagnostics.py`, `runner.py`, `train_worker.py`, `db.py`, `worker_manager.py`, `endpoints_client.py`, `idle_monitor.py`, `experiments.py`, `main.py`, both model templates, `settings.py` — and frontend — `App.tsx`, `Inspector.tsx`, `PausePrompt.tsx`, `ArchSchematic.tsx`, `useApi.ts`). Findings ordered worst first.
 
-> **Status update 2026-07-15:** nine findings fixed, one commit each, all with regression tests and DESIGN_DECISIONS entries §65–§73: block picker dead end (`f28469b`), session memory leak (`5c9dcaa`), MoE tuple bug (`8917f4a`), RoPE recompute (`9e0eb0c`), disconnected-banner heuristic (`b571311`), reconcile filter (`f9af221`), event-loop blocking (`57827a9`), remote diagnostic persistence (`544914f`), train-loop off-by-one (`3bf45ad`). Trainer image NOT yet rebuilt — the diagnostics-side fixes don't reach remote runs until `scripts/build_push_trainer_*.sh` runs. Still open: the DRY/bloat items below and the db.py connection handling (both deferred deliberately).
+> **Status update 2026-07-15:** nine findings fixed, one commit each, all with regression tests and DESIGN_DECISIONS entries §65–§73: block picker dead end (`f28469b`), session memory leak (`5c9dcaa`), MoE tuple bug (`8917f4a`), RoPE recompute (`9e0eb0c`), disconnected-banner heuristic (`b571311`), reconcile filter (`f9af221`), event-loop blocking (`57827a9`), remote diagnostic persistence (`544914f`), train-loop off-by-one (`3bf45ad`). Trainer image NOT yet rebuilt — the diagnostics-side fixes don't reach remote runs until `scripts/build_push_trainer_*.sh` runs.
+>
+> **DRY update, later 2026-07-15:** six of the seven bloat items below are now done, one commit each (§74–§75): fixtures out of the bundle (`f0b31c8`), WindowStepper (`df6a39b`), CopyIconButton (`1f9d00a`), diagnostic-hook factory (`4c6d8f6`), train-loop merge (`92419cb`), test-fake dedup (`7dcb5e5`). Suites: backend 213, frontend 55, build clean. The hook-factory and train-loop commits touch `backend/training/` — add them to the trainer-image rebuild list. Only item 7 (db.py connection boilerplate) remains deferred.
 
 ---
 
@@ -69,7 +71,7 @@ For remote runs, `/generate` and `/finalize` are proxied, so `_persist_diagnosti
 
 ## Code bloat / DRY (deferred — detail for when it's picked up)
 
-### 1. Diagnostic hooks duplicated across model templates (~120 lines → ~40)
+### 1. Diagnostic hooks duplicated across model templates (~120 lines → ~40) — ✅ FIXED 2026-07-15 (`4c6d8f6`)
 
 `TinyTransformerLM.register_diagnostic_hooks` (`transformer/model.py:192-270`) and `TinyMoeLM.register_diagnostic_hooks` (`moe/model.py:219-297`) are near-verbatim copies.
 
@@ -79,7 +81,7 @@ For remote runs, `/generate` and `/finalize` are proxied, so `_persist_diagnosti
 
 **Refactor shape:** move the helper + `make_hook` into `diagnostics.py`. The MoE hook is a strict superset (its tuple-tolerant branch handles the tensor case too), so both templates can share it as-is. Each model's method shrinks to its registration list — the only genuinely template-specific part. Do the transformer and MoE test files still pass unchanged afterwards? They should; that's the acceptance check.
 
-### 2. `train_transformer` vs `train_moe` (`train_worker.py:291-351` / `374-435`, ~90% identical)
+### 2. `train_transformer` vs `train_moe` (`train_worker.py:291-351` / `374-435`, ~90% identical) — ✅ FIXED 2026-07-15 (`92419cb`)
 
 **Identical:** STARTING status, tiny_shakespeare + CharDataset setup, TEMPLATE_REGISTRY build + optimizer setup, resume/checkpoint load, `sync_metadata`, seed, the whole step loop skeleton (batch → forward → backward → step → yield_gpu → progress → pause check), eval cadence, final checkpoint + COMPLETED block.
 
@@ -93,15 +95,15 @@ For remote runs, `/generate` and `/finalize` are proxied, so `_persist_diagnosti
 
 **Done (DESIGN_DECISIONS §74):** all four fixture blocks (the three above plus the inline `/diagnostics/start` response) moved to `src/fixtures/diagnostics.ts`, loaded via dynamic `import()` inside the `useFixtures()` branches. Vite emits them as a separate ~5.8 kB chunk that real users never download — verified `grep "diag-17"` finds nothing in the main dist chunk.
 
-### 4. Copy-icon button defined three times
+### 4. Copy-icon button defined three times — ✅ FIXED 2026-07-15 (`1f9d00a`)
 
 Same copy/checkmark SVG glyph pair + "copied for 1.5s" logic in: `Inspector.tsx` `CopyIconButton` (12px, local `copied` bool), `App.tsx` `CopyIconButton` (14px, identical code otherwise), `ChatPanel.tsx` (inline per-message variant keyed on `copiedId: number | null` rather than a bool — the only structural difference). Extract `components/CopyIconButton.tsx` with a `size` prop; ChatPanel keeps its own keying but reuses the two SVGs (or the whole button with a `copied` prop lifted).
 
-### 5. Window-stepper JSX duplicated inside `Inspector.tsx`
+### 5. Window-stepper JSX duplicated inside `Inspector.tsx` — ✅ FIXED 2026-07-15 (`df6a39b`)
 
 `NodeWindowStepper` (~40 lines) and the inline stepper in `AttentionHeatmap` (~30 lines) are the same UI: ◀ Earlier / "Positions X–Y of Z" / Later ▶, same `maxOffset = max(0, total - windowSize)` math, same disabled logic. Differences are only where the numbers come from (`pv.positions` vs `att.window_start`/`att.total_positions`) and the hide condition. Extract one `WindowStepper({ windowStart, windowSize, totalPositions, offset, onOffsetChange })`; both call sites shrink to one line. `VectorPreviewTable` in the same file is the pattern to imitate — that one was extracted properly.
 
-### 6. Test doubles duplicated
+### 6. Test doubles duplicated — ✅ FIXED 2026-07-15 (`7dcb5e5`)
 
 `FakeResponse`/`FakeAsyncClient` are defined in `tests/test_training_remote.py` AND redefined at the top of `tests/test_diagnostics.py` — which *also* imports the other file's copies in some tests (`from tests.test_training_remote import FakeAsyncClient, FakeResponse`). Two sources of truth, already interleaved. Move to a `tests/conftest.py` or `tests/fakes.py`.
 
