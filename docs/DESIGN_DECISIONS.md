@@ -3608,6 +3608,47 @@ Remote note: `4c6d8f6` and `92419cb` touch `backend/training/` — they join
 (`scripts/build_push_trainer_*.sh`) before they reach serverless runs.
 Deliberately still deferred: db.py connection boilerplate (review item 7).
 
+## §76: Attention captured eagerly for ALL layers × heads (attention_maps)
+
+**Problem (user report, 2026-07-15):** attention was the only node type
+captured on-demand — the snapshot held weights for just the last (layer,
+head) pair the UI requested. Two consequences: switching block/head cost a
+0.9–2.8 s peek that grew with layer depth (the recompute walks the model up
+to the selected layer), and the Lab Assistant couldn't see attention at all
+unless the user had manually clicked a block + attention node first (its
+tool just reads the snapshot).
+
+**Fix (commits a542eae backend, 36dda25 frontend, spec'd by Fable,
+implemented by a Sonnet subagent over two review rounds):** every step/peek
+computes `snapshot["attention_maps"]` — windowed (12-position) softmax
+weights for all n_layer × n_head pairs, ~25–35 KB at preset size, floats
+rounded to 4 dp. Cost is ONE manual propagation (all heads per layer come
+from the same fused QKV), about the same as one worst-case single-pair peek
+— and it eliminates the per-click peeks entirely.
+
+Key invariants:
+- `_layer_qkv(block, x)` is the single home of the ln1/QKV/RoPE core; both
+  `_compute_all_attention` and `_compute_attention_weights` call it. The
+  §67 tuple unwrap appears only in the two propagation loops. Correctness
+  chain: §68's fused-forward oracle anchors the single-pair path to the
+  model's real output; the new agreement-oracle test pins
+  attention_maps[layer][head] to the single-pair path (mutation-verified:
+  advancing x before capture makes it fail).
+- `_compute_all_attention` must stay ONE pass. The subagent's first draft
+  called a per-layer helper that re-propagated from the embedding each time
+  — O(n_layer²), ~7.5 s per step. Review caught it; don't reintroduce.
+- `snapshot["attention"]` (selected pair) and on-demand `qkv_detail` are
+  unchanged — remote runs on a pre-§76 trainer image lack attention_maps,
+  and the frontend falls back to the old peek path in that case.
+- App.tsx skips the block/head-change peek only when maps are present AND
+  qkv_detail is closed AND window offset is 0; any of those falsy → peek
+  fires as before.
+- Chatbot `_trim_diagnostic_snapshot` passes attention_maps through, so the
+  assistant sees attention with zero UI interaction.
+
+Trainer image rebuild required for remote runs (joins the §67/§68/§71/§72/
+§75 rebuild list); the fallback keeps stale-image remotes functional.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
