@@ -72,7 +72,7 @@ export default function OpenRunsPage({ onClose, onReopen }: Props) {
               }}
             >
               <div>
-                <div style={{ fontWeight: 600 }}>{r.experiment_name}</div>
+                <div style={{ fontWeight: 600 }}>{r.experiment_name} <span style={{ color: "var(--text-dim)", fontWeight: "normal" }}>#{r.experiment_id}</span></div>
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   Run #{r.id} &middot; {r.device.toUpperCase()}
                   {r.execution_backend === "nebius_endpoint" ? " · Serverless" : " · Local"}
