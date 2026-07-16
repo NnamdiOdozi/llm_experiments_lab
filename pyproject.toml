@@ -22,6 +22,9 @@ dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "run_cli_unit: test exercises _run_cli itself against a FAKE subprocess — exempt from the block_real_nebius_cli guard",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend", "config"]

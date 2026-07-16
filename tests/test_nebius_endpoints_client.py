@@ -202,6 +202,7 @@ async def test_stop_endpoint_calls_cli_with_id(monkeypatch):
     assert captured["args"] == ("ai", "endpoint", "stop", "--id", "aiendpoint-abc123")
 
 
+@pytest.mark.run_cli_unit
 async def test_run_cli_raises_on_nonzero_exit(monkeypatch):
     async def fake_exec(*args, **kwargs):
         return FakeProc(b"", b"boom", 1)
@@ -212,6 +213,7 @@ async def test_run_cli_raises_on_nonzero_exit(monkeypatch):
         await endpoints_client._run_cli("ai", "endpoint", "get", "aiendpoint-1")
 
 
+@pytest.mark.run_cli_unit
 async def test_run_cli_closes_stdin_so_the_cli_cannot_block_on_input(monkeypatch):
     captured_kwargs = {}
 
@@ -226,6 +228,7 @@ async def test_run_cli_closes_stdin_so_the_cli_cannot_block_on_input(monkeypatch
     assert captured_kwargs["stdin"] == asyncio.subprocess.DEVNULL
 
 
+@pytest.mark.run_cli_unit
 async def test_run_cli_raises_and_kills_process_on_timeout(monkeypatch):
     hanging = HangingProc(b"", b"", 0)
 
@@ -240,6 +243,7 @@ async def test_run_cli_raises_and_kills_process_on_timeout(monkeypatch):
     assert hanging.killed is True
 
 
+@pytest.mark.run_cli_unit
 async def test_run_cli_kills_process_when_cancelled(monkeypatch):
     """Part F regression guard: cancelling a Stop-during-provisioning
     request must not leave the local `nebius` CLI subprocess orphaned."""

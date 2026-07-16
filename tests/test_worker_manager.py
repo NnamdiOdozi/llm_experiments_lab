@@ -198,13 +198,24 @@ async def test_ensure_worker_reprovisions_when_ready_endpoint_tunnel_is_dead(tem
     async def fake_create_endpoint(**kwargs):
         return "aiendpoint-fresh"
 
+    # The dead-tunnel path stops the broken endpoint before recreating —
+    # this was UNMOCKED and hit the real nebius CLI until the conftest
+    # guard caught it (the stop of a nonexistent id failed silently inside
+    # the code's own try/except, so the test still passed).
+    stopped = []
+
+    async def fake_stop_endpoint(endpoint_id):
+        stopped.append(endpoint_id)
+
     monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
     monkeypatch.setattr(endpoints_client, "probe_endpoint_url", fake_probe)
     monkeypatch.setattr(endpoints_client, "start_endpoint", fake_start_endpoint)
     monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "stop_endpoint", fake_stop_endpoint)
 
     worker = await worker_manager.ensure_worker("cpu")
 
+    assert stopped == ["aiendpoint-dead-tunnel"]
     assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
     assert worker["endpoint_url"] == "https://fresh.tunnel.nebius.cloud"
 
