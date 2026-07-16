@@ -4118,6 +4118,41 @@ Known-open: reconciler only scans non-terminal sessions, so a console-
 resurrected STOPPED endpoint shows stale status in the UI until the next
 start attempt (which adopts it correctly). Deliberate scope cut.
 
+## §81: Runs die with their endpoint — and tests can never touch real Nebius again
+
+Three follow-ups to §80, all from live incidents on 2026-07-16:
+
+**81a (54a7d36):** adoption-by-name claimed an endpoint in DELETING state
+(a console-deleted ghost) and burned the whole wait budget polling it.
+DELETING now counts as "no endpoint found" → create fresh, never command
+the dying id.
+
+**81b (b7f10bc):** per-device provisioning budgets — GPU 600s (capacity-
+constrained, was failing real runs at 6 min), CPU stays 360s. The busy-
+wait timeout rose to 660s because a run queued behind a busy GPU worker
+must be able to outwait the slowest provision.
+
+**81c (ccbe854):** user deleted the CPU endpoint mid-training; the worker
+record self-healed but run 226 dangled at "running 934/1000" with status
+polls 502ing forever. The reconciler scan now begins by failing any
+non-terminal remote run whose remote_endpoint_id is gone from Nebius or
+in ERROR, with the cause and last synced step in the error message.
+PAUSED runs included — their process and checkpoint lived in the same
+ephemeral container. STOPPED/STOPPING endpoints are deliberately NOT
+fatal here (app-initiated idle stops are legitimate; changing that is a
+separate decision). One list_endpoints call per scan, skipped when no
+remote runs are at stake.
+
+**81d (7d9963d):** autouse conftest fixture replaces endpoints_client's
+_run_cli with a loud failure in every test — after the 2026-07-15 real-
+cost incident (unmocked create_endpoint in tests created nine real
+billing endpoints), per-test mock discipline is not enough. The four
+_run_cli unit tests opt out via the registered run_cli_unit marker. The
+guard's first run caught a further live leak (dead-tunnel test issuing
+real stop commands, silently swallowed by the code's own try/except).
+**Do not remove this fixture**; if a new test needs the real _run_cli
+function, use the marker and a fake subprocess.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
