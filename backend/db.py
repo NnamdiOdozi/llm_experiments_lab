@@ -517,6 +517,30 @@ async def count_active_runs_in_db(
     return row[0] if row else 0
 
 
+async def list_live_runs_on_remote_endpoints() -> list[dict]:
+    """Non-terminal remote runs that are pinned to a specific endpoint —
+    the set the reconciler must fail when that endpoint is found deleted or
+    ERRORed outside the app (their training process died with the
+    container). PAUSED is deliberately included even though it's not in
+    ACTIVE_STATUSES: a paused run's process and checkpoint live in the
+    endpoint's ephemeral container, so a dead endpoint kills it just the
+    same. Runs still provisioning (remote_endpoint_id NULL) are excluded —
+    the busy-wait/provisioning path owns those. See docs/DESIGN_DECISIONS.md.
+    """
+    statuses = tuple(ACTIVE_STATUSES) + (RunStatus.PAUSED,)
+    placeholders = ",".join("?" for _ in statuses)
+    db = await get_db()
+    cursor = await db.execute(
+        f"SELECT id, status, current_step, total_steps, remote_endpoint_id FROM training_runs "
+        f"WHERE status IN ({placeholders}) AND execution_backend = 'nebius_endpoint' "
+        f"AND remote_endpoint_id IS NOT NULL",
+        list(statuses),
+    )
+    rows = await cursor.fetchall()
+    await db.close()
+    return [dict(row) for row in rows]
+
+
 async def get_run_status_from_db(run_id: int) -> dict | None:
     """Read run status from DB — survives backend restarts."""
     db = await get_db()

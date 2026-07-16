@@ -5,6 +5,7 @@ import pytest
 from backend import db
 from backend.nebius import endpoints_client, idle_monitor
 from backend.nebius.endpoints_client import NebiusEndpointError
+from backend.training.status import RunStatus
 from backend.training.worker_status import WorkerStatus
 
 
@@ -256,3 +257,78 @@ async def test_stop_idle_workers_recheck_skips_worker_touched_after_scan_read(te
     assert count == 0
     session = await real_get("worker-cpu")
     assert session["worker_status"] == WorkerStatus.READY
+
+
+async def _make_exp(name="Dead endpoint test"):
+    return await db.create_experiment(name, {"template": "transformer"})
+
+
+async def test_runs_on_a_deleted_endpoint_are_failed_with_an_honest_message(temp_db, monkeypatch):
+    """Live incident 2026-07-16: user deleted the CPU endpoint in the Nebius
+    console mid-training. The worker record self-healed but the RUN stayed
+    'running 934/1000' forever, its status polls 502ing. The reconciler now
+    fails any non-terminal remote run whose endpoint is gone or ERRORed —
+    including PAUSED ones, whose process/checkpoint died with the container."""
+    exp_id = await _make_exp()
+    dead_running = await db.create_training_run(
+        exp_id, device="cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-deleted", remote_run_id=1,
+    )
+    await db.update_training_run(dead_running, status=RunStatus.RUNNING, current_step=934, total_steps=1000)
+
+    dead_paused = await db.create_training_run(
+        exp_id, device="cpu", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-deleted", remote_run_id=2,
+    )
+    await db.update_training_run(dead_paused, status=RunStatus.PAUSED, current_step=500, total_steps=1000)
+
+    errored = await db.create_training_run(
+        exp_id, device="cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-errored", remote_run_id=3,
+    )
+    await db.update_training_run(errored, status=RunStatus.RUNNING, current_step=10, total_steps=100)
+
+    healthy = await db.create_training_run(
+        exp_id, device="cuda", execution_backend="nebius_endpoint",
+        remote_endpoint_id="aiendpoint-alive", remote_run_id=4,
+    )
+    await db.update_training_run(healthy, status=RunStatus.RUNNING, current_step=50, total_steps=100)
+
+    # Local run and a still-provisioning remote run (no endpoint id yet):
+    # both outside this check's jurisdiction.
+    local_run = await db.create_training_run(exp_id, device="cpu", execution_backend="local")
+    await db.update_training_run(local_run, status=RunStatus.RUNNING)
+    provisioning = await db.create_training_run(exp_id, device="cuda", execution_backend="nebius_endpoint")
+
+    async def fake_list_endpoints():
+        return [
+            {"metadata": {"id": "aiendpoint-alive"}, "status": {"state": "RUNNING"}},
+            {"metadata": {"id": "aiendpoint-errored"}, "status": {"state": "ERROR"}},
+        ]
+
+    monkeypatch.setattr(endpoints_client, "list_endpoints", fake_list_endpoints)
+
+    await idle_monitor._fail_runs_whose_endpoint_died()
+
+    r = await db.get_training_run(dead_running)
+    assert r["status"] == RunStatus.FAILED
+    assert "deleted outside the app" in r["error_message"]
+    assert "step 934 of 1000" in r["error_message"]
+    assert (await db.get_training_run(dead_paused))["status"] == RunStatus.FAILED
+    e = await db.get_training_run(errored)
+    assert e["status"] == RunStatus.FAILED
+    assert "ERROR state" in e["error_message"]
+    assert (await db.get_training_run(healthy))["status"] == RunStatus.RUNNING
+    assert (await db.get_training_run(local_run))["status"] == RunStatus.RUNNING
+    assert (await db.get_training_run(provisioning))["status"] == RunStatus.QUEUED
+
+
+async def test_run_endpoint_death_check_makes_no_cli_call_when_no_remote_runs(temp_db, monkeypatch):
+    """The endpoint listing is one CLI call per scan — it must be skipped
+    entirely when there are no live remote runs to protect."""
+    async def fail_if_listed():
+        raise AssertionError("list_endpoints must not be called with no remote runs at stake")
+
+    monkeypatch.setattr(endpoints_client, "list_endpoints", fail_if_listed)
+
+    await idle_monitor._fail_runs_whose_endpoint_died()

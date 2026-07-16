@@ -14,6 +14,7 @@ from backend import db
 from backend.logging_config import nebius_log
 from backend.nebius import endpoints_client
 from backend.nebius.endpoints_client import NebiusEndpointError
+from backend.training.status import RunStatus
 from backend.training.worker_status import WorkerStatus
 from config.settings import settings
 
@@ -22,6 +23,35 @@ def seconds_since(timestamp_str: str) -> float:
     """Seconds elapsed since a SQLite CURRENT_TIMESTAMP string (UTC, no tz suffix)."""
     then = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+async def _fail_runs_whose_endpoint_died() -> None:
+    """Mark non-terminal remote runs FAILED when the endpoint they ran on
+    is deleted or in ERROR — one list_endpoints() call per scan, matched
+    against each run's remote_endpoint_id. STOPPED/STOPPING endpoints are
+    deliberately NOT treated as fatal here: an app-initiated idle stop is
+    legitimate, and changing that behavior is out of scope for this fix.
+    """
+    runs = await db.list_live_runs_on_remote_endpoints()
+    if not runs:
+        return
+    endpoints = await endpoints_client.list_endpoints()
+    state_by_id = {ep["metadata"]["id"]: ep.get("status", {}).get("state") for ep in endpoints}
+    for run in runs:
+        state = state_by_id.get(run["remote_endpoint_id"])
+        if state is not None and state != "ERROR":
+            continue
+        reason = "deleted outside the app" if state is None else "in ERROR state"
+        message = (
+            f"The serverless endpoint backing this run is {reason} — training cannot "
+            f"continue (last synced step {run['current_step']} of {run['total_steps']})."
+        )
+        await db.update_training_run(run["id"], status=RunStatus.FAILED, error_message=message)
+        nebius_log.warning(
+            "Run failed by reconciler — endpoint %s: run_id=%d endpoint_id=%s status %s→failed step=%d/%d",
+            reason, run["id"], run["remote_endpoint_id"], run["status"],
+            run["current_step"], run["total_steps"],
+        )
 
 
 async def reconcile_worker_sessions() -> None:
@@ -39,6 +69,15 @@ async def reconcile_worker_sessions() -> None:
     knows better than a stale reconcile).
     """
     from backend.nebius import worker_manager  # avoid circular import
+
+    # Runs die with their endpoint — fail them honestly instead of letting
+    # them dangle. Live incident 2026-07-16: user deleted the CPU endpoint
+    # in the Nebius console while run 226 was mid-training; the session row
+    # converged to NONE (below) but the run stayed "running 934/1000"
+    # forever, its status polls 502ing every 2s. The training process and
+    # any checkpoint lived in that container — the run is unrecoverable and
+    # must say so.
+    await _fail_runs_whose_endpoint_died()
 
     # Only reconcile active sessions (primary use case)
     sessions_to_check = await db.list_active_worker_sessions()
