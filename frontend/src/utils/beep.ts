@@ -55,10 +55,10 @@ export function playTrainingStartBeep() {
   gain.connect(ctx.destination);
 
   // Short attack/decay envelope so it's a soft "blip", not a harsh click.
-  // Peak 0.195 = original 0.15 raised 30% — user request 2026-07-16.
+  // Peak 0.9 = original 0.15 raised 500% — user request 2026-07-16.
   const now = ctx.currentTime;
   gain.gain.setValueAtTime(0, now);
-  gain.gain.linearRampToValueAtTime(0.195, now + 0.03);
+  gain.gain.linearRampToValueAtTime(0.9, now + 0.10);
   gain.gain.linearRampToValueAtTime(0, now + 0.35);
 
   oscillator.start(now);
