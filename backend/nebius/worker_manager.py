@@ -353,9 +353,13 @@ async def ensure_worker(device: str) -> dict:
             endpoint_id = await create_new_worker(session_id, device_type)
 
     # --- Poll loop (outside lock) — wait for endpoint to reach RUNNING
-    max_attempts = int(max(
-        1, settings.nebius_endpoint_ready_timeout_seconds // settings.nebius_endpoint_poll_interval_seconds,
-    ))
+    # Per-device budget (user decision 2026-07-16): GPU provisioning is
+    # slower and capacity-constrained, so it gets 10 min vs CPU's 6.
+    ready_timeout = (
+        settings.nebius_endpoint_gpu_ready_timeout_seconds
+        if device_type == "gpu" else settings.nebius_endpoint_ready_timeout_seconds
+    )
+    max_attempts = int(max(1, ready_timeout // settings.nebius_endpoint_poll_interval_seconds))
     start_attempts = 0  # Count all start attempts for bounded retry (Part 7 / D7)
 
     for _ in range(max_attempts):

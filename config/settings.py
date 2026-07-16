@@ -112,7 +112,13 @@ class Settings(BaseSettings):
     nebius_endpoint_poll_interval_seconds: int = 3
     # Endpoint creation can take up to ~5 min in practice (per 2026-07-11 session,
     # confirmed higher than the plan doc's 30-90s estimate) — 360s gives buffer.
+    # This is the CPU budget; GPU gets its own longer one below.
     nebius_endpoint_ready_timeout_seconds: int = 360
+    # GPU provisioning is slower and capacity-constrained (§63: shared, fixed
+    # pool) — 6 min failed real runs on slow days (2026-07-16, endpoint still
+    # PROVISIONING at 15+ min). User decision 2026-07-16: 10 min for GPU,
+    # keep 6 min for CPU.
+    nebius_endpoint_gpu_ready_timeout_seconds: int = 600
     # Guards every single `nebius` CLI invocation — without this, a stuck CLI call
     # (seen live 2026-07-11: hung on stdin under uvicorn) blocks the request forever.
     nebius_cli_timeout_seconds: int = 60
@@ -141,8 +147,10 @@ class Settings(BaseSettings):
     worker_busy_poll_interval_seconds: int = 5
     # Timeout for _start_remote_run's busy-wait loop (Part 7 / D1) —
     # wait this long for a busy worker to become READY before marking the run
-    # FAILED. Default = ready_timeout + 60s buffer for one final retry cycle.
-    worker_busy_wait_timeout_seconds: int = 420  # 360 + 60
+    # FAILED. Must cover the SLOWEST device's ready timeout (GPU, 600s) plus
+    # a buffer for one final retry cycle, else a run waiting on a busy GPU
+    # worker gives up before that worker can possibly finish provisioning.
+    worker_busy_wait_timeout_seconds: int = 660  # 600 + 60
 
     @field_validator("nebius_subnet_id")
     @classmethod
