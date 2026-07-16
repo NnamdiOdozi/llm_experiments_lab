@@ -115,6 +115,18 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
     # mid-STARTING or mid-STOPPING (e.g. user started/stopped via Nebius console
     # seconds earlier) is found and adopted, never duplicated.
     existing = await endpoints_client.find_endpoint_any_state(kwargs["name"])
+    # A DELETING endpoint is a ghost — it will never come back, so adopting
+    # it just wastes the whole poll budget watching a corpse until it 404s.
+    # Live incident 2026-07-16 (run 227): the just-console-deleted GPU
+    # endpoint was adopted "in DELETING state" and the run burned its wait
+    # on it. Treat DELETING exactly like "no endpoint found": create fresh.
+    if existing is not None and existing.get("status", {}).get("state") == "DELETING":
+        nebius_log.info(
+            "Ignoring endpoint mid-deletion — will create fresh — "
+            "session_id=%s endpoint_id=%s name=%s",
+            session_id, existing["metadata"]["id"], kwargs["name"],
+        )
+        existing = None
     if existing is not None:
         endpoint_id = existing["metadata"]["id"]
         state = existing.get("status", {}).get("state")

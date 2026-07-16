@@ -955,3 +955,43 @@ async def test_ensure_worker_adopts_running_endpoint_with_unknown_reachability_i
     assert worker["worker_status"] == WorkerStatus.READY
     assert worker["nebius_endpoint_id"] == "aiendpoint-healthy"
     assert worker["endpoint_url"] == "https://healthy.tunnel.nebius.cloud"
+
+
+async def test_adoption_treats_deleting_endpoint_as_gone(temp_db, monkeypatch):
+    """Live incident 2026-07-16: a console-deleted GPU endpoint was still
+    visible in DELETING state and got adopted — the run then spent its whole
+    wait budget polling an endpoint that could never come back. DELETING
+    must be treated exactly like 'no endpoint found': create a fresh one,
+    and never issue start/delete commands against the dying id."""
+    async def fake_find_endpoint_any_state(name):
+        return {"metadata": {"id": "aiendpoint-dying-ghost"}, "status": {"state": "DELETING"}}
+
+    created = {}
+
+    async def fake_create_endpoint(**kwargs):
+        created["done"] = True
+        return "aiendpoint-fresh"
+
+    async def fail_if_touched(endpoint_id):
+        raise AssertionError(f"must not issue commands against a DELETING endpoint ({endpoint_id})")
+
+    async def fake_get_endpoint(endpoint_id):
+        assert endpoint_id == "aiendpoint-fresh"
+        return {
+            "spec": {"platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb"},
+            "status": {"state": "RUNNING", "public_endpoints": ["https://fresh.tunnel.nebius.cloud"]},
+        }
+
+    monkeypatch.setattr(endpoints_client, "find_endpoint_any_state", fake_find_endpoint_any_state)
+    monkeypatch.setattr(endpoints_client, "create_endpoint", fake_create_endpoint)
+    monkeypatch.setattr(endpoints_client, "start_endpoint", fail_if_touched)
+    monkeypatch.setattr(endpoints_client, "delete_endpoint", fail_if_touched)
+    monkeypatch.setattr(endpoints_client, "get_endpoint", fake_get_endpoint)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(worker_manager.settings, "nebius_endpoint_ready_timeout_seconds", 1)
+
+    worker = await worker_manager.ensure_worker("cuda")
+
+    assert created["done"]
+    assert worker["nebius_endpoint_id"] == "aiendpoint-fresh"
+    assert worker["worker_status"] == WorkerStatus.READY
