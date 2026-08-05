@@ -62,7 +62,7 @@ async def test_start_training_local_and_serverless_limits_are_independent(temp_d
     monkeypatch.setattr(settings, "max_concurrent_local_cpu_runs", 0)
     monkeypatch.setattr(settings, "max_concurrent_serverless_cpu_runs", 5)
 
-    async def fake_start_remote_run(run_id, exp, device):
+    async def fake_start_remote_run(run_id, exp, device, gpu_flavor="l40s"):
         return None
 
     import backend.api.training as training_module

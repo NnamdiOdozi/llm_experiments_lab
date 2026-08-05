@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RunStatus, ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "../types";
 import { getWorkerStatus } from "../hooks/useApi";
+import GpuFlavorSelect from "./GpuFlavorSelect";
 
 interface Props {
   runId: number | null;
@@ -14,6 +15,8 @@ interface Props {
   onDeviceChange: (d: string) => void;
   backend: string;
   onBackendChange: (b: string) => void;
+  gpuFlavor: string;
+  onGpuFlavorChange: (flavor: string) => void;
   lastPollSuccess: number | null;
   pollError: string | null;
   startError: string | null;
@@ -68,6 +71,8 @@ export default function TrainingControls({
   onDeviceChange,
   backend,
   onBackendChange,
+  gpuFlavor,
+  onGpuFlavorChange,
   lastPollSuccess,
   pollError,
   startError,
@@ -165,6 +170,9 @@ export default function TrainingControls({
               <option value="nebius_endpoint">Serverless (Nebius)</option>
             </select>
           </div>
+          {device.startsWith("cuda") && backend === "nebius_endpoint" && (
+            <GpuFlavorSelect gpuFlavor={gpuFlavor} onFlavorChange={onGpuFlavorChange} />
+          )}
         </div>
       )}
 

@@ -111,6 +111,7 @@ _MIGRATIONS = [
     ("remote_endpoint_id", "TEXT"),
     ("remote_run_id", "INTEGER"),
     ("notes_md", "TEXT"),
+    ("gpu_flavor", "TEXT"),
 ]
 
 # worker_sessions columns added after initial schema

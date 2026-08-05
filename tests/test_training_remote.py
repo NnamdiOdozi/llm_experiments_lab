@@ -52,7 +52,7 @@ def _fake_worker():
 async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkeypatch):
     exp_id = temp_db
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         return _fake_worker()
 
     monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
@@ -104,7 +104,7 @@ async def test_start_training_proxies_to_remote_endpoint(temp_db, client, monkey
 async def test_start_training_marks_run_failed_when_worker_unavailable(temp_db, client, monkeypatch):
     exp_id = temp_db
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         raise worker_manager.WorkerProvisionError("endpoint stuck in PROVISIONING")
 
     monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)
@@ -145,7 +145,7 @@ async def test_stop_training_cancels_in_flight_provisioning(temp_db, client, mon
     exp_id = temp_db
     worker_call_started = asyncio.Event()
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         worker_call_started.set()
         await asyncio.Event().wait()  # never resolves on its own — only via cancellation
 
@@ -190,7 +190,7 @@ async def test_stop_training_releases_orphaned_worker_session(temp_db, client, m
     exp_id = temp_db
     worker_call_started = asyncio.Event()
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         # Simulate ensure_worker() having already committed STARTING before
         # being cancelled mid-flight — this is the exact state a real
         # cancelled provisioning attempt leaves behind.
@@ -237,7 +237,7 @@ async def test_stop_training_leaves_ready_worker_session_alone(temp_db, client, 
     exp_id = temp_db
     worker_call_started = asyncio.Event()
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         # Unlike the test above: this worker already reached READY before
         # the cancel arrives — simulates a different run now depending on it.
         await db.update_worker_session(
@@ -289,7 +289,7 @@ async def test_execution_backend_is_correct_while_still_provisioning(temp_db, cl
     exp_id = temp_db
     worker_call_started = asyncio.Event()
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         worker_call_started.set()
         await asyncio.Event().wait()  # still "provisioning" — never resolves on its own
 
@@ -756,7 +756,7 @@ async def test_busy_wait_retries_until_ready(temp_db, client, monkeypatch):
 
     busy_call_count = [0]
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         busy_call_count[0] += 1
         if busy_call_count[0] < 3:
             raise worker_manager.WorkerBusyError("still busy")
@@ -805,7 +805,7 @@ async def test_busy_wait_timeout_fails_run(temp_db, client, monkeypatch):
     monkeypatch.setattr(training_module.settings, "worker_busy_poll_interval_seconds", 0.01)
     monkeypatch.setattr(training_module.settings, "worker_busy_wait_timeout_seconds", 0.05)
 
-    async def fake_ensure_worker(device):
+    async def fake_ensure_worker(device, gpu_flavor=None):
         raise worker_manager.WorkerBusyError("always busy")
 
     monkeypatch.setattr(worker_manager, "ensure_worker", fake_ensure_worker)

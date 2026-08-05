@@ -16,7 +16,16 @@ def device_type_for(device: str) -> str:
     return "gpu" if device.startswith("cuda") else "cpu"
 
 
-def session_id_for(device_type: str) -> str:
+def session_id_for(device_type: str, gpu_flavor: str | None = None) -> str:
+    """Returns the session ID for a worker.
+
+    For GPU with H100 flavor, returns "worker-gpu-h100" to enable separate endpoint reuse.
+    For all other cases (CPU, or GPU with l40s/None), returns "worker-{device_type}".
+    This ensures backward compatibility: existing code calling session_id_for(device_type)
+    without gpu_flavor gets the L40S key unchanged.
+    """
+    if device_type == "gpu" and gpu_flavor == "h100":
+        return "worker-gpu-h100"
     return f"worker-{device_type}"
 
 

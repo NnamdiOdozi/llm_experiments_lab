@@ -31,7 +31,7 @@ def _configured_spec(device_type: str) -> dict:
 
 
 @router.get("/workers/{device}")
-async def get_worker_status(device: str):
+async def get_worker_status(device: str, gpu_flavor: str | None = None):
     device_type = device_type_for(device)
     configured = _configured_spec(device_type)
     base = {
@@ -39,7 +39,8 @@ async def get_worker_status(device: str):
         "configured_platform": configured["platform"],
         "configured_preset": configured["preset"],
     }
-    session = await db.get_worker_session(session_id_for(device_type))
+    session_id = session_id_for(device_type, gpu_flavor)
+    session = await db.get_worker_session(session_id)
     if session is None:
         return {
             **base,
@@ -65,8 +66,9 @@ async def get_worker_status(device: str):
 
 
 @router.get("/workers/{device}/logs")
-async def get_worker_logs(device: str):
-    session = await db.get_worker_session(session_id_for(device_type_for(device)))
+async def get_worker_logs(device: str, gpu_flavor: str | None = None):
+    device_type = device_type_for(device)
+    session = await db.get_worker_session(session_id_for(device_type, gpu_flavor))
     if session is None or session["nebius_endpoint_id"] is None:
         return {"logs": ""}
     logs = await endpoints_client.get_logs(session["nebius_endpoint_id"])
@@ -74,8 +76,9 @@ async def get_worker_logs(device: str):
 
 
 @router.post("/workers/{device}/heartbeat")
-async def heartbeat(device: str):
-    session_id = session_id_for(device_type_for(device))
+async def heartbeat(device: str, gpu_flavor: str | None = None):
+    device_type = device_type_for(device)
+    session_id = session_id_for(device_type, gpu_flavor)
     if await db.get_worker_session(session_id) is not None:
         await db.touch_worker_session(session_id)
     return {"ok": True}

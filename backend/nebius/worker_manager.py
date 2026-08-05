@@ -79,22 +79,47 @@ async def _live_state(session: dict) -> dict:
     }
 
 
-def endpoint_create_kwargs(device_type: str) -> dict:
+def endpoint_create_kwargs(device_type: str, gpu_flavor: str | None = None) -> dict:
     """Single source of truth for "which settings back a cpu vs gpu
     endpoint" — reused by create_new_worker() (the running app's
     automatic path) and scripts/create_nebius_endpoint.py (manual/standalone
-    creation), so the two can never drift out of sync with each other."""
-    return dict(
-        name=settings.nebius_gpu_endpoint_name if device_type == "gpu" else settings.nebius_cpu_endpoint_name,
-        image=settings.nebius_gpu_trainer_image if device_type == "gpu" else settings.nebius_cpu_trainer_image,
-        platform=settings.nebius_gpu_platform if device_type == "gpu" else settings.nebius_cpu_platform,
-        preset=settings.nebius_gpu_preset if device_type == "gpu" else settings.nebius_cpu_preset,
-        container_port=settings.nebius_endpoint_container_port,
-        subnet_id=settings.nebius_subnet_id,
-    )
+    creation), so the two can never drift out of sync with each other.
+
+    For GPU, gpu_flavor selects the hardware variant:
+    - "h100": gpu-h100-sxm platform with H100-specific settings
+    - "l40s" or None: gpu-l40s-a platform (L40S default, backward compatible)
+    """
+    if device_type == "gpu":
+        if gpu_flavor == "h100":
+            return dict(
+                name=settings.nebius_gpu_h100_endpoint_name,
+                image=settings.nebius_gpu_trainer_image,  # Same image for both GPU flavors
+                platform=settings.nebius_gpu_h100_platform,
+                preset=settings.nebius_gpu_h100_preset,
+                container_port=settings.nebius_endpoint_container_port,
+                subnet_id=settings.nebius_subnet_id,
+            )
+        else:  # "l40s" or None — L40S default
+            return dict(
+                name=settings.nebius_gpu_endpoint_name,
+                image=settings.nebius_gpu_trainer_image,
+                platform=settings.nebius_gpu_platform,
+                preset=settings.nebius_gpu_preset,
+                container_port=settings.nebius_endpoint_container_port,
+                subnet_id=settings.nebius_subnet_id,
+            )
+    else:  # CPU
+        return dict(
+            name=settings.nebius_cpu_endpoint_name,
+            image=settings.nebius_cpu_trainer_image,
+            platform=settings.nebius_cpu_platform,
+            preset=settings.nebius_cpu_preset,
+            container_port=settings.nebius_endpoint_container_port,
+            subnet_id=settings.nebius_subnet_id,
+        )
 
 
-async def create_new_worker(session_id: str, device_type: str) -> str:
+async def create_new_worker(session_id: str, device_type: str, gpu_flavor: str | None = None) -> str:
     """Get session_id a usable endpoint — adopts a live one, restarts a
     stopped one, or creates fresh, in that preference order.
 
@@ -102,6 +127,8 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
     session (no row yet) and for recovery when an existing session's
     endpoint was deleted outside the app (row exists, just needs a new
     endpoint_id) — so it must not assume the row is absent.
+
+    For GPU, gpu_flavor selects the hardware variant ("h100" or "l40s"/None).
     """
     idle_timeout = (
         settings.gpu_idle_timeout_seconds if device_type == "gpu" else settings.cpu_idle_timeout_seconds
@@ -109,7 +136,7 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
     if await db.get_worker_session(session_id) is None:
         await db.create_worker_session(session_id, device_type, "nebius_endpoint", idle_timeout)
 
-    kwargs = endpoint_create_kwargs(device_type)
+    kwargs = endpoint_create_kwargs(device_type, gpu_flavor)
     # Part 3 / D3: Adoption fix — find endpoint in ANY state (not just
     # RUNNING or STOPPED), so a console-started or console-stopped endpoint
     # mid-STARTING or mid-STOPPING (e.g. user started/stopped via Nebius console
@@ -185,7 +212,7 @@ async def create_new_worker(session_id: str, device_type: str) -> str:
     return endpoint_id
 
 
-async def ensure_worker(device: str) -> dict:
+async def ensure_worker(device: str, gpu_flavor: str | None = None) -> dict:
     """Return a READY worker_session dict (with endpoint_url) for the given device.
 
     Decision table (under lock) — determines whether to reuse, create, or restart:
@@ -201,9 +228,12 @@ async def ensure_worker(device: str) -> dict:
     - Up to settings.nebius_endpoint_start_max_retries attempts (Part 7 / D7)
     - Retry when poll observes STOPPED and no successful start yet
     - Re-create if endpoint disappears mid-wait
+
+    For GPU, gpu_flavor selects the hardware variant ("h100" or "l40s"/None for backward compat).
+    The flavor is encoded in session_id, enabling per-flavor endpoint reuse.
     """
     device_type = device_type_for(device)
-    session_id = session_id_for(device_type)
+    session_id = session_id_for(device_type, gpu_flavor)
 
     async with _lock_for(session_id):
         session = await db.get_worker_session(session_id)
@@ -273,7 +303,7 @@ async def ensure_worker(device: str) -> dict:
                 session_id, endpoint_id,
             )
             await endpoints_client.delete_endpoint(endpoint_id)
-            endpoint_id = await create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type, gpu_flavor)
 
         # --- Decision 5: live RUNNING + tunnel CONFIRMED dead → stop → create (Part 2 / D4)
         # `reachable is False` (probe ran and failed), NOT `not reachable`:
@@ -292,7 +322,7 @@ async def ensure_worker(device: str) -> dict:
                     "Failed to stop dead-tunnel endpoint (will be orphaned) — "
                     "session_id=%s endpoint_id=%s: %s", session_id, endpoint_id, exc,
                 )
-            endpoint_id = await create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type, gpu_flavor)
 
         # --- Decision 5b: live RUNNING (reachability unknown) or STARTING —
         # e.g. console-started out-of-band, or a session with no URL recorded
@@ -350,7 +380,7 @@ async def ensure_worker(device: str) -> dict:
         else:
             # No endpoint at all (DB NONE, DB STOPPED/FAILED, or DB SHUTTING_DOWN with endpoint gone)
             # or endpoint gone mid-flight → create fresh
-            endpoint_id = await create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type, gpu_flavor)
 
     # --- Poll loop (outside lock) — wait for endpoint to reach RUNNING
     # Per-device budget (user decision 2026-07-16): GPU provisioning is
@@ -371,7 +401,7 @@ async def ensure_worker(device: str) -> dict:
                 "Endpoint disappeared while waiting — session_id=%s endpoint_id=%s: %s. Creating new one.",
                 session_id, endpoint_id, exc,
             )
-            endpoint_id = await create_new_worker(session_id, device_type)
+            endpoint_id = await create_new_worker(session_id, device_type, gpu_flavor)
             continue
 
         state = endpoint.get("status", {}).get("state")

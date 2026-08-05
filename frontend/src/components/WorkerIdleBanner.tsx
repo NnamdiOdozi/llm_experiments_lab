@@ -3,6 +3,7 @@ import { getWorkerStatus, sendWorkerHeartbeat, WorkerStatus } from "../hooks/use
 
 interface Props {
   device: string;
+  gpuFlavor?: string;
 }
 
 const POLL_INTERVAL_MS = 15000;
@@ -13,7 +14,7 @@ function formatRemaining(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
-export default function WorkerIdleBanner({ device }: Props) {
+export default function WorkerIdleBanner({ device, gpuFlavor }: Props) {
   const [status, setStatus] = useState<WorkerStatus | null>(null);
   const [stoppedDismissed, setStoppedDismissed] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -28,7 +29,7 @@ export default function WorkerIdleBanner({ device }: Props) {
 
   async function poll() {
     try {
-      const s = await getWorkerStatus(device);
+      const s = await getWorkerStatus(device, gpuFlavor);
       if (s.worker_status === "ready") sawReadyRef.current = true;
       setStatus(s);
     } catch {
@@ -45,10 +46,10 @@ export default function WorkerIdleBanner({ device }: Props) {
       if (pollRef.current) clearInterval(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device]);
+  }, [device, gpuFlavor]);
 
   async function handleContinueSession() {
-    await sendWorkerHeartbeat(device);
+    await sendWorkerHeartbeat(device, gpuFlavor);
     poll();
   }
 

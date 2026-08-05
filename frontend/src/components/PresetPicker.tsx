@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { Preset, ExperimentConfig } from "../types";
 import { fetchPresets, createFromPreset } from "../hooks/useApi";
+import GpuFlavorSelect from "./GpuFlavorSelect";
 
 interface Props {
-  onSelect: (experimentId: number, config: ExperimentConfig, device: string, backend: string) => void;
+  onSelect: (experimentId: number, config: ExperimentConfig, device: string, backend: string, gpuFlavor: string) => void;
 }
 
 export default function PresetPicker({ onSelect }: Props) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
+  const [gpuFlavor, setGpuFlavor] = useState("l40s");
+  // Same condition TrainingControls uses to show the flavor picker — GPU +
+  // serverless is the only combination where L40S vs H100 is meaningful.
+  const showGpuFlavor = device.startsWith("cuda") && backend === "nebius_endpoint";
 
   useEffect(() => {
     fetchPresets().then(setPresets);
@@ -22,7 +27,7 @@ export default function PresetPicker({ onSelect }: Props) {
       model: p.model,
       training: p.training,
     };
-    onSelect(experiment_id, config, device, backend);
+    onSelect(experiment_id, config, device, backend, showGpuFlavor ? gpuFlavor : "l40s");
   }
 
   return (
@@ -51,6 +56,9 @@ export default function PresetPicker({ onSelect }: Props) {
             <option value="nebius_endpoint">Serverless (Nebius)</option>
           </select>
         </div>
+        {showGpuFlavor && (
+          <GpuFlavorSelect gpuFlavor={gpuFlavor} onFlavorChange={setGpuFlavor} />
+        )}
       </div>
       {/* ~50% bigger than before — direct user report, 2026-07-15: presets
           were straining to read at the old size. See docs/DESIGN_DECISIONS.md. */}

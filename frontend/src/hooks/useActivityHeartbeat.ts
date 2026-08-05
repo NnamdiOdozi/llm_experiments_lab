@@ -17,8 +17,10 @@ const ACTIVITY_EVENTS = ["scroll", "mousemove", "keydown", "click"] as const;
  * accepts: a passively-open tab with occasional incidental scroll may
  * never idle-time-out. Only active for remote (nebius_endpoint) runs;
  * local runs have no worker to keep alive.
+ *
+ * For GPU runs, gpuFlavor is used to select the per-flavor worker session.
  */
-export function useActivityHeartbeat(device: string, enabled: boolean) {
+export function useActivityHeartbeat(device: string, enabled: boolean, gpuFlavor?: string) {
   const lastSentRef = useRef(0);
 
   useEffect(() => {
@@ -28,7 +30,7 @@ export function useActivityHeartbeat(device: string, enabled: boolean) {
       const now = Date.now();
       if (now - lastSentRef.current < THROTTLE_MS) return;
       lastSentRef.current = now;
-      sendWorkerHeartbeat(device).catch(() => {
+      sendWorkerHeartbeat(device, gpuFlavor).catch(() => {
         // best-effort — a missed heartbeat just means the idle clock
         // doesn't reset this time, not worth surfacing to the user
       });
@@ -42,5 +44,5 @@ export function useActivityHeartbeat(device: string, enabled: boolean) {
         window.removeEventListener(event, onActivity);
       }
     };
-  }, [device, enabled]);
+  }, [device, enabled, gpuFlavor]);
 }

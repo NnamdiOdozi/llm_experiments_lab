@@ -122,6 +122,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
+  const [gpuFlavor, setGpuFlavor] = useState("l40s");
   const [showOpenRuns, setShowOpenRuns] = useState(false);
   const [showExperiments, setShowExperiments] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
@@ -301,7 +302,10 @@ export default function App() {
 
   // Same condition as WorkerIdleBanner's visibility below — a remote
   // worker's idle clock is only relevant while actually using one.
-  useActivityHeartbeat(device, runStatus?.execution_backend !== "local");
+  // Pass gpuFlavor for GPU runs to select the per-flavor worker session.
+  const deviceType = device.startsWith("cuda") ? "gpu" : "cpu";
+  const gpuFlavorParam = deviceType === "gpu" ? gpuFlavor : undefined;
+  useActivityHeartbeat(device, runStatus?.execution_backend !== "local", gpuFlavorParam);
 
   function handleConfigChange(cfg: ExperimentConfig) {
     setConfig(cfg);
@@ -333,7 +337,7 @@ export default function App() {
     setDiagnosticSessionId(null);
   }
 
-  function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string, selectedBackend: string) {
+  function handlePresetSelect(expId: number, cfg: ExperimentConfig, selectedDevice: string, selectedBackend: string, selectedGpuFlavor: string) {
     setExperimentId(expId);
     setConfig(cfg);
     setRunId(null);
@@ -342,12 +346,13 @@ export default function App() {
     resetInspectorState();
     setDevice(selectedDevice);
     setBackend(selectedBackend);
+    setGpuFlavor(selectedGpuFlavor);
     saveSession(expId, null, cfg);
   }
 
   // Reopening a past experiment (which may already have runs) to add a new
   // one — mirrors handlePresetSelect but skips creating a new experiment.
-  // Device/backend reset to the same defaults a fresh session starts with;
+  // Device/backend/gpuFlavor reset to the same defaults a fresh session starts with;
   // TrainingControls lets the user change them before clicking Start.
   function handleLoadExperiment(expId: number, cfg: ExperimentConfig) {
     setExperimentId(expId);
@@ -358,6 +363,7 @@ export default function App() {
     resetInspectorState();
     setDevice("cpu");
     setBackend("local");
+    setGpuFlavor("l40s");
     saveSession(expId, null, cfg);
   }
 
@@ -374,6 +380,9 @@ export default function App() {
     resetInspectorState();
     setDevice(run.device);
     setBackend(run.execution_backend);
+    // GPU flavor would come from the run's data if stored; for now, default to l40s
+    // (backward compat: runs created before this feature won't have it set)
+    setGpuFlavor("l40s");
     saveSession(run.experiment_id, run.id, exp.config);
     setShowOpenRuns(false);
   }
@@ -485,7 +494,7 @@ export default function App() {
         configTimerRef.current = null;
         await updateConfig(experimentId, config);
       }
-      const { run_id } = await startTraining(experimentId, device, backend);
+      const { run_id } = await startTraining(experimentId, device, backend, gpuFlavor);
       setRunId(run_id);
       saveSession(experimentId, run_id, config);
     } catch (err) {
@@ -658,7 +667,7 @@ export default function App() {
       {/* Hide when the current run is definitively local — a remote worker's
           idle status is irrelevant noise if you're not using it right now.
           See docs/DESIGN_DECISIONS.md §10. */}
-      {runStatus?.execution_backend !== "local" && <WorkerIdleBanner device={device} />}
+      {runStatus?.execution_backend !== "local" && <WorkerIdleBanner device={device} gpuFlavor={deviceType === "gpu" ? gpuFlavor : undefined} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <h1 style={{ fontSize: 20 }}>
           LLM Experiments Lab
@@ -680,18 +689,13 @@ export default function App() {
         <HardwareSpecs device={device} backend={runStatus?.execution_backend ?? backend} />
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          // Left sidebar narrowed 20% (was symmetric with the right pane at
-          // 570px each — direct user request, 2026-07-16, unused space).
-          // Freed width moved entirely to the right pane; middle stays
-          // untouched. See docs/DESIGN_DECISIONS.md.
-          gridTemplateColumns: "456px 1fr 684px",
-          gap: 16,
-          alignItems: "start",
-        }}
-      >
+      {/* Dashboard columns. Layout (fluid widths + shrink-then-stack
+          breakpoint) lives in index.css .dashboard-grid so a @media query can
+          reflow it for narrow screens / an open browser side-pane — inline
+          styles can't express @media. Column proportions (left ~456, right
+          ~684, direct user request 2026-07-16) preserved as the max track
+          sizes. See docs/DESIGN_DECISIONS.md. */}
+      <div className="dashboard-grid">
         {/* Left sidebar */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <ConfigPanel
@@ -713,6 +717,8 @@ export default function App() {
             onDeviceChange={setDevice}
             backend={backend}
             onBackendChange={setBackend}
+            gpuFlavor={gpuFlavor}
+            onGpuFlavorChange={setGpuFlavor}
             lastPollSuccess={lastPollSuccess}
             pollError={pollError}
             startError={startError}

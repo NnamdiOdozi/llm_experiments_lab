@@ -104,10 +104,13 @@ class Settings(BaseSettings):
     nebius_subnet_id: str = "vpcsubnet-your-subnet-id-here"
     nebius_cpu_platform: str = "cpu-d3"
     nebius_cpu_preset: str = "16vcpu-64gb"  # unverified at this size, see comment above
-    nebius_gpu_platform: str = "gpu-l40s-a"       # unverified
-    nebius_gpu_preset: str = "1gpu-8vcpu-32gb"    # unverified
+    nebius_gpu_platform: str = "gpu-l40s-a"       # unverified (L40S default)
+    nebius_gpu_preset: str = "1gpu-8vcpu-32gb"    # unverified (L40S default)
+    nebius_gpu_h100_platform: str = "gpu-h100-sxm"
+    nebius_gpu_h100_preset: str = "1gpu-16vcpu-200gb"
     nebius_cpu_endpoint_name: str = "llm-lab-cpu-trainer"
     nebius_gpu_endpoint_name: str = "llm-lab-gpu-trainer"
+    nebius_gpu_h100_endpoint_name: str = "llm-lab-gpu-h100-trainer"
     nebius_endpoint_container_port: int = 8000
     nebius_endpoint_poll_interval_seconds: int = 3
     # Endpoint creation can take up to ~5 min in practice (per 2026-07-11 session,

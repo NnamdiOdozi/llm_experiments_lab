@@ -21,6 +21,24 @@ body {
   line-height: 1.5;
 }
 
+/* Main dashboard: three columns on wide screens, fluid so they shrink to fit
+   a laptop or a browser with a side-pane open, then stack into one scrollable
+   column below the breakpoint. Replaces a fixed "456px 1fr 684px" grid that
+   overflowed. minmax() lets the side columns shrink from their comfortable max
+   to a readable min while the centre takes the slack. 2026-08-05 user request. */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 456px) minmax(0, 1fr) minmax(360px, 684px);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 button {
   cursor: pointer;
   border: 1px solid var(--border);

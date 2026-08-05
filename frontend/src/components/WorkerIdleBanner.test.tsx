@@ -56,7 +56,8 @@ describe("WorkerIdleBanner", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /continue session/i })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /continue session/i }));
 
-    await waitFor(() => expect(heartbeat).toHaveBeenCalledWith("cpu"));
+    // sendWorkerHeartbeat now takes device and optional gpuFlavor parameter
+    await waitFor(() => expect(heartbeat).toHaveBeenCalledWith("cpu", undefined));
     expect(getStatus).toHaveBeenCalledTimes(2);
   });
 

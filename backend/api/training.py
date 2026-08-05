@@ -59,6 +59,10 @@ class StartRunRequest(BaseModel):
     # NOT settings.training_backend, which is only that dropdown's initial
     # suggestion. See docs/DESIGN_DECISIONS.md §11.
     backend: str = "local"
+    # GPU flavor for serverless runs: "l40s" (default) or "h100".
+    # Only relevant when backend == "nebius_endpoint" and device starts with "cuda".
+    # Ignored for local runs. See docs/DESIGN_DECISIONS.md.
+    gpu_flavor: str = "l40s"
 
 
 class PromptRequest(BaseModel):
@@ -141,7 +145,9 @@ def _count_active_runs(device_filter: str | None = None) -> int:
 
 async def _remote_endpoint_url(db_run: dict) -> str | None:
     """The endpoint currently backing this run's device, if it's still known."""
-    session_id = session_id_for(device_type_for(db_run["device"]))
+    device_type = device_type_for(db_run["device"])
+    gpu_flavor = db_run.get("gpu_flavor") if device_type == "gpu" else None
+    session_id = session_id_for(device_type, gpu_flavor)
     worker = await db.get_worker_session(session_id)
     return worker["endpoint_url"] if worker else None
 
@@ -175,17 +181,21 @@ async def _touch_worker_for_run(db_run: dict) -> None:
     last_activity_at at all — only worker acquisition and the manual
     "Continue session" heartbeat did. See docs/DESIGN_DECISIONS.md.
     """
-    session_id = session_id_for(device_type_for(db_run["device"]))
+    device_type = device_type_for(db_run["device"])
+    gpu_flavor = db_run.get("gpu_flavor") if device_type == "gpu" else None
+    session_id = session_id_for(device_type, gpu_flavor)
     await db.touch_worker_session(session_id)
 
 
-async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
+async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str = "l40s") -> None:
     """Mirror the experiment onto the CPU/GPU endpoint and start training there.
 
     The endpoint is an ephemeral execution worker, not durable storage — the
     local training_runs row (updated below) stays the system of record. The
     frontend only ever deals with the local run_id; remote_run_id is an
     internal detail used to address the endpoint's own copy of the run.
+
+    For GPU, gpu_flavor selects the hardware variant ("h100" or "l40s"/default).
 
     Runs as a backgrounded asyncio.Task (see start_training), not awaited
     directly inside the HTTP request — provisioning can take up to ~6
@@ -207,7 +217,9 @@ async def _start_remote_run(run_id: int, exp: dict, device: str) -> None:
         end_time = start_time + settings.worker_busy_wait_timeout_seconds
         while time.monotonic() < end_time:
             try:
-                worker = await worker_manager.ensure_worker(device)
+                device_type = device_type_for(device)
+                gpu_flavor_param = gpu_flavor if device_type == "gpu" else None
+                worker = await worker_manager.ensure_worker(device, gpu_flavor_param)
                 break  # Got the worker, proceed to dispatch
             except worker_manager.WorkerBusyError as exc:
                 remaining = end_time - time.monotonic()
@@ -331,6 +343,7 @@ async def start_training(req: StartRunRequest):
             # serverless run showed "local" for its entire ~6min
             # provisioning window. See docs/DESIGN_DECISIONS.md.
             execution_backend=req.backend,
+            gpu_flavor=req.gpu_flavor if req.backend == "nebius_endpoint" else None,
         )
         if req.backend == "nebius_endpoint":
             # Backgrounded, not awaited — provisioning can take up to ~6
@@ -338,7 +351,7 @@ async def start_training(req: StartRunRequest):
             # (frontend polls status from there), same fire-and-forget
             # shape the local path below already uses. See _start_remote_run
             # and _provisioning_tasks for how Stop cancels this mid-flight.
-            task = asyncio.create_task(_start_remote_run(run_id, exp, req.device))
+            task = asyncio.create_task(_start_remote_run(run_id, exp, req.device, req.gpu_flavor))
             _provisioning_tasks[run_id] = task
             task.add_done_callback(lambda _t, rid=run_id: _provisioning_tasks.pop(rid, None))
         else:

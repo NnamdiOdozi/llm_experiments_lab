@@ -63,10 +63,10 @@ export function listExperiments() {
   return api<import("../types").Experiment[]>("/experiments");
 }
 
-export function startTraining(experimentId: number, device: string = "cpu", backend: string = "local") {
+export function startTraining(experimentId: number, device: string = "cpu", backend: string = "local", gpuFlavor: string = "l40s") {
   return api<{ run_id: number }>("/training/start", {
     method: "POST",
-    body: JSON.stringify({ experiment_id: experimentId, device, backend }),
+    body: JSON.stringify({ experiment_id: experimentId, device, backend, gpu_flavor: gpuFlavor }),
   });
 }
 
@@ -96,16 +96,25 @@ export interface WorkerStatus {
   configured_preset?: string;
 }
 
-export function getWorkerStatus(device: string) {
-  return api<WorkerStatus>(`/nebius/workers/${device}`);
+export function getWorkerStatus(device: string, gpuFlavor?: string) {
+  const params = new URLSearchParams();
+  if (gpuFlavor) params.append("gpu_flavor", gpuFlavor);
+  const query = params.toString() ? `?${params}` : "";
+  return api<WorkerStatus>(`/nebius/workers/${device}${query}`);
 }
 
-export function sendWorkerHeartbeat(device: string) {
-  return api<{ ok: boolean }>(`/nebius/workers/${device}/heartbeat`, { method: "POST" });
+export function sendWorkerHeartbeat(device: string, gpuFlavor?: string) {
+  const params = new URLSearchParams();
+  if (gpuFlavor) params.append("gpu_flavor", gpuFlavor);
+  const query = params.toString() ? `?${params}` : "";
+  return api<{ ok: boolean }>(`/nebius/workers/${device}/heartbeat${query}`, { method: "POST" });
 }
 
-export function getWorkerLogs(device: string) {
-  return api<{ logs: string }>(`/nebius/workers/${device}/logs`);
+export function getWorkerLogs(device: string, gpuFlavor?: string) {
+  const params = new URLSearchParams();
+  if (gpuFlavor) params.append("gpu_flavor", gpuFlavor);
+  const query = params.toString() ? `?${params}` : "";
+  return api<{ logs: string }>(`/nebius/workers/${device}/logs${query}`);
 }
 
 export interface OpenRun {
