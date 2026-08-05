@@ -81,7 +81,9 @@ class DiagnosticsStepRequest(BaseModel):
     Phase 2: optional attention_layer/head triggers an explicit attention
     capture for that layer/head; omit both to skip it (cheap default).
     Phase 4: qkv_detail (requires attention_layer/head) adds Q/K/V vectors
-    for the last token position, one head only."""
+    for the last token position, one head only.
+    Canvas heatmap: attention_full (requires attention_layer/head) adds full
+    T×T matrix un-windowed for canvas rendering."""
     attention_layer: int | None = None
     attention_head: int | None = None
     qkv_detail: bool = False
@@ -106,6 +108,11 @@ class DiagnosticsStepRequest(BaseModel):
     # attention. Direct user request, 2026-07-15. See
     # docs/DESIGN_DECISIONS.md.
     node_window_offset: int = 0
+    # Full-context attention matrix for canvas heatmap (requires
+    # attention_layer/head). When True, computes the full T×T matrix
+    # un-windowed for one selected (layer, head) pair. Omit or False to skip.
+    # See docs/DESIGN_DECISIONS.md.
+    attention_full: bool = False
 
 
 class DiagnosticsGenerateRequest(BaseModel):
@@ -1314,6 +1321,7 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
     attention_window_offset = req.attention_window_offset if req is not None else 0
+    attention_full = req.attention_full if req is not None else False
     temperature = req.temperature if req is not None else None
     decoding_mode = req.decoding_mode if req is not None else None
     node_window_offset = req.node_window_offset if req is not None else 0
@@ -1327,6 +1335,7 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
                 body["attention_head"] = attention_params[1]
                 body["qkv_detail"] = qkv_detail
                 body["attention_window_offset"] = attention_window_offset
+                body["attention_full"] = attention_full
             # Previously bundled only under the attention_params branch above
             # — temperature/decoding_mode overrides would have been silently
             # dropped for remote runs whenever attention wasn't also
@@ -1368,7 +1377,7 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
         snapshot = await asyncio.to_thread(
             diagnostics.run_diagnostic_step,
             session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
-            attention_window_offset=attention_window_offset,
+            attention_window_offset=attention_window_offset, attention_full=attention_full,
         )
     if snapshot is None:
         raise HTTPException(500, "Failed to run diagnostic step")
@@ -1395,6 +1404,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
         attention_params = (req.attention_layer, req.attention_head)
     qkv_detail = req.qkv_detail if req is not None else False
     attention_window_offset = req.attention_window_offset if req is not None else 0
+    attention_full = req.attention_full if req is not None else False
     node_window_offset = req.node_window_offset if req is not None else 0
 
     db_run = await db.get_training_run(run_id)
@@ -1406,6 +1416,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
                 body["attention_head"] = attention_params[1]
                 body["qkv_detail"] = qkv_detail
                 body["attention_window_offset"] = attention_window_offset
+                body["attention_full"] = attention_full
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/peek", body)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Remote diagnostics peek failed: {exc}")
@@ -1426,7 +1437,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
         snapshot = await asyncio.to_thread(
             diagnostics.run_diagnostic_step_internal,
             session_id, top_k=5, attention_params=attention_params, qkv_detail=qkv_detail,
-            skip_token_generation=True, attention_window_offset=attention_window_offset,
+            skip_token_generation=True, attention_window_offset=attention_window_offset, attention_full=attention_full,
         )
     if snapshot is None:
         raise HTTPException(500, "Failed to peek diagnostic state")

@@ -74,6 +74,12 @@ class DiagnosticSnapshot:
     # Schema: {available, window_start, total_positions, token_labels, n_layer, n_head, weights}
     # Enables instant block/head switching in the Inspector without round-trip peeks.
     attention_maps: dict = field(default_factory=lambda: {"available": False, "reason": "Not captured"})
+    # Full-context attention matrix for canvas heatmap — requested on-demand via
+    # attention_full=True in peek, populated only when explicitly requested. Contains
+    # full T×T matrix (capped to block_size) for one selected (layer, head) pair.
+    # Schema: {available, layer, head, weights, token_labels, total_positions, block_size}
+    # See docs/DESIGN_DECISIONS.md.
+    attention_full: dict = field(default_factory=lambda: {"available": False, "reason": "Not requested"})
     complete: bool = True
 
     def to_dict(self) -> dict:
@@ -89,6 +95,7 @@ class DiagnosticSnapshot:
             "lm_head": self.lm_head,
             "position_tokens": self.position_tokens,
             "attention_maps": self.attention_maps,
+            "attention_full": self.attention_full,
             "complete": self.complete,
         }
 
@@ -346,6 +353,7 @@ def _compute_attention_weights(
     head: int,
     qkv_detail: bool = False,
     window_offset: int = 0,
+    full_matrix: bool = False,
 ) -> Optional[dict]:
     """Explicit (non-fused) QK^T -> scale -> causal mask -> softmax attention path.
 
@@ -353,16 +361,22 @@ def _compute_attention_weights(
     Trainer_to_Frontend_Metrics.md doesn't expose weights — this recomputes
     just the requested layer/head manually, only when asked for (Phase 2).
 
-    The heatmap itself (`weights`/`token_labels`) is windowed to the last
-    DIAGNOSTIC_POSITION_WINDOW positions on both axes (a square block, not
-    just the rows) — previously unwindowed, so a long session rendered an
-    ever-growing T x T grid that got "very busy very quickly" (real user
-    report, 2026-07-13). `window_offset` shifts which block of the sequence
-    is shown: 0 = most recent (default), positive N = shift the window back
-    N positions, so the frontend can step earlier/later through history
-    instead of only ever seeing the tail. qkv_detail (when requested) shares
-    the exact same window — one stepper controls both. See
+    When full_matrix=False (default, windowed mode): The heatmap itself
+    (`weights`/`token_labels`) is windowed to the last DIAGNOSTIC_POSITION_WINDOW
+    positions on both axes (a square block, not just the rows) — previously
+    unwindowed, so a long session rendered an ever-growing T x T grid that got
+    "very busy very quickly" (real user report, 2026-07-13). `window_offset`
+    shifts which block of the sequence is shown: 0 = most recent (default),
+    positive N = shift the window back N positions, so the frontend can step
+    earlier/later through history instead of only ever seeing the tail. qkv_detail
+    (when requested) shares the exact same window — one stepper controls both. See
     docs/DESIGN_DECISIONS.md.
+
+    When full_matrix=True (canvas mode): Returns the ENTIRE T×T matrix (or
+    min(T, block_size) if session exceeded block_size) un-windowed, for the
+    canvas heatmap. token_labels and total_positions describe the full context
+    the model saw. window_offset is ignored in this mode. qkv_detail is not
+    populated (Q/K/V remain windowed in the Q/K/V browser).
 
     Attribute names (qkv, n_head, head_size, blocks[i].attn/ln1) match
     backend/training/templates/transformer/model.py's MultiHeadSelfAttention
@@ -378,7 +392,14 @@ def _compute_attention_weights(
             return None
 
         all_tokens = session.prompt_tokens + session.token_history
-        idx = torch.tensor([all_tokens], dtype=torch.long, device=session.device)
+        # Only use the last block_size tokens (what the model actually saw).
+        # See _execute_forward_pass comment in backend/training/diagnostics.py §75
+        # for why this matters: a session can exceed block_size, but the model
+        # never receives input longer than block_size due to the windowing in
+        # model.generate()'s idx[:, -self.block_size:].
+        block_size = session.model.block_size
+        visible_tokens = all_tokens[-block_size:]
+        idx = torch.tensor([visible_tokens], dtype=torch.long, device=session.device)
 
         with torch.inference_mode():
             x = model.token_emb(idx)
@@ -403,40 +424,57 @@ def _compute_attention_weights(
             scores = scores.masked_fill(~causal_mask, float("-inf"))
             full_weights = torch.softmax(scores, dim=-1)[0, head]
 
-            # Shared window for the heatmap and qkv_detail — offset=0 shows
-            # the most recent `window` positions; positive offset shifts the
-            # window's end earlier by that many positions. Clamped so the
-            # window never goes out of [0, T].
-            window = min(T, DIAGNOSTIC_POSITION_WINDOW)
-            end = max(window, T - max(window_offset, 0))
-            start = end - window
+            if full_matrix:
+                # Full matrix mode: return entire T×T, un-windowed
+                weights = full_weights.tolist()
+                token_labels = [session.tokenizer.decode([tid]) for tid in visible_tokens]
+                result = {
+                    "available": True,
+                    "layer": layer,
+                    "head": head,
+                    "weights": weights,
+                    "token_labels": token_labels,
+                    "total_positions": T,
+                    "block_size": block_size,
+                }
+                # No qkv_detail in full_matrix mode
+                return result
+            else:
+                # Windowed mode (classic): 12-position window for heatmap + qkv_detail
+                # Shared window for the heatmap and qkv_detail — offset=0 shows
+                # the most recent `window` positions; positive offset shifts the
+                # window's end earlier by that many positions. Clamped so the
+                # window never goes out of [0, T].
+                window = min(T, DIAGNOSTIC_POSITION_WINDOW)
+                end = max(window, T - max(window_offset, 0))
+                start = end - window
 
-            weights = full_weights[start:end, start:end].tolist()
-            token_labels = [session.tokenizer.decode([tid]) for tid in all_tokens[start:end]]
-            result = {
-                "available": True,
-                "layer": layer,
-                "head": head,
-                "weights": weights,
-                "token_labels": token_labels,
-                "window_start": start,
-                "total_positions": T,
-            }
-
-            # Q/K/V detail — one vector per position, for the frontend's
-            # position stepper — over the exact same window as the heatmap.
-            if qkv_detail:
-                result["qkv_detail"] = {
-                    "positions": list(range(start, end)),
-                    "tokens": [session.tokenizer.decode([tid]) for tid in all_tokens[start:end]],
-                    "q": q[0, head, start:end, :].tolist(),
-                    "k": k[0, head, start:end, :].tolist(),
-                    "v": v[0, head, start:end, :].tolist(),
+                weights = full_weights[start:end, start:end].tolist()
+                token_labels = [session.tokenizer.decode([tid]) for tid in visible_tokens[start:end]]
+                result = {
+                    "available": True,
+                    "layer": layer,
+                    "head": head,
+                    "weights": weights,
+                    "token_labels": token_labels,
+                    "window_start": start,
+                    "total_positions": T,
                 }
 
-            return result
+                # Q/K/V detail — one vector per position, for the frontend's
+                # position stepper — over the exact same window as the heatmap.
+                if qkv_detail:
+                    result["qkv_detail"] = {
+                        "positions": list(range(start, end)),
+                        "tokens": [session.tokenizer.decode([tid]) for tid in visible_tokens[start:end]],
+                        "q": q[0, head, start:end, :].tolist(),
+                        "k": k[0, head, start:end, :].tolist(),
+                        "v": v[0, head, start:end, :].tolist(),
+                    }
+
+                return result
     except Exception as e:
-        training_log.warning("Attention capture failed for layer=%d head=%d qkv_detail=%s: %s", layer, head, qkv_detail, e)
+        training_log.warning("Attention capture failed for layer=%d head=%d qkv_detail=%s full_matrix=%s: %s", layer, head, qkv_detail, full_matrix, e)
         return None
 
 
@@ -593,12 +631,15 @@ def _execute_forward_pass(
     qkv_detail: bool = False,
     append_token: bool = True,
     attention_window_offset: int = 0,
+    attention_full: bool = False,
 ) -> DiagnosticSnapshot:
     """Shared core for run_diagnostic_step and the Phase 3 final-token capture
     — one forward pass, tensor capture at hooked nodes, top-k, attention (if
     requested), activation extras. `append_token=False` captures the current
     state without advancing token_history (used for /generate's final frame,
     which has already appended its own tokens via its own sampling loop).
+    When attention_full=True, computes full T×T matrix for the selected
+    (layer, head) pair (on-demand, for canvas heatmap).
     """
     session.captured_tensors.clear()
 
@@ -826,6 +867,13 @@ def _execute_forward_pass(
                         for i in range(len(row)):
                             row[i] = round(row[i], 4)
 
+        # Full-context matrix for canvas heatmap (on-demand, only when requested)
+        full_matrix_data = {"available": False, "reason": "Not requested"}
+        if attention_full and attention_params is not None:
+            layer, head = attention_params
+            result = _compute_attention_weights(session, layer, head, qkv_detail=False, window_offset=0, full_matrix=True)
+            full_matrix_data = result if result is not None else {"available": False, "reason": "Capture failed"}
+
         activation_data = _compute_activation_extras(logits_last)
 
         return DiagnosticSnapshot(
@@ -836,6 +884,7 @@ def _execute_forward_pass(
             nodes=nodes_dict,
             attention=attention_data,
             attention_maps=all_attention_maps,
+            attention_full=full_matrix_data,
             activation_summaries=activation_data,
             lm_head=lm_head_data,
             position_tokens=position_tokens,
@@ -848,6 +897,7 @@ def run_diagnostic_step(
     attention_params: Optional[tuple[int, int]] = None,
     qkv_detail: bool = False,
     attention_window_offset: int = 0,
+    attention_full: bool = False,
 ) -> Optional[DiagnosticSnapshot]:
     """Execute one autoregressive forward pass, appending one new token.
 
@@ -864,7 +914,7 @@ def run_diagnostic_step(
     try:
         snapshot = _execute_forward_pass(
             session, top_k, attention_params, qkv_detail=qkv_detail, append_token=True,
-            attention_window_offset=attention_window_offset,
+            attention_window_offset=attention_window_offset, attention_full=attention_full,
         )
         session.last_snapshot = snapshot
         return snapshot
@@ -880,6 +930,7 @@ def run_diagnostic_step_internal(
     qkv_detail: bool = False,
     skip_token_generation: bool = True,
     attention_window_offset: int = 0,
+    attention_full: bool = False,
 ) -> Optional[DiagnosticSnapshot]:
     """Capture a snapshot for the CURRENT session state without appending a
     new token — used by Phase 3's /generate to produce the final snapshot
@@ -894,7 +945,7 @@ def run_diagnostic_step_internal(
     try:
         snapshot = _execute_forward_pass(
             session, top_k, attention_params, qkv_detail=qkv_detail, append_token=not skip_token_generation,
-            attention_window_offset=attention_window_offset,
+            attention_window_offset=attention_window_offset, attention_full=attention_full,
         )
         session.last_snapshot = snapshot
         return snapshot

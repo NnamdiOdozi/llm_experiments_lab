@@ -179,8 +179,8 @@ export default function App() {
   // positions. Real user report, 2026-07-13: the heatmap "gets very busy
   // very quickly" as a session grows, since it previously rendered the
   // *entire* T x T matrix with no cap at all. See docs/DESIGN_DECISIONS.md.
-  const [attentionWindowOffset, setAttentionWindowOffset] = useState(0);
-  // Same idea as attentionWindowOffset, but for every OTHER node's
+  const [qkvWindowOffset, setAttentionWindowOffset] = useState(0);
+  // Same idea as qkvWindowOffset, but for every OTHER node's
   // position_vectors/input_position_vectors (LayerNorm, MLP, embedding,
   // final_norm) — direct user request, 2026-07-15: "a stepper that allows
   // that window to slide backwards in time" for these too, not just
@@ -242,11 +242,22 @@ export default function App() {
     const hasCurrentMaps =
       diagnosticSnapshot?.attention_maps?.available &&
       diagnosticSnapshot.attention_maps.weights &&
-      attentionWindowOffset === 0 &&
+      qkvWindowOffset === 0 &&
       (!showQKVDetail || !!diagnosticSnapshot.attention_maps.qkv);
 
-    if (hasCurrentMaps) {
-      // Data already current, skip the network fetch
+    // The canvas heatmap reads snapshot.attention_full, which is captured for
+    // ONE (layer, head) at a time and only when we explicitly ask for it. It's
+    // NOT part of attention_maps, so the maps-are-current check above is not
+    // enough — we must also already hold the full matrix for the CURRENTLY
+    // selected pair, or we have to peek again (attention_full: true below).
+    const hasCurrentFull =
+      diagnosticSnapshot?.attention_full?.available &&
+      diagnosticSnapshot.attention_full.layer === attentionBlock &&
+      diagnosticSnapshot.attention_full.head === attentionHead;
+
+    if (hasCurrentMaps && hasCurrentFull) {
+      // Data already current (windowed maps/qkv AND the full matrix for this
+      // pair), skip the network fetch.
       return;
     }
 
@@ -256,7 +267,9 @@ export default function App() {
       attention_layer: attentionBlock,
       attention_head: attentionHead,
       qkv_detail: showQKVDetail || undefined,
-      attention_window_offset: attentionWindowOffset,
+      attention_window_offset: qkvWindowOffset,
+      // Ask for the full T×T matrix for the canvas heatmap (one selected head).
+      attention_full: true,
     })
       .then((snapshot) => {
         if (!cancelled) setDiagnosticSnapshot(snapshot);
@@ -268,7 +281,7 @@ export default function App() {
         if (!cancelled) setDiagnosticLoading(false);
       });
     return () => { cancelled = true; };
-  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, attentionWindowOffset, diagnosticSnapshot?.attention_maps?.available]);
+  }, [diagnosticSessionId, runId, attentionBlock, attentionHead, showQKVDetail, qkvWindowOffset, diagnosticSnapshot?.attention_maps?.available, diagnosticSnapshot?.attention_full?.available, diagnosticSnapshot?.attention_full?.layer, diagnosticSnapshot?.attention_full?.head]);
 
   // Same idea as the attention peek effect above, for every OTHER node's
   // position_vectors window (LayerNorm, MLP, embedding, final_norm) —
@@ -770,7 +783,7 @@ export default function App() {
               attentionBlock={attentionBlock}
               attentionHead={attentionHead}
               showQKVDetail={showQKVDetail}
-              attentionWindowOffset={attentionWindowOffset}
+              attentionWindowOffset={qkvWindowOffset}
               nodeWindowOffset={nodeWindowOffset}
               // Same config.inference.max_new_tokens the ConfigPanel already
               // shows and Generate already uses (server-side, via
@@ -874,8 +887,8 @@ export default function App() {
                 onAttentionHeadChange={setAttentionHead}
                 showQKVDetail={showQKVDetail}
                 onShowQKVDetailChange={setShowQKVDetail}
-                attentionWindowOffset={attentionWindowOffset}
-                onAttentionWindowOffsetChange={setAttentionWindowOffset}
+                qkvWindowOffset={qkvWindowOffset}
+                onQkvWindowOffsetChange={setAttentionWindowOffset}
                 nodeWindowOffset={nodeWindowOffset}
                 onNodeWindowOffsetChange={setNodeWindowOffset}
                 numHeads={typeof config?.model?.n_head === "number" ? config.model.n_head : null}

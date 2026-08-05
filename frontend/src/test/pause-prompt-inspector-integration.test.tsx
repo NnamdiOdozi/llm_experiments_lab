@@ -59,9 +59,9 @@ function Harness() {
         onAttentionHeadChange={() => {}}
         showQKVDetail={false}
         onShowQKVDetailChange={() => {}}
-        attentionWindowOffset={0}
+        qkvWindowOffset={0}
         nodeWindowOffset={0}
-        onAttentionWindowOffsetChange={() => {}}
+        onQkvWindowOffsetChange={() => {}}
         onNodeWindowOffsetChange={() => {}}
         numHeads={6}
         onOpenDataTab={() => {}}
@@ -124,9 +124,9 @@ function AttentionHarness() {
         onAttentionHeadChange={setAttentionHead}
         showQKVDetail={false}
         onShowQKVDetailChange={() => {}}
-        attentionWindowOffset={0}
+        qkvWindowOffset={0}
         nodeWindowOffset={0}
-        onAttentionWindowOffsetChange={() => {}}
+        onQkvWindowOffsetChange={() => {}}
         onNodeWindowOffsetChange={() => {}}
         numHeads={6}
         onOpenDataTab={() => {}}
@@ -152,6 +152,17 @@ const FAKE_ATTENTION_SNAPSHOT: DiagnosticSnapshot = {
     token_labels: ["h"],
     window_start: 0,
     total_positions: 1,
+  },
+  // The heatmap is now a canvas fed by attention_full; the "Layer 1, Head 1"
+  // header renders once this is available.
+  attention_full: {
+    available: true,
+    layer: 0,
+    head: 0,
+    weights: [[1.0]],
+    token_labels: ["h"],
+    total_positions: 1,
+    block_size: 128,
   },
   activation_summaries: { available: false, reason: "Not requested" },
   lm_head: { logits_shape: [1, 1, 65], selected_position: 0, top_k: [], top_k_by_position: [] },

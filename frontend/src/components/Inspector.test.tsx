@@ -75,17 +75,33 @@ const SNAPSHOT_WITH_MAPS: DiagnosticSnapshot = {
       ],
     ],
   },
+  // Full-context matrix for the canvas heatmap (one selected layer/head). The
+  // canvas reads THIS, not attention_maps — see AttentionHeatmapCanvas.
+  attention_full: {
+    available: true,
+    layer: 0,
+    head: 0,
+    weights: marker(0.11),
+    token_labels: ["a", "b"],
+    total_positions: 2,
+    block_size: 128,
+  },
   complete: true,
 };
 
+// No full matrix (e.g. an older backend that never populates attention_full) —
+// the canvas heatmap should show "Not captured". attention_maps/attention are
+// still present for the (unrelated) Q/K/V path.
 const SNAPSHOT_NO_MAPS: DiagnosticSnapshot = {
   ...SNAPSHOT_WITH_MAPS,
   attention_maps: undefined,
+  attention_full: undefined,
 };
 
 const SNAPSHOT_NOTHING_CAPTURED: DiagnosticSnapshot = {
   ...SNAPSHOT_WITH_MAPS,
   attention_maps: undefined,
+  attention_full: undefined,
   attention: { available: false, reason: "Not requested" },
 };
 
@@ -129,9 +145,9 @@ function renderInspector(block: number, head: number, snapshot: DiagnosticSnapsh
       onAttentionHeadChange={() => {}}
       showQKVDetail={showQKVDetail}
       onShowQKVDetailChange={() => {}}
-      attentionWindowOffset={0}
+      qkvWindowOffset={0}
+      onQkvWindowOffsetChange={() => {}}
       nodeWindowOffset={0}
-      onAttentionWindowOffsetChange={() => {}}
       onNodeWindowOffsetChange={() => {}}
       numHeads={2}
       onOpenDataTab={() => {}}
@@ -146,39 +162,32 @@ afterEach(() => {
 });
 
 describe("Inspector heatmap with eager attention_maps", () => {
-  it("renders the selected pair from attention_maps, ignoring stale single-pair data", () => {
-    renderInspector(0, 0, SNAPSHOT_WITH_MAPS);
-    expect(screen.getByText("0.11")).toBeInTheDocument();
-    // The stale snapshot.attention marker must not be shown.
-    expect(screen.queryByText("0.99")).not.toBeInTheDocument();
-  });
-
-  it("block change re-renders from maps with the SAME snapshot and zero fetches", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const { unmount } = renderInspector(0, 0, SNAPSHOT_WITH_MAPS);
-    expect(screen.getByText("0.11")).toBeInTheDocument();
-    unmount();
-    // Same snapshot object, only the selected block prop changes — the new
-    // pair's weights must appear without any network round-trip.
-    renderInspector(1, 0, SNAPSHOT_WITH_MAPS);
-    expect(screen.getByText("0.77")).toBeInTheDocument();
+  // The heatmap is now an HTML <canvas> fed by snapshot.attention_full (the
+  // full T×T matrix for one selected layer/head), not the old numeric table
+  // read from attention_maps. So we assert on the canvas + header, and that no
+  // per-cell numbers are printed. Fetching to obtain attention_full lives in
+  // App.tsx's peek effect (App is too heavy to render here); Inspector itself
+  // just displays whatever attention_full the snapshot carries.
+  it("renders the canvas heatmap (no per-cell numbers) when attention_full is available", () => {
+    const { container } = renderInspector(0, 0, SNAPSHOT_WITH_MAPS);
+    expect(container.querySelector("canvas")).toBeTruthy();
+    expect(screen.getByText(/Layer 1, Head 1/)).toBeInTheDocument();
+    // Canvas paints cells; it must NOT print the numeric weight as DOM text.
     expect(screen.queryByText("0.11")).not.toBeInTheDocument();
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("head change re-renders from maps with zero fetches", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    renderInspector(0, 1, SNAPSHOT_WITH_MAPS);
-    expect(screen.getByText("0.33")).toBeInTheDocument();
-    expect(fetchSpy).not.toHaveBeenCalled();
+  it("heatmap header reflects the selected block/head", () => {
+    renderInspector(1, 1, SNAPSHOT_WITH_MAPS);
+    expect(screen.getByText(/Layer 2, Head 2/)).toBeInTheDocument();
   });
 
-  it("falls back to single-pair snapshot.attention when maps are absent (old backend)", () => {
-    renderInspector(0, 0, SNAPSHOT_NO_MAPS);
-    expect(screen.getByText("0.99")).toBeInTheDocument();
+  it("heatmap shows 'Not captured' when attention_full is absent (e.g. old backend)", () => {
+    const { container } = renderInspector(0, 0, SNAPSHOT_NO_MAPS);
+    expect(container.querySelector("canvas")).toBeNull();
+    expect(screen.getByText(/Not captured/)).toBeInTheDocument();
   });
 
-  it("shows 'Not captured' without crashing when neither maps nor single-pair exist", () => {
+  it("shows 'Not captured' without crashing when nothing is captured", () => {
     // Regression: this branch used to read `att.reason` off an unassigned
     // variable and throw a TypeError before first capture.
     renderInspector(0, 0, SNAPSHOT_NOTHING_CAPTURED);

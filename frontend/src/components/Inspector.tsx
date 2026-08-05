@@ -3,6 +3,7 @@ import { ArchitectureNode, DiagnosticSnapshot } from "../types";
 import { fetchEmbeddingTable } from "../hooks/useApi";
 import { WindowStepper } from "./WindowStepper";
 import { CopyIconButton } from "./CopyIconButton";
+import AttentionHeatmapCanvas from "./AttentionHeatmapCanvas";
 
 interface Props {
   runId: number | null;
@@ -20,10 +21,12 @@ interface Props {
   onAttentionHeadChange: (head: number | null) => void;
   showQKVDetail: boolean;
   onShowQKVDetailChange: (show: boolean) => void;
-  // Shifts the attention heatmap/qkv_detail window earlier in the sequence
-  // — 0 = most recent. See docs/DESIGN_DECISIONS.md.
-  attentionWindowOffset: number;
-  onAttentionWindowOffsetChange: (offset: number) => void;
+  // Shifts the Q/K/V detail window earlier in the sequence (not the canvas heatmap,
+  // which shows full context) — 0 = most recent. Renamed from attentionWindowOffset
+  // to clarify it only drives Q/K/V, not the canvas heatmap. See
+  // docs/DESIGN_DECISIONS.md.
+  qkvWindowOffset: number;
+  onQkvWindowOffsetChange: (offset: number) => void;
   // Same idea, for every other node's position_vectors window (LayerNorm,
   // MLP, embedding, final_norm) — direct user request, 2026-07-15. See
   // docs/DESIGN_DECISIONS.md.
@@ -529,204 +532,64 @@ function NodeVectorTable({
   );
 }
 
-// Phase 2: Render attention heatmap for attention nodes
+// Phase 2: Render attention heatmap (canvas) + Q/K/V detail browser for attention nodes
 function AttentionHeatmap({
-  snapshot, blockNum, head, onOpenDataTab, windowOffset, onWindowOffsetChange,
+  snapshot, blockNum, head, onOpenDataTab, qkvWindowOffset, onQkvWindowOffsetChange,
 }: {
   snapshot: DiagnosticSnapshot;
   blockNum: number | null;
   head: number | null;
   onOpenDataTab: (title: string, content: number[]) => void;
-  windowOffset: number;
-  onWindowOffsetChange: (offset: number) => void;
+  qkvWindowOffset: number;
+  onQkvWindowOffsetChange: (offset: number) => void;
 }) {
-  // Prefer eager attention_maps when available (all layers × all heads);
-  // fall back to on-demand snapshot.attention for old backends or when maps unavailable.
+  // Canvas heatmap: render full T×T matrix (or T×block_size) from attention_full
+  // Q/K/V detail: use windowed data from attention_maps or attention.qkv_detail
+
+  // For Q/K/V windowed tables (still uses windowOffset stepper):
   const hasMaps = snapshot.attention_maps?.available && snapshot.attention_maps?.weights;
-  let tokenLabels: string[];
-  let windowStart: number;
-  let totalPositions: number;
-  let weights: number[][];
+  let qkvTokenLabels: string[] = [];
+  let qkvWindowStart: number = 0;
+  let qkvTotalPositions: number = 0;
 
   if (hasMaps && blockNum !== null && head !== null) {
-    // Use data from attention_maps (TypeScript: maps are definitely defined here)
-    tokenLabels = snapshot.attention_maps!.token_labels ?? [];
-    windowStart = snapshot.attention_maps!.window_start ?? 0;
-    totalPositions = snapshot.attention_maps!.total_positions ?? tokenLabels.length;
-    weights = snapshot.attention_maps!.weights![blockNum]?.[head] ?? [];
+    qkvTokenLabels = snapshot.attention_maps!.token_labels ?? [];
+    qkvWindowStart = snapshot.attention_maps!.window_start ?? 0;
+    qkvTotalPositions = snapshot.attention_maps!.total_positions ?? qkvTokenLabels.length;
   } else if (snapshot.attention.available) {
-    // Fall back to single-pair snapshot.attention (old backend or not available)
-    if (!snapshot.attention.weights || !snapshot.attention.token_labels) {
-      return (
-        <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
-          Attention data unavailable
-        </div>
-      );
-    }
-    tokenLabels = snapshot.attention.token_labels;
-    windowStart = snapshot.attention.window_start ?? 0;
-    totalPositions = snapshot.attention.total_positions ?? tokenLabels.length;
-    weights = snapshot.attention.weights;
-  } else {
-    return (
-      <div style={{ fontSize: 15, color: "var(--text-dim)" }}>
-        {snapshot.attention.reason ? `Not captured: ${snapshot.attention.reason}` : "Not captured"}
-      </div>
-    );
+    qkvTokenLabels = snapshot.attention.token_labels ?? [];
+    qkvWindowStart = snapshot.attention.window_start ?? 0;
+    qkvTotalPositions = snapshot.attention.total_positions ?? qkvTokenLabels.length;
   }
 
-  const windowSize = tokenLabels.length;
-  // offset=0 is "most recent" (window's end sits at totalPositions); larger
-  // offset shifts the window's end earlier. Can't shift the window's end
-  // past totalPositions (offset < 0, meaningless) or its start before 0
-  // (offset so large the window would run off the front of the sequence).
-
-  // Per-row normalization, not global: each row is its own probability
-  // distribution (sums to 1), so comparing within a row is what's actually
-  // meaningful. A global min/max was dominated by the trivial (0,0)=1.0
-  // outlier (first token can only attend to itself under causal masking —
-  // mathematically guaranteed, not learned), which made almost every other
-  // cell normalize to near-zero opacity and vanish against the dark theme.
-  // Masked cells (j > i, structurally always exactly 0 under causal
-  // masking) get their own muted style instead of being mixed into the
-  // color scale as if they were real low-attention values. A visible
-  // opacity floor means even the lowest real attention value in a row is
-  // still a faint, visible tile, not literally invisible. See
-  // docs/DESIGN_DECISIONS.md.
-  const OPACITY_FLOOR = 0.15;
+  const qkvWindowSize = qkvTokenLabels.length;
 
   return (
     <div>
-      {hasMaps && blockNum !== null && head !== null && (
-        <div style={{ marginBottom: 8, fontSize: 14, color: "var(--accent)" }}>
-          Layer {blockNum + 1}, Head {head + 1}
-        </div>
-      )}
-      {!hasMaps && snapshot.attention.available && (
-        <div style={{ marginBottom: 8, fontSize: 14, color: "var(--accent)" }}>
-          Layer {snapshot.attention.layer != null ? snapshot.attention.layer + 1 : "?"}, Head {snapshot.attention.head != null ? snapshot.attention.head + 1 : "?"}
-        </div>
-      )}
-      {/* Heatmap window stepper — real user report, 2026-07-13: an
-          unwindowed T x T grid "gets very busy very quickly" as a session
-          grows. Shows the same DIAGNOSTIC_POSITION_WINDOW-wide slice as
-          qkv_detail below (shared window, one stepper controls both), and
-          lets the user shift it earlier/later through the sequence instead
-          of only ever seeing the tail. Stride 1 (smooth slide, one position
-          at a time) — previously stepped by the full window size at once
-          ("discontinuous", direct user report 2026-07-15). See
-          docs/DESIGN_DECISIONS.md. */}
-      {totalPositions > windowSize && (
-        <WindowStepper
-          windowStart={windowStart}
-          windowSize={windowSize}
-          totalPositions={totalPositions}
-          offset={windowOffset}
-          onOffsetChange={onWindowOffsetChange}
-        />
-      )}
-      <div style={{ overflowX: "auto" }}>
-        <table
-          style={{
-            borderCollapse: "collapse",
-            fontSize: 13,
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          <thead>
-            <tr>
-              <th
-                style={{ border: "1px solid var(--border)", padding: 4, textAlign: "center", width: 40, color: "var(--text-dim)" }}
-                title="Rows = query position (attending from). Columns = key position (attended to)."
-              >
-                Q\K
-              </th>
-              {tokenLabels.map((token, j) => (
-                <th
-                  key={j}
-                  style={{
-                    border: "1px solid var(--border)",
-                    padding: 4,
-                    minWidth: 40,
-                    textAlign: "center",
-                    color: "var(--text-dim)",
-                  }}
-                  title={`Position ${windowStart + j + 1}`}
-                >
-                  {/* Actual token character, not the position number — direct
-                      user request 2026-07-15 ("this letter A is character 1
-                      ... it should have an A or B or C"). Position stays
-                      available via hover. Internal indexing (key,
-                      weights[i][j] lookups) stays 0-indexed. See
-                      docs/DESIGN_DECISIONS.md. */}
-                  {token}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {weights.map((row, i) => {
-              const rowMax = Math.max(...row);
-              const rowMin = Math.min(...row.filter((_, j) => j <= i)); // only real (unmasked) values
-              return (
-              <tr key={i}>
-                <td
-                  style={{
-                    border: "1px solid var(--border)",
-                    padding: 4,
-                    textAlign: "right",
-                    color: "var(--text-dim)",
-                  }}
-                  title={`Position ${windowStart + i + 1}`}
-                >
-                  {tokenLabels[i]}
-                </td>
-                {row.map((weight, j) => {
-                  const masked = j > i;
-                  if (masked) {
-                    return (
-                      <td
-                        key={j}
-                        style={{
-                          border: "1px solid var(--border)",
-                          padding: 2,
-                          textAlign: "center",
-                          background: "repeating-linear-gradient(45deg, var(--bg), var(--bg) 3px, var(--border) 3px, var(--border) 4px)",
-                          color: "var(--text-dim)",
-                        }}
-                        title="Masked — causal attention can't see future positions"
-                      >
-                        ·
-                      </td>
-                    );
-                  }
-                  const normalized = rowMax > rowMin ? (weight - rowMin) / (rowMax - rowMin) : 1;
-                  const opacity = OPACITY_FLOOR + normalized * (1 - OPACITY_FLOOR);
-                  const bgColor = `rgba(100, 150, 255, ${opacity})`;
-                  return (
-                    <td
-                      key={j}
-                      style={{
-                        border: "1px solid var(--border)",
-                        padding: 2,
-                        textAlign: "center",
-                        backgroundColor: bgColor,
-                        color: opacity > 0.5 ? "white" : "var(--text)",
-                      }}
-                      title={weight.toFixed(3)}
-                    >
-                      {weight.toFixed(2)}
-                    </td>
-                  );
-                })}
-              </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      {/* Canvas heatmap — full context, no stepper */}
+      <AttentionHeatmapCanvas
+        attentionFull={snapshot.attention_full ?? null}
+        blockNum={blockNum}
+        head={head}
+      />
 
-      {/* Q/K/V detail: prefer eager maps over single-pair fallback. When
+      {/* Q/K/V windowed detail — separate stepper control via qkvWindowOffset */}
+      {qkvTotalPositions > qkvWindowSize && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 14, color: "var(--text-dim)", marginBottom: 8 }}>
+            Q/K/V Detail (windowed view, 12 positions)
+          </div>
+          <WindowStepper
+            windowStart={qkvWindowStart}
+            windowSize={qkvWindowSize}
+            totalPositions={qkvTotalPositions}
+            offset={qkvWindowOffset}
+            onOffsetChange={onQkvWindowOffsetChange}
+          />
+        </div>
+      )}
+
+      {/* Q/K/V tables: prefer eager maps over single-pair fallback. When
           attention_maps includes qkv, use that (all pairs captured); otherwise
           fall back to snapshot.attention.qkv_detail (single pair, on-demand).
           Runtime guard: qkv_detail's shape changed 2026-07-14 — old trainers
@@ -912,8 +775,8 @@ function Runtime({
   onAttentionHeadChange,
   showQKVDetail,
   onShowQKVDetailChange,
-  attentionWindowOffset,
-  onAttentionWindowOffsetChange,
+  qkvWindowOffset,
+  onQkvWindowOffsetChange,
   nodeWindowOffset,
   onNodeWindowOffsetChange,
   numHeads,
@@ -927,8 +790,8 @@ function Runtime({
   onAttentionHeadChange: (head: number | null) => void;
   showQKVDetail: boolean;
   onShowQKVDetailChange: (show: boolean) => void;
-  attentionWindowOffset: number;
-  onAttentionWindowOffsetChange: (offset: number) => void;
+  qkvWindowOffset: number;
+  onQkvWindowOffsetChange: (offset: number) => void;
   nodeWindowOffset: number;
   onNodeWindowOffsetChange: (offset: number) => void;
   numHeads: number | null;
@@ -1060,8 +923,8 @@ function Runtime({
           blockNum={currentBlock}
           head={attentionHead}
           onOpenDataTab={onOpenDataTab}
-          windowOffset={attentionWindowOffset}
-          onWindowOffsetChange={onAttentionWindowOffsetChange}
+          qkvWindowOffset={qkvWindowOffset}
+          onQkvWindowOffsetChange={onQkvWindowOffsetChange}
         />
       </div>
     );
@@ -1169,8 +1032,8 @@ export default function Inspector({
   onAttentionHeadChange,
   showQKVDetail,
   onShowQKVDetailChange,
-  attentionWindowOffset,
-  onAttentionWindowOffsetChange,
+  qkvWindowOffset,
+  onQkvWindowOffsetChange,
   nodeWindowOffset,
   onNodeWindowOffsetChange,
   numHeads,
@@ -1234,8 +1097,8 @@ export default function Inspector({
             onAttentionHeadChange={onAttentionHeadChange}
             showQKVDetail={showQKVDetail}
             onShowQKVDetailChange={onShowQKVDetailChange}
-            attentionWindowOffset={attentionWindowOffset}
-            onAttentionWindowOffsetChange={onAttentionWindowOffsetChange}
+            qkvWindowOffset={qkvWindowOffset}
+            onQkvWindowOffsetChange={onQkvWindowOffsetChange}
             nodeWindowOffset={nodeWindowOffset}
             onNodeWindowOffsetChange={onNodeWindowOffsetChange}
             numHeads={numHeads}

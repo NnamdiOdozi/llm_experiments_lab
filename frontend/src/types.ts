@@ -268,6 +268,19 @@ export interface AttentionMaps {
   n_head?: number;
 }
 
+export interface AttentionFull {
+  available: boolean;
+  reason?: string;
+  // Full T×T attention matrix (capped to block_size) for one selected head.
+  // Shape: weights[T][T] where T ≤ block_size. Un-windowed.
+  weights?: number[][];
+  token_labels?: string[];
+  layer?: number;
+  head?: number;
+  total_positions?: number;  // Actual T seen by the model
+  block_size?: number;        // Max sequence length model was configured for
+}
+
 export interface PositionToken {
   position: number;
   id: number;
@@ -298,6 +311,9 @@ export interface DiagnosticSnapshot {
   // on every step/peek. Enables instant block/head switching in Inspector
   // without network round-trips.
   attention_maps?: AttentionMaps;
+  // Full-context attention matrix for canvas heatmap — populated on-demand
+  // via attention_full=true in peek, contains full T×T matrix for one selected head.
+  attention_full?: AttentionFull;
   complete: boolean;
 }
 
@@ -328,6 +344,9 @@ export interface DiagnosticStepRequest {
   // final_norm). Direct user request, 2026-07-15. See
   // docs/DESIGN_DECISIONS.md.
   node_window_offset?: number;
+  // Full-context matrix for canvas heatmap (requires attention_layer/head).
+  // When true, fetches the full T×T matrix un-windowed for canvas rendering.
+  attention_full?: boolean;
 }
 
 export interface GenerateStreamToken {
