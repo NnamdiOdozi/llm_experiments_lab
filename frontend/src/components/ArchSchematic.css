@@ -1,14 +1,117 @@
 #arch-schematic {
   --arch-flow-gap: 14px;
   --arch-arrow-width: 30px;
+  --arch-residual: #818cf8;
+  --arch-residual-soft: #c7d2fe;
+  /* Two deliberate line-weight tiers, used everywhere a connector or stream
+     is drawn (plain box-to-box arrows vs. block-boundary/residual lines) —
+     replaces what used to be 4 slightly-different hardcoded widths
+     (2 / 2.5 / 3px) scattered across arrows, chevrons and the operator
+     ring. 2026-08-05, direct user report ("lines don't seem consistent"). */
+  --arch-line-thin: 2px;
+  --arch-line-strong: 3px;
 }
 
-.arch-pipeline,
-.arch-block-detail__flow {
+.arch-pipeline {
   display: flex;
   align-items: center;
   width: 100%;
   min-width: 760px;
+}
+
+/* Keep the residual stream visibly separate from the computation row. Wider
+   min-width and gap than the compact top pipeline — this is the "zoomed in"
+   view, boxes get room to breathe. 2026-08-05, direct user report ("boxes
+   could be wider... look a bit squashed"). */
+.arch-block-detail__flow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 900px;
+  --arch-flow-gap: 20px;
+  position: relative;
+  padding-top: 58px;
+}
+
+.arch-residual-overlay {
+  color: var(--arch-residual);
+}
+
+.arch-residual-overlay__stream {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: var(--arch-line-strong);
+}
+
+.arch-residual-overlay__chevron {
+  fill: none;
+  stroke: var(--arch-residual-soft);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: var(--arch-line-strong);
+}
+
+.arch-residual-overlay__branch {
+  fill: var(--arch-residual-soft);
+  stroke: #1e293b;
+  stroke-width: 2;
+}
+
+.arch-residual-overlay__operator {
+  fill: #eef2ff;
+  stroke: var(--arch-residual);
+  stroke-width: var(--arch-line-strong);
+}
+
+/* Main-flow connectors drawn BY the overlay through the operator rings, so
+   the "+" reads as an inline junction on one continuous line instead of a
+   badge stamped on top of (and hiding) a separate arrow underneath. Same
+   two treatments as the plain/entry-exit arrows they replace: thin+dim for
+   an ordinary box-to-box hop, strong+solid for the block-boundary hop.
+   2026-08-05, direct user report ("plus signs... obscuring the arrow"). */
+.arch-residual-overlay__connector {
+  stroke: var(--text-dim);
+  stroke-opacity: 0.75;
+  stroke-width: var(--arch-line-thin);
+  stroke-linecap: round;
+}
+
+.arch-residual-overlay__connector-strong {
+  stroke: var(--text);
+  stroke-width: var(--arch-line-strong);
+  stroke-linecap: round;
+}
+
+.arch-residual-overlay__connector-arrowhead {
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-opacity: 0.75;
+  stroke-width: var(--arch-line-thin);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.arch-residual-overlay__connector-arrowhead--strong {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: var(--arch-line-strong);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.arch-residual-overlay__plus {
+  fill: #3730a3;
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.arch-residual-overlay__label {
+  fill: var(--arch-residual-soft);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
 }
 
 .arch-pipeline {
@@ -29,7 +132,17 @@
 }
 
 .arch-flow-item--detail {
-  min-width: 175px;
+  min-width: 215px;
+}
+
+/* Detail row gets more visual weight than the compact top pipeline — this is
+   the zoomed-in view of a single block, so give the boxes room instead of
+   reusing the same tight sizing. 2026-08-05, direct user report ("boxes...
+   look a bit squashed... make better use of the space"). */
+.arch-block-detail__flow .arch-node {
+  min-height: 64px;
+  padding: 13px 18px;
+  font-size: 14.5px;
 }
 
 /* Input/Output bookends — smaller than a real component box, since these
@@ -93,7 +206,7 @@
 .arch-arrow {
   position: relative;
   flex: 0 0 var(--arch-arrow-width);
-  height: 2px;
+  height: var(--arch-line-thin);
   margin: 0 var(--arch-flow-gap);
   background: var(--text-dim);
   opacity: 0.75;
@@ -105,10 +218,37 @@
   right: -1px;
   width: 8px;
   height: 8px;
-  border-top: 2px solid var(--text-dim);
-  border-right: 2px solid var(--text-dim);
+  border-top: var(--arch-line-thin) solid var(--text-dim);
+  border-right: var(--arch-line-thin) solid var(--text-dim);
   content: "";
   transform: translateY(-50%) rotate(45deg);
+}
+
+/* Entry/exit arrows into and out of the transformer block — longer and more
+   prominent than the between-box arrows so the block's input/output flow (and
+   the residual-stream anchor points) read clearly. */
+.arch-arrow--entry,
+.arch-arrow--exit {
+  flex-basis: 56px;
+  height: var(--arch-line-strong);
+  opacity: 1;
+  background: var(--text);
+}
+
+.arch-arrow--entry::after,
+.arch-arrow--exit::after {
+  width: 12px;
+  height: 12px;
+  border-top: var(--arch-line-strong) solid var(--text);
+  border-right: var(--arch-line-strong) solid var(--text);
+}
+
+/* The residual overlay draws its own connector through the operator ring in
+   this exact spot — the plain arrow's shaft/arrowhead would otherwise sit
+   directly under the "+" circle. Kept in the DOM (not display:none) so its
+   ref still reports real geometry for the overlay to measure against. */
+.arch-arrow--muted {
+  opacity: 0;
 }
 
 .arch-block-selector {

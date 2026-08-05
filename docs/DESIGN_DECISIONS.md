@@ -4153,6 +4153,28 @@ real stop commands, silently swallowed by the code's own try/except).
 **Do not remove this fixture**; if a new test needs the real _run_cli
 function, use the marker and a fake subprocess.
 
+## §82: Residual Connection Visualization in Architecture Schematic (2026-08-05)
+
+**Problem:** The inner-block detail diagram showed layer stacks linearly (LayerNorm → Attention → LayerNorm → MLP) but gave no visual hint that the transformer's pre-norm architecture includes residual (skip) connections — `x + Sublayer(LN(x))` for each sublayer. This is a fundamental architectural detail that users need to understand the model structure.
+
+**Solution:** Added a continuous residual-stream visualization as an SVG overlay above the detail box row:
+
+- **One upper residual rail**, split into two directed segments: the original input bypasses LayerNorm + attention, then the updated result is tapped again to bypass LayerNorm + MLP/MoE.
+- **Branch points** render as high-contrast junction dots: one at the original input and one on the upper rail where the first addition feeds the second bypass.
+- **Rejoin points** use 22px-diameter "+" operators on the computation centerline, large enough to remain legible at normal dashboard scale.
+- A compact **RESIDUAL STREAM** label and directional chevrons remove ambiguity about what the upper line represents and which way values flow.
+
+**Technical approach:**
+- Detached DOM measurement from rendering: `useLayoutEffect` reads the actual `.arch-stage` box rects (not the parent flow items, which also contain outgoing arrows) on every manifest/block change, stores geometry relative to the container, and handles ResizeObserver + window resize. Measuring the flow item biases an addition toward the following node because its outgoing-arrow width is included.
+- `ResidualStreamOverlay` renders measured orthogonal paths, junction dots, direction chevrons, and addition operators; `pointer-events:none` ensures it never blocks box clicks.
+- The attention→LayerNorm connector remains in flex layout with `opacity: 0` while the SVG overlay paints the visible line through the addition operator. Removing that connector from the DOM collapses its reserved width and makes the two node boxes appear glued together.
+- CSS centralizes stream, junction, operator, and label styling; `.arch-block-detail__flow` reserves enough head-room for the labeled upper rail.
+- Graceful degradation: if either attention or mlp/moe is missing (non-transformer templates), no arcs render — the overlay SVG elements still exist in jsdom (so tests can query them), but the arcs draw degenerate paths (zero-width, jsdom has no layout)
+
+**Why the "+" only at rejoin and not at split:** A split point is where the signal diverges to take two paths; it's not itself an addition — it's a branch. The "+" notation specifically marks an *addition* (residual connection), which happens only at the rejoin where the two paths reconverge. The first addition's output then becomes the divergence source for the second sublayer, shown by its vertical connection to the junction on the upper rail.
+
+**Tests added:** ArchSchematic.test.tsx gained three tests verifying presence of arcs/pluses for transformer blocks, pointer-events isolation, and graceful skip for non-transformer templates (no arcs rendered).
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
