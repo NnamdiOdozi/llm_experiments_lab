@@ -34,6 +34,7 @@ interface BoxProps {
   label: string;
   fullLabel?: string;
   kind: string;
+  elementRef?: Ref<HTMLDivElement>;
   isSelected?: boolean;
   isExpanded?: boolean;
   onClick?: () => void;
@@ -74,6 +75,38 @@ const DISPLAY_LABELS: Record<string, string> = {
   "Feed-Forward (dense)": "Feed Forward",
 };
 
+type ArchitectureVisualVariant = "minimal" | "technical" | "educational";
+
+const ARCHITECTURE_VISUAL_VARIANTS = new Set<ArchitectureVisualVariant>([
+  "minimal",
+  "technical",
+  "educational",
+]);
+
+const NODE_KIND_LABELS: Record<string, string> = {
+  layernorm: "LN",
+  attention: "ATTN",
+  mlp: "FFN",
+  moe: "MOE",
+  embedding: "EMB",
+  lm_head: "HEAD",
+  transformer_block_group: "BLOCK",
+};
+
+const DETAIL_STAGE_CAPTIONS = [
+  "01 · Normalization",
+  "02 · Attention",
+  "03 · Normalization",
+  "04 · Feed-forward",
+] as const;
+
+function architectureVisualVariant(): ArchitectureVisualVariant {
+  const requested = new URLSearchParams(window.location.search).get("archVariant");
+  return ARCHITECTURE_VISUAL_VARIANTS.has(requested as ArchitectureVisualVariant)
+    ? requested as ArchitectureVisualVariant
+    : "minimal";
+}
+
 function displayLabel(label: string) {
   return DISPLAY_LABELS[label] ?? label;
 }
@@ -86,11 +119,13 @@ function isTransformerBlockGroup(node: ArchitectureNode) {
   return node.id === "block" || node.kind === "transformer_block_group";
 }
 
-function NodeBox({ label, fullLabel, kind, isSelected, isExpanded, onClick, segmented }: BoxProps) {
+function NodeBox({ label, fullLabel, kind, elementRef, isSelected, isExpanded, onClick, segmented }: BoxProps) {
   const colors = COLOR_MAP[kind] || { bg: "#e5e7eb", border: "#6b7280" };
 
   return (
     <div
+      ref={elementRef}
+      data-kind={kind}
       className={`arch-node${isSelected ? " arch-node--selected" : ""}${isExpanded ? " arch-node--expanded" : ""}`}
       onClick={onClick}
       title={fullLabel && fullLabel !== label ? fullLabel : undefined}
@@ -113,7 +148,10 @@ function NodeBox({ label, fullLabel, kind, isSelected, isExpanded, onClick, segm
           ))}
         </div>
       )}
-      {label}
+      {NODE_KIND_LABELS[kind] && (
+        <span className="arch-node__kind" aria-hidden="true">{NODE_KIND_LABELS[kind]}</span>
+      )}
+      <span className="arch-node__label">{label}</span>
     </div>
   );
 }
@@ -314,6 +352,7 @@ function ResidualStreamOverlay({
 }
 
 export default function ArchSchematic({ runId, config, onNodeClick, selectedNodeId }: Props) {
+  const visualVariant = architectureVisualVariant();
   const [manifest, setManifest] = useState<ArchitectureManifest | null>(null);
   const [selectedBlockIdx, setSelectedBlockIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -500,7 +539,11 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
   const nodes = manifest ? manifest.nodes : [];
 
   return (
-    <div className="panel" id="arch-schematic">
+    <div
+      className={`panel arch-schematic arch-schematic--${visualVariant}`}
+      id="arch-schematic"
+      data-visual-variant={visualVariant}
+    >
       <h3>Architecture</h3>
 
       {/* Horizontal pipeline diagram */}
@@ -631,17 +674,15 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
                     key={child.id}
                     className="arch-flow-item arch-flow-item--detail"
                   >
-                    <div
-                      className="arch-stage"
-                      ref={(el) => {
-                        if (el) {
-                          detailBoxRefs.current.set(i, el);
-                      } else {
-                          detailBoxRefs.current.delete(i);
-                        }
-                      }}
-                    >
+                    <div className="arch-stage">
                       <NodeBox
+                        elementRef={(el) => {
+                          if (el) {
+                            detailBoxRefs.current.set(i, el);
+                          } else {
+                            detailBoxRefs.current.delete(i);
+                          }
+                        }}
                         segmented={isMoe}
                         label={isMoe ? "Experts" : displayLabel(child.label)}
                         fullLabel={child.label}
@@ -649,6 +690,9 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
                         isSelected={selectedNodeId === nodeId}
                         onClick={() => onNodeClick?.(nodeId, child)}
                       />
+                      <span className="arch-stage-caption" aria-hidden="true">
+                        {DETAIL_STAGE_CAPTIONS[i]}
+                      </span>
                     </div>
                     {/* Keep the attention→ln2 arrow in flex layout so its gap
                         never collapses. The overlay paints the visible line

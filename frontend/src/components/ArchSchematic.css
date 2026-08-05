@@ -155,10 +155,20 @@
 
 .arch-stage {
   display: flex;
+  position: relative;
   flex: 1;
   min-width: 0;
   flex-direction: column;
   justify-content: center;
+}
+
+.arch-node__kind,
+.arch-stage-caption {
+  display: none;
+}
+
+.arch-node__label {
+  display: block;
 }
 
 /* Shrunk slightly (was min-height 58/padding 12px 14px/font-size 14px) to
@@ -327,6 +337,411 @@
   color: var(--text-dim);
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* -------------------------------------------------------------------------
+   Visual explorations
+
+   The default is the minimal/professional direction. The other two variants
+   are selected with ?archVariant=technical or ?archVariant=educational so
+   they can be reviewed in the real app without adding UI or changing model
+   behavior. All three preserve the same component structure and data.
+   ------------------------------------------------------------------------- */
+
+/* Minimal / professional — nearly monochrome, generous and quiet. */
+.arch-schematic--minimal {
+  --arch-residual: #8492ad;
+  --arch-residual-soft: #b3bdd0;
+  border-color: #344257;
+  background: #1a2537;
+}
+
+.arch-schematic--minimal > h3 {
+  color: #9aa8bd;
+  font-size: 11px;
+  letter-spacing: 0.09em;
+}
+
+.arch-schematic--minimal .arch-node {
+  border: 1px solid #4a586c !important;
+  border-radius: 7px;
+  background: #202c3e !important;
+  color: #edf2f7;
+  box-shadow: none !important;
+  font-weight: 620;
+}
+
+.arch-schematic--minimal .arch-node[data-kind="attention"] {
+  border-color: #716b87 !important;
+  background: #292a3b !important;
+}
+
+.arch-schematic--minimal .arch-node[data-kind="layernorm"] {
+  border-color: #6d6759 !important;
+  background: #2b2d34 !important;
+}
+
+.arch-schematic--minimal .arch-node[data-kind="mlp"],
+.arch-schematic--minimal .arch-node[data-kind="moe"] {
+  border-color: #4f7078 !important;
+  background: #22343c !important;
+}
+
+.arch-schematic--minimal .arch-node[data-kind="embedding"],
+.arch-schematic--minimal .arch-node[data-kind="lm_head"],
+.arch-schematic--minimal .arch-node[data-kind="transformer_block_group"] {
+  border-color: #53647e !important;
+  background: #222f43 !important;
+}
+
+.arch-schematic--minimal .arch-node--selected {
+  border-color: #a9b8d2 !important;
+  box-shadow: 0 0 0 3px rgba(169, 184, 210, 0.14) !important;
+}
+
+.arch-schematic--minimal .arch-node--expanded {
+  border-color: #7b88a5 !important;
+  box-shadow: 0 0 0 3px rgba(123, 136, 165, 0.11) !important;
+}
+
+.arch-schematic--minimal .arch-block-detail {
+  border: 1px solid #3b4a60;
+  border-radius: 10px;
+  background: #182335;
+  box-shadow: none;
+}
+
+.arch-schematic--minimal .arch-block-detail__heading {
+  color: #eef2f7;
+  font-size: 15px;
+  font-weight: 560;
+}
+
+.arch-schematic--minimal .arch-block-detail__branch {
+  color: #8f9db6;
+}
+
+.arch-schematic--minimal .arch-block-detail__heading strong {
+  border: 1px solid #66738d;
+  background: #202c40;
+  color: #d6deeb;
+  font-weight: 650;
+}
+
+.arch-schematic--minimal .arch-block-detail__flow {
+  padding-top: 62px;
+}
+
+.arch-schematic--minimal .arch-residual-overlay__operator,
+.arch-schematic--technical .arch-residual-overlay__operator,
+.arch-schematic--educational .arch-residual-overlay__operator {
+  r: 14px;
+}
+
+.arch-schematic--minimal .arch-residual-overlay__operator {
+  fill: #182335;
+  stroke: #9aa8c1;
+}
+
+.arch-schematic--minimal .arch-residual-overlay__plus {
+  fill: #dce4ef;
+  font-size: 22px;
+}
+
+.arch-schematic--minimal .arch-residual-overlay__label {
+  font-size: 10px;
+}
+
+.arch-schematic--minimal .arch-block-selector__button {
+  border-color: #536176;
+  background: #202c3e;
+  color: #abb7c8;
+}
+
+.arch-schematic--minimal .arch-block-selector__button.is-active {
+  border-color: #8897b1;
+  background: #46556e;
+  color: #fff;
+}
+
+/* Technical / modern — instrument-like surfaces and compact type codes. */
+.arch-schematic--technical {
+  --arch-residual: #71839c;
+  --arch-residual-soft: #a2afc1;
+  border-color: #334155;
+  border-radius: 6px;
+  background: #111c2a;
+}
+
+.arch-schematic--technical > h3 {
+  color: #7f8fa7;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.arch-schematic--technical .arch-node {
+  justify-content: flex-start;
+  border: 1px solid #46566c !important;
+  border-radius: 5px;
+  background: #162231 !important;
+  color: #eef4fb;
+  box-shadow: none !important;
+  text-align: left;
+}
+
+.arch-schematic--technical .arch-block-detail__flow .arch-node__kind {
+  display: inline-block;
+  flex: none;
+  margin-right: 9px;
+  color: #7dd3fc;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.arch-schematic--technical .arch-node[data-kind="attention"] {
+  border-color: #725d78 !important;
+  box-shadow: inset 3px 0 #9b6c9b !important;
+}
+
+.arch-schematic--technical .arch-node[data-kind="attention"] .arch-node__kind {
+  color: #d6a5cf;
+}
+
+.arch-schematic--technical .arch-node[data-kind="layernorm"] {
+  box-shadow: inset 3px 0 #6985c7 !important;
+}
+
+.arch-schematic--technical .arch-node[data-kind="mlp"],
+.arch-schematic--technical .arch-node[data-kind="moe"] {
+  border-color: #3f7079 !important;
+  box-shadow: inset 3px 0 #4ca8b6 !important;
+}
+
+.arch-schematic--technical .arch-node[data-kind="mlp"] .arch-node__kind,
+.arch-schematic--technical .arch-node[data-kind="moe"] .arch-node__kind {
+  color: #79d3de;
+}
+
+.arch-schematic--technical .arch-node--selected {
+  border-color: #7dd3fc !important;
+  box-shadow: inset 3px 0 #7dd3fc, 0 0 0 2px rgba(125, 211, 252, 0.16) !important;
+}
+
+.arch-schematic--technical .arch-node--expanded {
+  border-color: #5e78ad !important;
+  box-shadow: inset 3px 0 #6985c7 !important;
+}
+
+.arch-schematic--technical .arch-block-detail {
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0f1a28;
+  box-shadow: none;
+}
+
+.arch-schematic--technical .arch-block-detail__heading {
+  color: #e5edf7;
+  font-size: 15px;
+  font-weight: 590;
+}
+
+.arch-schematic--technical .arch-block-detail__branch {
+  color: #60a5fa;
+  font-family: var(--font-mono);
+}
+
+.arch-schematic--technical .arch-block-detail__heading strong {
+  border: 1px solid #486693;
+  border-radius: 5px;
+  background: #14253c;
+  color: #9dc4ff;
+  font-family: var(--font-mono);
+  font-weight: 650;
+}
+
+.arch-schematic--technical .arch-block-detail__flow {
+  padding-top: 64px;
+}
+
+.arch-schematic--technical .arch-residual-overlay__label {
+  fill: #8494aa;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+}
+
+.arch-schematic--technical .arch-residual-overlay__operator {
+  fill: #0f1a28;
+  stroke: #70839f;
+}
+
+.arch-schematic--technical .arch-residual-overlay__plus {
+  fill: #c2cede;
+  font-family: var(--font-mono);
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.arch-schematic--technical .arch-block-selector__button {
+  border-color: #40516a;
+  border-radius: 4px;
+  background: #162231;
+  color: #93a4ba;
+  font-family: var(--font-mono);
+}
+
+.arch-schematic--technical .arch-block-selector__button.is-active {
+  border-color: #4f7fc0;
+  background: #1e3a5f;
+  color: #bfdbfe;
+}
+
+/* Educational / friendly — gentle category colour and explicit stage rhythm. */
+.arch-schematic--educational {
+  --arch-residual: #a5a8e5;
+  --arch-residual-soft: #c2c5f0;
+  border-color: #405273;
+  border-radius: 10px;
+  background: #1a2940;
+}
+
+.arch-schematic--educational > h3 {
+  color: #aebbd0;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+}
+
+.arch-schematic--educational .arch-node {
+  border: 1px solid #66758e !important;
+  border-radius: 11px;
+  background: #26364e !important;
+  color: #f4f7fb;
+  box-shadow: none !important;
+  font-weight: 660;
+}
+
+.arch-schematic--educational .arch-node[data-kind="layernorm"] {
+  border-color: #b59a60 !important;
+  background: #3a342a !important;
+  color: #f5e6bc;
+}
+
+.arch-schematic--educational .arch-node[data-kind="attention"] {
+  border-color: #ae779b !important;
+  background: #392c3b !important;
+  color: #f1d5e7;
+}
+
+.arch-schematic--educational .arch-node[data-kind="mlp"],
+.arch-schematic--educational .arch-node[data-kind="moe"] {
+  border-color: #5797a3 !important;
+  background: #213b43 !important;
+  color: #d1f0f3;
+}
+
+.arch-schematic--educational .arch-node--selected {
+  border-color: #d1d5ff !important;
+  box-shadow: 0 0 0 3px rgba(209, 213, 255, 0.16) !important;
+}
+
+.arch-schematic--educational .arch-node--expanded {
+  border-color: #9da6df !important;
+  box-shadow: 0 0 0 3px rgba(157, 166, 223, 0.13) !important;
+}
+
+.arch-schematic--educational .arch-block-detail {
+  padding-bottom: 36px;
+  border: 1px solid #485b7c;
+  border-radius: 14px;
+  background: #182842;
+  box-shadow: none;
+}
+
+.arch-schematic--educational .arch-block-detail__heading {
+  color: #f3f6fb;
+  font-size: 16px;
+  font-weight: 640;
+}
+
+.arch-schematic--educational .arch-block-detail__branch {
+  color: #a5a8e5;
+}
+
+.arch-schematic--educational .arch-block-detail__heading strong {
+  padding: 5px 11px;
+  border: 1px solid #9099d0;
+  background: #29365c;
+  color: #e2e4ff;
+  font-size: 12px;
+}
+
+.arch-schematic--educational .arch-block-detail__flow {
+  padding-top: 68px;
+  padding-bottom: 20px;
+}
+
+.arch-schematic--educational .arch-block-detail__flow .arch-node {
+  min-height: 68px;
+}
+
+.arch-schematic--educational .arch-stage-caption {
+  display: block;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 100%;
+  color: #aebbd0;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.arch-schematic--educational .arch-stage:has(.arch-node[data-kind="layernorm"]) .arch-stage-caption {
+  color: #d5bd82;
+}
+
+.arch-schematic--educational .arch-stage:has(.arch-node[data-kind="attention"]) .arch-stage-caption {
+  color: #d3a2c1;
+}
+
+.arch-schematic--educational .arch-stage:has(.arch-node[data-kind="mlp"]) .arch-stage-caption,
+.arch-schematic--educational .arch-stage:has(.arch-node[data-kind="moe"]) .arch-stage-caption {
+  color: #86c7cf;
+}
+
+.arch-schematic--educational .arch-residual-overlay__operator {
+  fill: #182842;
+  stroke: #b6b9ee;
+}
+
+.arch-schematic--educational .arch-residual-overlay__plus {
+  fill: #f3f4ff;
+  font-size: 22px;
+}
+
+.arch-schematic--educational .arch-residual-overlay__label {
+  fill: #c2c5f0;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.arch-schematic--educational .arch-block-selector__button {
+  border-color: #607191;
+  border-radius: 7px;
+  background: #26364e;
+  color: #b8c3d5;
+}
+
+.arch-schematic--educational .arch-block-selector__button.is-active {
+  border-color: #989fdb;
+  background: #4b5487;
+  color: #fff;
 }
 
 @media (max-width: 1100px) {

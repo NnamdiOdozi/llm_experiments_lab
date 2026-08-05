@@ -4161,11 +4161,11 @@ function, use the marker and a fake subprocess.
 
 - **One upper residual rail**, split into two directed segments: the original input bypasses LayerNorm + attention, then the updated result is tapped again to bypass LayerNorm + MLP/MoE.
 - **Branch points** render as high-contrast junction dots: one at the original input and one on the upper rail where the first addition feeds the second bypass.
-- **Rejoin points** use 22px-diameter "+" operators on the computation centerline, large enough to remain legible at normal dashboard scale.
+- **Rejoin points** use 28px-diameter "+" operators in the redesigned variants, large enough to remain legible at normal dashboard scale while retaining at least 18px clearance from adjacent nodes.
 - A compact **RESIDUAL STREAM** label and directional chevrons remove ambiguity about what the upper line represents and which way values flow.
 
 **Technical approach:**
-- Detached DOM measurement from rendering: `useLayoutEffect` reads the actual `.arch-stage` box rects (not the parent flow items, which also contain outgoing arrows) on every manifest/block change, stores geometry relative to the container, and handles ResizeObserver + window resize. Measuring the flow item biases an addition toward the following node because its outgoing-arrow width is included.
+- Detached DOM measurement from rendering: `useLayoutEffect` reads the actual `.arch-node` rects (not the parent flow items, which also contain outgoing arrows) on every manifest/block change, stores geometry relative to the container, and handles ResizeObserver + window resize. Measuring the flow item biases an addition toward the following node because its outgoing-arrow width is included.
 - `ResidualStreamOverlay` renders measured orthogonal paths, junction dots, direction chevrons, and addition operators; `pointer-events:none` ensures it never blocks box clicks.
 - The attention→LayerNorm connector remains in flex layout with `opacity: 0` while the SVG overlay paints the visible line through the addition operator. Removing that connector from the DOM collapses its reserved width and makes the two node boxes appear glued together.
 - CSS centralizes stream, junction, operator, and label styling; `.arch-block-detail__flow` reserves enough head-room for the labeled upper rail.
@@ -4174,6 +4174,22 @@ function, use the marker and a fake subprocess.
 **Why the "+" only at rejoin and not at split:** A split point is where the signal diverges to take two paths; it's not itself an addition — it's a branch. The "+" notation specifically marks an *addition* (residual connection), which happens only at the rejoin where the two paths reconverge. The first addition's output then becomes the divergence source for the second sublayer, shown by its vertical connection to the junction on the upper rail.
 
 **Tests added:** ArchSchematic.test.tsx gained three tests verifying presence of arcs/pluses for transformer blocks, pointer-events isolation, and graceful skip for non-transformer templates (no arcs rendered).
+
+## §83: Architecture Visual Variants Stay Presentation-Only (2026-08-05)
+
+**Goal:** Explore three materially different treatments of the same architecture information without adding a visible theme control or changing model behavior.
+
+**Directions:**
+
+- `minimal` (default): restrained near-monochrome surfaces, quiet selection rings, and the least visual noise.
+- `technical`: instrument-like dark surfaces, compact type codes inside the expanded nodes, and squarer geometry.
+- `educational`: gentle category colours, friendlier radii, and short stage captions beneath the expanded nodes.
+
+**Selection:** The app defaults to `minimal`. The other review variants are available through `?archVariant=technical` and `?archVariant=educational`. This URL-only switch is deliberately not rendered as product UI: it supports design review without introducing a new user-facing feature.
+
+**Invariants:** Every variant shares the same DOM nodes, callbacks, block selector, measured connector geometry, and architecture manifest. CSS modifier classes own the presentation. The educational captions are absolutely positioned so they cannot shift node centers or misalign arrows. Unknown query values fall back to `minimal`.
+
+**Regression coverage:** Tests pin all three variant names, preserve the attention→LayerNorm connector's layout width, and verify that variant selection never changes the diagram's labels.
 
 ## File Layout
 

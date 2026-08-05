@@ -262,12 +262,12 @@ describe("ArchSchematic residual connection visualization", () => {
       if (this.classList.contains("arch-block-detail__flow")) return rect(0, 1000, 0, 120);
       if (this.classList.contains("arch-arrow--entry")) return rect(20, 60);
       if (this.classList.contains("arch-arrow--exit")) return rect(880, 60);
-      if (this.classList.contains("arch-stage") && this.closest(".arch-flow-item--detail")) {
-        const label = this.textContent?.trim();
+      if (this.classList.contains("arch-node") && this.closest(".arch-flow-item--detail")) {
+        const label = this.querySelector(".arch-node__label")?.textContent?.trim();
         if (label === "Causal S. Attention") return rect(300, 150);
         if (label === "Feed Forward") return rect(700, 150);
-        const detailStages = Array.from(document.querySelectorAll(".arch-flow-item--detail .arch-stage"));
-        return rect(detailStages.indexOf(this) === 0 ? 100 : 500, 150);
+        const detailNodes = Array.from(document.querySelectorAll(".arch-flow-item--detail .arch-node"));
+        return rect(detailNodes.indexOf(this) === 0 ? 100 : 500, 150);
       }
       return rect(0, 0, 0, 0);
     });
@@ -288,6 +288,23 @@ describe("ArchSchematic residual connection visualization", () => {
     const attentionItem = screen.getByText("Causal S. Attention").closest(".arch-flow-item--detail");
     const reservedConnector = attentionItem?.querySelector(".arch-arrow");
     expect(reservedConnector).toHaveClass("arch-arrow--muted");
+  });
+
+  it("supports the three visual variants without changing diagram content", async () => {
+    const originalUrl = `${window.location.pathname}${window.location.search}`;
+
+    try {
+      for (const variant of ["minimal", "technical", "educational"]) {
+        window.history.replaceState({}, "", `?archVariant=${variant}`);
+        const { container, unmount } = render(<ArchSchematic runId={1} />);
+        await waitFor(() => expect(screen.getByText("Causal S. Attention")).toBeInTheDocument());
+        expect(container.querySelector("#arch-schematic")).toHaveAttribute("data-visual-variant", variant);
+        expect(screen.getAllByText("LayerNorm")).toHaveLength(2);
+        unmount();
+      }
+    } finally {
+      window.history.replaceState({}, "", originalUrl);
+    }
   });
 
   it("does not render residual arcs for non-transformer templates without attention/mlp", async () => {
