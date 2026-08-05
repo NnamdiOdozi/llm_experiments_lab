@@ -3,6 +3,8 @@ import { useChatStream } from "../hooks/useChatStream";
 import { setChatMessageFeedback } from "../hooks/useApi";
 import { ChatMessage } from "../types";
 import { CopyIconButton } from "./CopyIconButton";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Props {
   experimentId: number;
@@ -16,6 +18,147 @@ const iconButtonStyle: CSSProperties = {
   padding: 0,
   lineHeight: 0,
 };
+
+interface MarkdownMessageProps {
+  content: string;
+}
+
+function MarkdownMessage({ content }: MarkdownMessageProps) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => (
+          <p style={{ margin: "4px 0" }}>
+            {children}
+          </p>
+        ),
+        a: ({ href, children, ...props }) => (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--accent-dim)" }}
+            {...props}
+          >
+            {children}
+          </a>
+        ),
+        pre: ({ children }) => (
+          <pre
+            style={{
+              overflowX: "auto",
+              padding: "8px",
+              backgroundColor: "var(--bg)",
+              borderRadius: "4px",
+              border: "1px solid var(--border)",
+              margin: "4px 0",
+              fontSize: "12px",
+            }}
+          >
+            {children}
+          </pre>
+        ),
+        code: ({ inline, children, ...props }: any) => {
+          if (inline) {
+            return (
+              <code
+                style={{
+                  backgroundColor: "var(--bg)",
+                  padding: "2px 4px",
+                  borderRadius: "2px",
+                  fontSize: "12px",
+                }}
+                {...props}
+              >
+                {children}
+              </code>
+            );
+          }
+          return <code {...props}>{children}</code>;
+        },
+        table: ({ children }) => (
+          <div style={{ overflowX: "auto", margin: "4px 0" }}>
+            <table
+              style={{
+                borderCollapse: "collapse",
+                fontSize: "12px",
+              }}
+            >
+              {children}
+            </table>
+          </div>
+        ),
+        th: ({ children }) => (
+          <th
+            style={{
+              border: "1px solid var(--border)",
+              padding: "4px 6px",
+              textAlign: "left",
+              backgroundColor: "var(--bg)",
+            }}
+          >
+            {children}
+          </th>
+        ),
+        td: ({ children }) => (
+          <td
+            style={{
+              border: "1px solid var(--border)",
+              padding: "4px 6px",
+            }}
+          >
+            {children}
+          </td>
+        ),
+        ul: ({ children }) => (
+          <ul style={{ paddingLeft: "1.2em", margin: "4px 0" }}>
+            {children}
+          </ul>
+        ),
+        ol: ({ children }) => (
+          <ol style={{ paddingLeft: "1.2em", margin: "4px 0" }}>
+            {children}
+          </ol>
+        ),
+        li: ({ children }) => (
+          <li style={{ margin: "2px 0" }}>
+            {children}
+          </li>
+        ),
+        blockquote: ({ children }) => (
+          <blockquote
+            style={{
+              borderLeft: "3px solid var(--border)",
+              paddingLeft: "8px",
+              color: "var(--text-dim)",
+              margin: "4px 0",
+            }}
+          >
+            {children}
+          </blockquote>
+        ),
+        h1: ({ children }) => (
+          <h1 style={{ fontSize: "16px", margin: "4px 0", fontWeight: "bold" }}>
+            {children}
+          </h1>
+        ),
+        h2: ({ children }) => (
+          <h2 style={{ fontSize: "14px", margin: "4px 0", fontWeight: "bold" }}>
+            {children}
+          </h2>
+        ),
+        h3: ({ children }) => (
+          <h3 style={{ fontSize: "13px", margin: "4px 0", fontWeight: "bold" }}>
+            {children}
+          </h3>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
 
 export default function ChatPanel({ experimentId }: Props) {
   const { messages, sendMessage, loading, error, unavailable, clearMessages } = useChatStream(experimentId);
@@ -121,7 +264,7 @@ export default function ChatPanel({ experimentId }: Props) {
               padding: "6px 10px",
               maxWidth: "85%",
               fontSize: 13,
-              whiteSpace: "pre-wrap",
+              whiteSpace: m.role === "user" ? "pre-wrap" : "normal",
             }}
           >
             {m.role === "assistant" && m.content === "" ? (
@@ -130,6 +273,8 @@ export default function ChatPanel({ experimentId }: Props) {
                 <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text-dim)" }} />
                 <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text-dim)" }} />
               </div>
+            ) : m.role === "assistant" ? (
+              <MarkdownMessage content={m.content} />
             ) : (
               <div>{m.content}</div>
             )}

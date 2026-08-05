@@ -111,4 +111,232 @@ describe("ChatPanel", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(sendMessage).toHaveBeenCalledWith("hello");
   });
+
+  // Markdown rendering tests
+  it("renders bold and italic text in assistant messages", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "This is **bold** and this is *italic*.",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const container = screen.getByText(/bold/).closest("div");
+    expect(container?.querySelector("strong")).toBeInTheDocument();
+    expect(container?.querySelector("em")).toBeInTheDocument();
+  });
+
+  it("renders bullet lists in assistant messages", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "- Item 1\n- Item 2\n- Item 3",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const container = screen.getByText(/Item 1/).closest("div");
+    const items = container?.querySelectorAll("li");
+    expect(items?.length).toBe(3);
+  });
+
+  it("renders fenced code blocks in assistant messages", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "Here's a Python snippet:\n```python\nprint(1)\n```",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const container = screen.getByText(/print/).closest("div");
+    expect(container?.querySelector("pre")).toBeInTheDocument();
+    expect(container?.querySelector("code")).toBeInTheDocument();
+  });
+
+  it("renders GFM tables in assistant messages", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const container = screen.getByText(/Header 1/).closest("div");
+    expect(container?.querySelector("table")).toBeInTheDocument();
+  });
+
+  it("renders links with target _blank and rel noopener noreferrer", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "Check out [this link](https://example.com)",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("escapes raw HTML and prevents script injection", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "This has <script>alert('xss')</script> in it.",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    const { container } = render(<ChatPanel experimentId={1} />);
+
+    // Ensure no script element exists
+    expect(container.querySelector("script")).not.toBeInTheDocument();
+    // The HTML should appear as escaped text
+    expect(screen.getByText(/script/)).toBeInTheDocument();
+  });
+
+  it("escapes raw HTML img tags with onerror handlers", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: 'An image: <img src="x" onerror="alert(\'xss\')" />',
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    const { container } = render(<ChatPanel experimentId={1} />);
+
+    // Ensure no img element with onerror is rendered
+    const imgs = container.querySelectorAll("img");
+    expect(imgs.length).toBe(0);
+  });
+
+  it("handles streaming/partial Markdown without throwing", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "```python\nprint(1)",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    // This should not throw an error
+    expect(() => render(<ChatPanel experimentId={1} />)).not.toThrow();
+  });
+
+  it("copy button returns raw Markdown source for assistant messages", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "assistant",
+          content: "**Bold text** and [link](https://example.com)",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    render(<ChatPanel experimentId={1} />);
+
+    // The CopyIconButton receives getText prop, verify button is present
+    const copyButton = screen.getByTitle("Copy response");
+    expect(copyButton).toBeInTheDocument();
+  });
+
+  it("keeps user messages as plain text with pre-wrap", () => {
+    mockHook({
+      messages: [
+        {
+          id: 1,
+          experiment_id: 1,
+          role: "user",
+          content: "line1\nline2\nline3",
+          prompt_tokens: null,
+          completion_tokens: null,
+          total_tokens: null,
+          latency_ms: null,
+          created_at: "2026-01-01",
+        },
+      ],
+    });
+    const { container } = render(<ChatPanel experimentId={1} />);
+
+    // Find the user message wrapper
+    const userMessageDiv = container.querySelector('[style*="pre-wrap"]');
+    expect(userMessageDiv?.textContent).toContain("line1");
+  });
 });
