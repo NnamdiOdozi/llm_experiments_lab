@@ -31,6 +31,44 @@ DIAGNOSTIC_POSITION_WINDOW = 12
 MIN_TEMPERATURE = 1e-6
 
 
+def token_label(tokenizer: object, token_id: int) -> dict:
+    """Return display/raw/decoded metadata for a single token.
+
+    If tokenizer has id_to_token method (BPE, CharTokenizer), use it to get
+    display (with whitespace markers visible: ␠, ⏎, etc.) alongside raw and
+    decoded forms. Otherwise, fallback: decode the token and use that string
+    for all three fields (raw, display, decoded are identical).
+
+    Args:
+        tokenizer: A TokenizerProtocol-like object (has encode/decode, optionally id_to_token).
+        token_id: Token ID to inspect.
+
+    Returns:
+        Dict with keys:
+        - "raw": The tokenizer's literal token string (may include byte markers).
+        - "display": Human-safe form with markers visible (e.g., Ġ→␠, Ċ→⏎).
+                     Safe for UI labels and axis text.
+        - "decoded": The result of decode([token_id]), i.e., what text this token represents.
+
+    Handles:
+    - BPE tokenizers: id_to_token returns raw with Ġ/Ċ, display makes them visible,
+      decoded is the actual character(s).
+    - CharTokenizer: id_to_token returns char with whitespace visible in display.
+    - RNN DinosDataset and other tokenizers without id_to_token: fallback to decode
+      for all three fields (they're identical).
+    """
+    if hasattr(tokenizer, "id_to_token"):
+        return tokenizer.id_to_token(token_id)
+    else:
+        # Fallback: decode and use for all three fields
+        decoded_str = tokenizer.decode([token_id])
+        return {
+            "raw": decoded_str,
+            "display": decoded_str,
+            "decoded": decoded_str,
+        }
+
+
 @dataclass
 class NodeCapture:
     """Captured tensor information at a node (hook point)."""
@@ -427,13 +465,19 @@ def _compute_attention_weights(
             if full_matrix:
                 # Full matrix mode: return entire T×T, un-windowed
                 weights = full_weights.tolist()
-                token_labels = [session.tokenizer.decode([tid]) for tid in visible_tokens]
+                # Use display labels for axis (␠, ⏎, etc. visible), with optional
+                # raw/decoded fields for tooltips. See phase 4 of selectable-tokenizer.
+                token_labels_display = [token_label(session.tokenizer, tid)["display"] for tid in visible_tokens]
+                token_labels_raw = [token_label(session.tokenizer, tid)["raw"] for tid in visible_tokens]
+                token_labels_decoded = [token_label(session.tokenizer, tid)["decoded"] for tid in visible_tokens]
                 result = {
                     "available": True,
                     "layer": layer,
                     "head": head,
                     "weights": weights,
-                    "token_labels": token_labels,
+                    "token_labels": token_labels_display,
+                    "token_labels_raw": token_labels_raw,
+                    "token_labels_decoded": token_labels_decoded,
                     "total_positions": T,
                     "block_size": block_size,
                 }
@@ -450,13 +494,19 @@ def _compute_attention_weights(
                 start = end - window
 
                 weights = full_weights[start:end, start:end].tolist()
-                token_labels = [session.tokenizer.decode([tid]) for tid in visible_tokens[start:end]]
+                # Use display labels for axis (␠, ⏎, etc. visible), with optional
+                # raw/decoded fields for tooltips. See phase 4 of selectable-tokenizer.
+                token_labels_display = [token_label(session.tokenizer, tid)["display"] for tid in visible_tokens[start:end]]
+                token_labels_raw = [token_label(session.tokenizer, tid)["raw"] for tid in visible_tokens[start:end]]
+                token_labels_decoded = [token_label(session.tokenizer, tid)["decoded"] for tid in visible_tokens[start:end]]
                 result = {
                     "available": True,
                     "layer": layer,
                     "head": head,
                     "weights": weights,
-                    "token_labels": token_labels,
+                    "token_labels": token_labels_display,
+                    "token_labels_raw": token_labels_raw,
+                    "token_labels_decoded": token_labels_decoded,
                     "window_start": start,
                     "total_positions": T,
                 }
@@ -466,7 +516,7 @@ def _compute_attention_weights(
                 if qkv_detail:
                     result["qkv_detail"] = {
                         "positions": list(range(start, end)),
-                        "tokens": [session.tokenizer.decode([tid]) for tid in visible_tokens[start:end]],
+                        "tokens": [token_label(session.tokenizer, tid)["display"] for tid in visible_tokens[start:end]],
                         "q": q[0, head, start:end, :].tolist(),
                         "k": k[0, head, start:end, :].tolist(),
                         "v": v[0, head, start:end, :].tolist(),
@@ -686,7 +736,7 @@ def _execute_forward_pass(
             generated_token = {
                 "position": len(session.prompt_tokens) + len(session.token_history) - 1,
                 "id": next_token_id,
-                "text": session.tokenizer.decode([next_token_id]),
+                "text": token_label(session.tokenizer, next_token_id)["display"],
             }
         else:
             last_id = session.token_history[-1] if session.token_history else session.prompt_tokens[-1]
@@ -713,13 +763,13 @@ def _execute_forward_pass(
             generated_token = {
                 "position": len(session.prompt_tokens) + len(session.token_history) - 1,
                 "id": last_id,
-                "text": session.tokenizer.decode([last_id]),
+                "text": token_label(session.tokenizer, last_id)["display"],
             }
 
         topk_probs, topk_ids = torch.topk(probs, k=min(top_k, logits_last.shape[0]))
 
         input_tokens = [
-            {"position": pos, "id": tid, "text": session.tokenizer.decode([tid])}
+            {"position": pos, "id": tid, "text": token_label(session.tokenizer, tid)["display"]}
             for pos, tid in enumerate(session.prompt_tokens)
         ]
 
@@ -797,13 +847,13 @@ def _execute_forward_pass(
             pos_topk_probs, pos_topk_ids = torch.topk(pos_probs, k=min(top_k, pos_logits.shape[0]))
             top_k_by_position.append({
                 "position": pos,
-                "token": session.tokenizer.decode([all_tokens[pos]]),
+                "token": token_label(session.tokenizer, all_tokens[pos])["display"],
                 "actual_next_token_id": full_next_tokens[pos] if pos < len(full_next_tokens) else None,
                 "top_k": [
                     {
                         "rank": r + 1,
                         "token_id": int(tid.item()),
-                        "token": session.tokenizer.decode([tid.item()]),
+                        "token": token_label(session.tokenizer, int(tid.item()))["display"],
                         "logit": float(pos_logits[tid].item()),
                         "probability": float(p.item()),
                     }
@@ -821,7 +871,7 @@ def _execute_forward_pass(
         # window, so one shared list avoids repeating identical token text
         # at every one of ~18 nodes. See docs/DESIGN_DECISIONS.md.
         position_tokens = [
-            {"position": pos, "id": all_tokens[pos], "token": session.tokenizer.decode([all_tokens[pos]])}
+            {"position": pos, "id": all_tokens[pos], "token": token_label(session.tokenizer, all_tokens[pos])["display"]}
             for pos in range(pos_start, T_total)
         ]
 
@@ -841,7 +891,7 @@ def _execute_forward_pass(
                 {
                     "rank": i + 1,
                     "token_id": int(tid.item()),
-                    "token": session.tokenizer.decode([tid.item()]),
+                    "token": token_label(session.tokenizer, int(tid.item()))["display"],
                     "logit": float(logits_last[tid].item()),
                     "probability": float(p.item()),
                 }

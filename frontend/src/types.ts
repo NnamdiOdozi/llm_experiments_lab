@@ -239,6 +239,10 @@ export interface AttentionData {
   head?: number;
   weights?: number[][];
   token_labels?: string[];
+  // Phase 4 (selectable-tokenizer): optional raw/decoded token labels for BPE.
+  // If present, used by tooltips to show full token metadata; axis uses display.
+  token_labels_raw?: string[];
+  token_labels_decoded?: string[];
   reason?: string;
   qkv_detail?: QKVDetail;
   // window_start/total_positions describe the windowed weights/token_labels
@@ -281,6 +285,10 @@ export interface AttentionFull {
   // Shape: weights[T][T] where T ≤ block_size. Un-windowed.
   weights?: number[][];
   token_labels?: string[];
+  // Phase 4 (selectable-tokenizer): optional raw/decoded token labels for BPE.
+  // If present, used by tooltips to show full token metadata; axis uses display.
+  token_labels_raw?: string[];
+  token_labels_decoded?: string[];
   layer?: number;
   head?: number;
   total_positions?: number;  // Actual T seen by the model

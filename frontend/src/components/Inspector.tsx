@@ -452,6 +452,7 @@ function EmbeddingOneHotTable({
     return <div style={{ fontSize: 15, color: "var(--text-dim)", marginTop: 12 }}>Not captured</div>;
   }
 
+  // Generate full one-hot vector (only when actually needed for export)
   const oneHot = (id: number): number[] => {
     const v = new Array(vocabSize).fill(0);
     v[id] = 1;
@@ -461,30 +462,30 @@ function EmbeddingOneHotTable({
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
-        Input Vectors (one-hot, width {vocabSize}) — hover for full vector, double-click to open in a tab
+        Input Vectors (one-hot, width {vocabSize}) — hover for summary, double-click to open full vector in a tab
       </div>
       <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
         <thead>
           <tr>
             <th style={positionTableCellStyle}>Position</th>
-            <th style={positionTableCellStyle}>Character</th>
-            <th style={positionTableCellStyle}>One-Hot Vector</th>
+            <th style={positionTableCellStyle}>Token</th>
+            <th style={positionTableCellStyle}>One-Hot Vector (sparse)</th>
           </tr>
         </thead>
         <tbody>
           {positionTokens.map((pt) => {
-            const vec = oneHot(pt.id);
-            const t = truncatedVector(vec);
+            // Sparse representation: show "value 1 at index N; all other V-1 entries are 0"
+            const sparseLabel = `value 1 at index ${pt.id}; all other ${vocabSize - 1} entries are 0`;
             return (
               <tr key={pt.position}>
                 <td style={{ ...positionTableCellStyle, color: "var(--text-dim)" }}>{pt.position + 1}</td>
                 <td style={{ ...positionTableCellStyle, color: "var(--text)" }}>"{pt.token}"</td>
                 <td
                   style={{ ...positionTableCellStyle, color: "var(--text)", cursor: "pointer" }}
-                  title={t.full}
-                  onDoubleClick={() => onOpenDataTab(`Embedding Input — "${pt.token}" — pos ${pt.position + 1}`, vec)}
+                  title={sparseLabel}
+                  onDoubleClick={() => onOpenDataTab(`Embedding Input — "${pt.token}" — pos ${pt.position + 1}`, oneHot(pt.id))}
                 >
-                  {t.preview}
+                  Shape: [{vocabSize}]
                 </td>
               </tr>
             );

@@ -2407,3 +2407,85 @@ async def test_attention_maps_oracle_matches_single_pair_path(temp_db, client, m
         for key in ("q", "k", "v"):
             _assert_close_grid(maps_qkv[key], single_qkv[key], f"qkv.{key} layer {layer} head {head}")
         assert snapshot["attention_maps"]["positions"] == single_qkv["positions"]
+
+
+# Tests for token_label helper (phase 4: BPE-aware diagnostics)
+
+def test_token_label_with_char_tokenizer():
+    """token_label returns correct fields for CharTokenizer."""
+    from backend.training.tokenizers.char import CharTokenizer
+    from backend.training.diagnostics import token_label
+
+    tokenizer = CharTokenizer.from_text("hello world")
+    
+    # Regular character
+    result = token_label(tokenizer, tokenizer.stoi["h"])
+    assert result["raw"] == "h"
+    assert result["display"] == "h"
+    assert result["decoded"] == "h"
+    
+    # Space token
+    space_id = tokenizer.stoi[" "]
+    result = token_label(tokenizer, space_id)
+    assert result["raw"] == " "
+    assert result["display"] == "␠"  # Displayed as visible marker
+    assert result["decoded"] == " "
+    
+    # Newline (if present in vocab)
+    if "\n" in tokenizer.stoi:
+        nl_id = tokenizer.stoi["\n"]
+        result = token_label(tokenizer, nl_id)
+        assert result["raw"] == "\n"
+        assert result["display"] == "⏎"
+        assert result["decoded"] == "\n"
+
+
+def test_token_label_with_bpe_tokenizer():
+    """token_label returns correct fields for BPETokenizer with space markers visible."""
+    from backend.training.tokenizers.bpe import BPETokenizer
+    from backend.training.diagnostics import token_label
+
+    tokenizer = BPETokenizer(
+        settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-1k-v1.json"
+    )
+    
+    # Encode "King Henry" to get space-prefixed tokens
+    encoded = tokenizer.encode("King Henry")
+    
+    # First token should be "King" (no space prefix)
+    result = token_label(tokenizer, encoded[0])
+    assert "raw" in result
+    assert "display" in result
+    assert "decoded" in result
+    # Display should not contain the raw Ġ byte marker
+    assert "Ġ" not in result["display"]
+    
+    # Look for a space-prefixed token (usually the second one in "King Henry")
+    for token_id in encoded:
+        result = token_label(tokenizer, token_id)
+        if result["decoded"].startswith(" "):
+            # If decoded starts with space, display should show ␠
+            assert result["display"].startswith("␠"), (
+                f"Token {token_id}: decoded={result['decoded']!r} starts with space "
+                f"but display={result['display']!r} doesn't start with ␠"
+            )
+
+
+def test_token_label_fallback_without_id_to_token():
+    """token_label falls back to decode when tokenizer lacks id_to_token."""
+    from backend.training.diagnostics import token_label
+
+    # Create a minimal mock tokenizer without id_to_token
+    class MinimalTokenizer:
+        def decode(self, ids):
+            return "decoded_text"
+
+    tokenizer = MinimalTokenizer()
+    result = token_label(tokenizer, 42)
+    
+    # All three fields should be identical (the decoded string)
+    assert result["raw"] == "decoded_text"
+    assert result["display"] == "decoded_text"
+    assert result["decoded"] == "decoded_text"
+
+
