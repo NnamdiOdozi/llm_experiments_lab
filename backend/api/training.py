@@ -1156,9 +1156,14 @@ async def get_embedding_table(run_id: int):
         model.load_state_dict(cp["model_state"])
         model.train(False)
 
-        from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
-        text = load_tiny_shakespeare()
-        tokenizer = CharDataset(text, model_config["model"]["block_size"], 1)
+        # Tokenizer must match the run's configured tokenizer (char/bpe_1k/bpe_4k)
+        # so decode/id_to_token map the real vocab; RNN keeps its dinos tokenizer.
+        if template_key == "rnn":
+            from backend.training.templates.rnn.data import load_dinos_dataset
+            tokenizer = load_dinos_dataset(model_config["training"].get("seq_len", 50))
+        else:
+            from backend.training.tokenizers.loader import load_tokenizer
+            tokenizer = load_tokenizer(model_config.get("data", {"tokenizer": "char"}))
 
         weight = model.token_emb.weight.detach().cpu()
         vocab_size, n_embd = weight.shape
@@ -1255,11 +1260,12 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
         model.load_state_dict(cp["model_state"])
         model.train(False)
 
-        # Load tokenizer
+        # Load tokenizer — must match the run's configured tokenizer (char /
+        # bpe_1k / bpe_4k), else a BPE model's generated token ids (>=65) blow
+        # up the char decoder with a KeyError. 2026-08-06.
         if template_key in ("transformer", "moe"):
-            from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
-            text = load_tiny_shakespeare()
-            tokenizer = CharDataset(text, config["model"]["block_size"], 1)
+            from backend.training.tokenizers.loader import load_tokenizer
+            tokenizer = load_tokenizer(config.get("data", {"tokenizer": "char"}))
         elif template_key == "rnn":
             from backend.training.templates.rnn.data import load_dinos_dataset
             tokenizer = load_dinos_dataset(config["training"].get("seq_len", 50))
