@@ -14,6 +14,12 @@ export interface ExperimentConfig {
   model: Record<string, number | string>;
   training: Record<string, number | string>;
   inference?: Record<string, number | string>;
+  data?: {
+    dataset: string;
+    tokenizer: string;
+    tokenizer_artifact: string | null;
+    vocab_size: number;
+  };
 }
 
 export interface Experiment {
