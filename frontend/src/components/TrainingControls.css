@@ -1,5 +1,5 @@
-.training-panel {
-  padding: 12px;
+.panel.training-panel {
+  padding: 8px 12px;
 }
 
 .training-panel > h3 {

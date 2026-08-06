@@ -50,6 +50,14 @@ describe("ConfigPanel numeric fields", () => {
     expect(screen.getByText("block_size")).toHaveClass("config-field__label");
   });
 
+  it("uses the denser treatment only for the longer MoE configuration", () => {
+    const { rerender } = render(<ConfigPanel config={{ ...config, template: "moe" }} onChange={() => {}} />);
+    expect(screen.getByText("Configuration").closest(".config-panel")).toHaveClass("config-panel--moe");
+
+    rerender(<ConfigPanel config={config} onChange={() => {}} />);
+    expect(screen.getByText("Configuration").closest(".config-panel")).not.toHaveClass("config-panel--moe");
+  });
+
   it("keeps tokenizer-derived vocab_size out of the model editable fields", () => {
     render(<ConfigPanel config={config} onChange={() => {}} />);
     // vocab_size should not appear as an editable input in the Model section
@@ -63,6 +71,7 @@ describe("ConfigPanel numeric fields", () => {
   it("displays vocab_size as read-only in the Data section", () => {
     render(<ConfigPanel config={config} onChange={() => {}} />);
     expect(screen.getByText("65", { selector: ".config-field__readonly" })).toBeInTheDocument();
+    expect(screen.queryByText("fixed by tokenizer")).not.toBeInTheDocument();
   });
 
   it("shows the Tokenizer dropdown for transformer template", () => {

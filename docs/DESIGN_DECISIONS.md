@@ -4278,6 +4278,12 @@ function, use the marker and a fake subprocess.
 
 **Rendered verification:** In the real MoE architecture, Causal Self-Attention rendered with a -2px lift, 16% brightness increase, soft two-tier shadow, and sibling opacity of 0.76. Inspector remained closed while hovering and opened only after selection.
 
+## §91: Configuration Density After Tokenizer Controls (2026-08-06)
+
+Adding the Data section's Tokenizer selector and read-only vocabulary size made the 95% Configuration treatment too tall for the ZBook viewport. Standard Transformer/RNN configurations use approximately 90% density (23px rows and 11px field type). MoE alone uses an 85% modifier (21px rows and 10px field type) because it additionally exposes `num_experts`, `top_k`, and `capacity_factor`. The redundant “fixed by tokenizer” helper line was removed because the read-only value sits immediately beneath the tokenizer selector. Left-sidebar gaps are 10px and Training uses component-scoped 8px vertical padding. The component padding selectors include `.panel` specificity so the later global `.panel` rule cannot silently override them.
+
+At the conservative 1536 × 960 CSS viewport, the tokenizer-enabled MoE Configuration ends at y=747 and the complete Training panel ends at y=900. Resume and Stop end at y=891, with no horizontal overflow.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

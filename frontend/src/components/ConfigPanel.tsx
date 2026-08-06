@@ -195,7 +195,7 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
   };
 
   return (
-    <div className="panel config-panel">
+    <div className={`panel config-panel${normalizedConfig.template === "moe" ? " config-panel--moe" : ""}`}>
       <h3>Configuration</h3>
       <div className={`tag ${normalizedConfig.template === "rnn" ? "tag-paused" : "tag-running"}`}
         style={{ marginBottom: 8 }}>
@@ -232,9 +232,6 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
             <div className="config-field__readonly">
               {normalizedConfig.data!.vocab_size}
             </div>
-          </div>
-          <div className="config-field__hint">
-            fixed by tokenizer
           </div>
         </div>
       </div>
