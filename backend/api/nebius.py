@@ -20,12 +20,15 @@ def _warning_seconds(device_type: str) -> int:
     return settings.gpu_idle_warning_seconds if device_type == "gpu" else settings.cpu_idle_warning_seconds
 
 
-def _configured_spec(device_type: str) -> dict:
+def _configured_spec(device_type: str, gpu_flavor: str | None = None) -> dict:
     """What settings.py says a *future* create_endpoint call would request —
     NOT necessarily what's actually running (see actual_platform/actual_preset
     below and docs/DESIGN_DECISIONS.md §9). Shown on the landing/workspace
-    pages so users can see the hardware without digging into config/settings.py."""
+    pages so users can see the hardware without digging into config/settings.py.
+    For GPU, returns H100 specs if gpu_flavor=='h100', else L40S specs."""
     if device_type == "gpu":
+        if gpu_flavor == "h100":
+            return {"platform": settings.nebius_gpu_h100_platform, "preset": settings.nebius_gpu_h100_preset}
         return {"platform": settings.nebius_gpu_platform, "preset": settings.nebius_gpu_preset}
     return {"platform": settings.nebius_cpu_platform, "preset": settings.nebius_cpu_preset}
 
@@ -33,7 +36,7 @@ def _configured_spec(device_type: str) -> dict:
 @router.get("/workers/{device}")
 async def get_worker_status(device: str, gpu_flavor: str | None = None):
     device_type = device_type_for(device)
-    configured = _configured_spec(device_type)
+    configured = _configured_spec(device_type, gpu_flavor)
     base = {
         "backend_mode": settings.training_backend,
         "configured_platform": configured["platform"],

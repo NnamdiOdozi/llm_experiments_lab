@@ -115,6 +115,38 @@ async def test_worker_status_always_returns_configured_spec_even_with_no_worker(
     assert gpu_resp.json()["configured_preset"] == "1gpu-8vcpu-32gb"
 
 
+async def test_worker_status_returns_h100_configured_spec_when_gpu_flavor_h100(temp_db, client, monkeypatch):
+    """When gpu_flavor=h100 is passed, configured spec should be H100, not L40S."""
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_platform", "gpu-l40s-a")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_preset", "1gpu-8vcpu-32gb")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_h100_platform", "gpu-h100-sxm")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_h100_preset", "1gpu-16vcpu-200gb")
+
+    gpu_l40s_resp = await client.get("/api/nebius/workers/cuda")
+    gpu_h100_resp = await client.get("/api/nebius/workers/cuda?gpu_flavor=h100")
+
+    # Default (L40S)
+    assert gpu_l40s_resp.json()["configured_platform"] == "gpu-l40s-a"
+    assert gpu_l40s_resp.json()["configured_preset"] == "1gpu-8vcpu-32gb"
+
+    # H100
+    assert gpu_h100_resp.json()["configured_platform"] == "gpu-h100-sxm"
+    assert gpu_h100_resp.json()["configured_preset"] == "1gpu-16vcpu-200gb"
+
+
+async def test_worker_status_returns_l40s_configured_spec_when_gpu_flavor_l40s(temp_db, client, monkeypatch):
+    """When gpu_flavor=l40s is explicitly passed, should get L40S specs."""
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_platform", "gpu-l40s-a")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_preset", "1gpu-8vcpu-32gb")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_h100_platform", "gpu-h100-sxm")
+    monkeypatch.setattr(nebius_api.settings, "nebius_gpu_h100_preset", "1gpu-16vcpu-200gb")
+
+    gpu_l40s_resp = await client.get("/api/nebius/workers/cuda?gpu_flavor=l40s")
+
+    assert gpu_l40s_resp.json()["configured_platform"] == "gpu-l40s-a"
+    assert gpu_l40s_resp.json()["configured_preset"] == "1gpu-8vcpu-32gb"
+
+
 async def test_worker_status_reports_actual_platform_not_configured_platform(temp_db, client, monkeypatch):
     monkeypatch.setattr(nebius_api.settings, "nebius_gpu_platform", "gpu-l40s-a")
     await db.create_worker_session("worker-gpu", "gpu", "nebius_endpoint", idle_timeout_seconds=600)

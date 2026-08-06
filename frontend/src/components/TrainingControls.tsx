@@ -26,6 +26,13 @@ interface Props {
   onToggleSoundMuted: () => void;
 }
 
+// Map GPU platform → VRAM in GB
+const gpuMemoryMap: Record<string, number> = {
+  "gpu-h100-sxm": 80,
+  "gpu-h100-a": 80,      // H100 accelerator variant
+  "gpu-l40s-a": 48,
+};
+
 function statusTag(status: string) {
   const cls = `tag tag-${status}`;
   return <span className={cls}>{status}</span>;
@@ -37,10 +44,19 @@ function formatElapsed(seconds: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function formatPreset(preset: string | null): string {
+function formatPreset(preset: string | null, platform?: string | null): string {
   if (!preset) return "";
-  const match = preset.match(/^(\d+)vcpu-(\d+)gb$/i);
-  return match ? `${match[1]}vCPU / ${match[2]}GB` : preset;
+  // GPU preset: "1gpu-8vcpu-32gb"
+  const gpuMatch = preset.match(/^(\d+)gpu-(\d+)vcpu-(\d+)gb$/);
+  if (gpuMatch) {
+    const [, gpuCount, vcpuCount, memoryGb] = gpuMatch;
+    const vram = platform ? gpuMemoryMap[platform] : null;
+    const vramStr = vram ? `${vram} GB` : null;
+    return [vramStr, `${gpuCount} GPU / ${vcpuCount}vCPU / ${memoryGb}GB`].filter(Boolean).join(" · ");
+  }
+  // CPU preset: "16vcpu-64gb"
+  const cpuMatch = preset.match(/^(\d+)vcpu-(\d+)gb$/i);
+  return cpuMatch ? `${cpuMatch[1]}vCPU / ${cpuMatch[2]}GB` : preset;
 }
 
 function progressBar(current: number, total: number) {
@@ -91,15 +107,22 @@ export default function TrainingControls({
   // See docs/DESIGN_DECISIONS.md §10.
   const isRemoteRun = runStatus?.execution_backend === "nebius_endpoint";
   const [preset, setPreset] = useState<string | null>(null);
+  const [platform, setPlatform] = useState<string | null>(null);
   useEffect(() => {
     if (!isRemoteRun) {
       setPreset(null);
+      setPlatform(null);
       return;
     }
-    getWorkerStatus(device).then((s) => setPreset(s.preset));
-  }, [device, isRemoteRun]);
+    // Pass gpuFlavor for GPU devices to get the right configured hardware.
+    const flavor = device === "cuda" ? gpuFlavor : undefined;
+    getWorkerStatus(device, flavor).then((s) => {
+      setPreset(s.preset);
+      setPlatform(s.actual_platform || s.configured_platform || null);
+    });
+  }, [device, isRemoteRun, gpuFlavor]);
   const workerTag = isRemoteRun
-    ? [device.toUpperCase(), formatPreset(preset), "Serverless"].filter(Boolean).join(" · ")
+    ? [device.toUpperCase(), formatPreset(preset, platform), "Serverless"].filter(Boolean).join(" · ")
     : `${device.toUpperCase()} · Local`;
 
   const staleSeconds = lastPollSuccess ? Math.floor((Date.now() - lastPollSuccess) / 1000) : null;

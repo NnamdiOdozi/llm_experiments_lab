@@ -699,7 +699,11 @@ export default function App() {
         {/* runStatus.execution_backend (the active run's real backend) takes
             priority over the device/backend picker state, which is only a
             pending choice for the *next* Start click. */}
-        <HardwareSpecs device={device} backend={runStatus?.execution_backend ?? backend} />
+        <HardwareSpecs
+          device={device}
+          backend={runStatus?.execution_backend ?? backend}
+          gpuFlavor={deviceType === "gpu" ? gpuFlavor : undefined}
+        />
       </div>
 
       {/* Dashboard columns. Layout (fluid widths + shrink-then-stack
@@ -710,7 +714,7 @@ export default function App() {
           sizes. See docs/DESIGN_DECISIONS.md. */}
       <div className="dashboard-grid">
         {/* Left sidebar */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div className="dashboard-sidebar" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <ConfigPanel
             config={config}
             onChange={handleConfigChange}

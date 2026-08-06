@@ -1,6 +1,25 @@
 import { useEffect, useState } from "react";
 import { getWorkerStatus, WorkerStatus } from "../hooks/useApi";
 
+// Map GPU platform → VRAM in GB
+const gpuMemoryMap: Record<string, number> = {
+  "gpu-h100-sxm": 80,
+  "gpu-h100-a": 80,      // H100 accelerator variant
+  "gpu-l40s-a": 48,
+};
+
+// Decode preset string like "1gpu-8vcpu-32gb" into friendly human-readable spec.
+// Returns e.g. "1 GPU · 8 vCPU · 32 GB RAM" or empty string if parse fails.
+function formatPresetSpec(preset: string | null | undefined): string {
+  if (!preset) return "";
+  const match = preset.match(/^(\d+)gpu-(\d+)vcpu-(\d+)gb$/);
+  if (match) {
+    const [, gpuCount, vcpuCount, memoryGb] = match;
+    return `${gpuCount} GPU · ${vcpuCount} vCPU · ${memoryGb} GB RAM`;
+  }
+  return "";
+}
+
 interface Props {
   // Current run's device/backend. Omit (landing page, no run yet) to show
   // both CPU and GPU serverless specs informationally. When given: a local
@@ -9,6 +28,9 @@ interface Props {
   // GPU spec while running on CPU (or vice versa) is misleading.
   device?: string;
   backend?: string;
+  // GPU flavor (h100 or l40s) to request the correct configured hardware.
+  // Passed only for GPU devices; omit for CPU or when flavor is unknown.
+  gpuFlavor?: string;
 }
 
 // Shows what CPU/GPU hardware a serverless run actually uses, so the user
@@ -19,7 +41,7 @@ interface Props {
 // that, labeled distinctly since configured values are marked as unverified
 // placeholders in settings.py and can diverge from what actually launches.
 // See docs/DESIGN_DECISIONS.md §9, §33, §34.
-export default function HardwareSpecs({ device, backend }: Props) {
+export default function HardwareSpecs({ device, backend, gpuFlavor }: Props) {
   const [cpu, setCpu] = useState<WorkerStatus | null>(null);
   const [gpu, setGpu] = useState<WorkerStatus | null>(null);
 
@@ -30,14 +52,14 @@ export default function HardwareSpecs({ device, backend }: Props) {
     let cancelled = false;
     Promise.all([
       showCpu ? getWorkerStatus("cpu") : Promise.resolve(null),
-      showGpu ? getWorkerStatus("cuda") : Promise.resolve(null),
+      showGpu ? getWorkerStatus("cuda", gpuFlavor) : Promise.resolve(null),
     ]).then(([c, g]) => {
       if (cancelled) return;
       setCpu(c);
       setGpu(g);
     });
     return () => { cancelled = true; };
-  }, [showCpu, showGpu]);
+  }, [showCpu, showGpu, gpuFlavor]);
 
   function line(label: string, status: WorkerStatus | null) {
     if (status == null) return `${label}: …`;
@@ -45,6 +67,16 @@ export default function HardwareSpecs({ device, backend }: Props) {
     const platform = live ? status.actual_platform : status.configured_platform;
     const preset = live ? status.preset : status.configured_preset;
     const tag = live ? "live" : "configured";
+
+    // For GPU, decode the preset and add VRAM info.
+    if (label === "GPU" && platform) {
+      const vram = gpuMemoryMap[platform];
+      const specStr = formatPresetSpec(preset);
+      const vramStr = vram ? `${vram} GB VRAM` : null;
+      const details = [vramStr, specStr].filter(Boolean).join(" · ");
+      return `${label}: ${platform} — ${details} (${tag})`;
+    }
+    // For CPU, keep the simple format.
     return `${label}: ${platform ?? "?"} · ${preset ?? "?"} (${tag})`;
   }
 
