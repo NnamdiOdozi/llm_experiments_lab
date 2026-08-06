@@ -29,18 +29,19 @@ def load_tokenizer(data_config: dict) -> TokenizerProtocol:
         text = load_tiny_shakespeare()
         return CharTokenizer.from_text(text)
 
-    elif tokenizer_id == "bpe_1k":
-        # Load pre-built 1k BPE tokenizer
-        artifact_path = data_config.get("tokenizer_artifact")
-        if artifact_path is None:
-            artifact_path = settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-1k-v1.json"
-        return BPETokenizer(artifact_path)
-
-    elif tokenizer_id == "bpe_4k":
-        # Load pre-built 4k BPE tokenizer
-        artifact_path = data_config.get("tokenizer_artifact")
-        if artifact_path is None:
-            artifact_path = settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-4k-v1.json"
+    elif tokenizer_id in ("bpe_1k", "bpe_4k"):
+        # Load a pre-built BPE tokenizer. The config's tokenizer_artifact is a
+        # bare filename (e.g. "tiny-shakespeare-bpe-4k-v1.json") sent by the
+        # frontend, NOT a full path — resolve it under data/tokenizers/. Only
+        # an absolute path is used as-is. Falls back to the id's default file.
+        default_name = {
+            "bpe_1k": "tiny-shakespeare-bpe-1k-v1.json",
+            "bpe_4k": "tiny-shakespeare-bpe-4k-v1.json",
+        }[tokenizer_id]
+        artifact = data_config.get("tokenizer_artifact") or default_name
+        artifact_path = Path(artifact)
+        if not artifact_path.is_absolute():
+            artifact_path = settings.data_dir / "tokenizers" / artifact_path.name
         return BPETokenizer(artifact_path)
 
     else:

@@ -273,3 +273,16 @@ class TestLoader:
         })
         assert isinstance(tokenizer, BPETokenizer)
         assert tokenizer.vocab_size == 1024
+
+
+def test_load_tokenizer_resolves_bare_filename_artifact():
+    """Regression: the frontend sends tokenizer_artifact as a bare filename
+    (not a full path). The loader must resolve it under data/tokenizers/,
+    not treat it as a CWD-relative path (which broke BPE training)."""
+    from backend.training.tokenizers.loader import load_tokenizer
+
+    t = load_tokenizer(
+        {"tokenizer": "bpe_4k", "tokenizer_artifact": "tiny-shakespeare-bpe-4k-v1.json"}
+    )
+    assert t.vocab_size == 4096
+    assert t.decode(t.encode("To be")) == "To be"
