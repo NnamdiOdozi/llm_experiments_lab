@@ -17,6 +17,10 @@ from pathlib import Path
 
 from backend.training import artifacts
 from backend.training.status import RunStatus, ACTIVE_STATUSES, TERMINAL_STATUSES, PAUSED_STATUSES
+from backend.training.tokenizers.loader import load_tokenizer
+from backend.training.tokenizers.dataset import TokenizedTextDataset
+from backend.training.tokenizers.utils import assert_tokenizer_matches
+from backend.training.templates.transformer.data import load_tiny_shakespeare
 from backend.db import sync_update_training_run
 from backend.logging_config import training_log
 from config.settings import settings
@@ -311,9 +315,10 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
     result = None
 
     if template_key in ("transformer", "moe"):
-        from backend.training.templates.transformer.data import load_tiny_shakespeare, CharDataset
+        # Use tokenizer-based dataset
+        tokenizer = load_tokenizer(model_config.get("data", {"tokenizer": "char"}))
         text = load_tiny_shakespeare()
-        dataset = CharDataset(text, config["model"]["block_size"], 1)
+        dataset = TokenizedTextDataset(tokenizer, text, config["model"]["block_size"], 1)
         encoded = dataset.encode(prompt_text)
         idx = torch.tensor([encoded], dtype=torch.long, device=device)
         with torch.no_grad():

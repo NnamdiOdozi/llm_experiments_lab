@@ -7,8 +7,62 @@ from pydantic import BaseModel
 from backend import db
 from backend.logging_config import audit_log
 from config.presets import PRESETS
+from backend.training.tokenizers.loader import load_tokenizer
+from data.tokenizers.manifest import load_manifest
 
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
+
+
+def normalize_config(config: dict, template: str = None) -> dict:
+    """Ensure config has a valid 'data' block with derived vocab_size.
+
+    Args:
+        config: Experiment config dict.
+        template: Optional template key to infer dataset (e.g. 'rnn' → dinos).
+
+    Returns:
+        Config dict with a 'data' block guaranteed to exist and be valid.
+        Absent config["data"] becomes char/tiny_shakespeare for transformer/moe,
+        or char/dinos for rnn. vocab_size is derived from the tokenizer.
+    """
+    template = template or config.get("template", "transformer")
+
+    if "data" not in config:
+        if template == "rnn":
+            config["data"] = {
+                "dataset": "dinos",
+                "tokenizer": "char",
+                "tokenizer_artifact": None,
+                "vocab_size": 29,
+            }
+        else:  # transformer, moe, or unknown → default to tiny_shakespeare
+            config["data"] = {
+                "dataset": "tiny_shakespeare",
+                "tokenizer": "char",
+                "tokenizer_artifact": None,
+                "vocab_size": 65,
+            }
+    else:
+        # RNN doesn't use tokenizers; don't derive vocab_size
+        if template != "rnn":
+            # Recompute vocab_size from the tokenizer for transformer/moe
+            try:
+                tokenizer = load_tokenizer(config["data"])
+                config["data"]["vocab_size"] = tokenizer.vocab_size
+
+                # Also fetch tokenizer metadata from manifest for checkpoint storage
+                if config["data"]["tokenizer"] != "char":
+                    manifest = load_manifest()
+                    for tok_entry in manifest.get("tokenizers", []):
+                        if tok_entry.get("id") == config["data"]["tokenizer"]:
+                            config["data"]["tokenizer_version"] = tok_entry.get("version", "unknown")
+                            config["data"]["tokenizer_hash"] = tok_entry.get("sha256", "unknown")
+                            break
+            except Exception as e:
+                # If tokenizer loading fails, use what's in config (for old/invalid configs)
+                pass
+
+    return config
 
 
 class CreateExperimentRequest(BaseModel):
@@ -36,7 +90,8 @@ async def list_experiments():
 
 @router.post("")
 async def create_experiment(req: CreateExperimentRequest):
-    exp_id = await db.create_experiment(req.name, req.config, req.preset_key)
+    config = normalize_config(req.config, template=req.config.get("template"))
+    exp_id = await db.create_experiment(req.name, config, req.preset_key)
     audit_log.info("Experiment created: id=%d name='%s' preset=%s", exp_id, req.name, req.preset_key)
     return {"id": exp_id, "name": req.name}
 
@@ -46,6 +101,7 @@ async def create_from_preset(preset_key: str):
     if preset_key not in PRESETS:
         raise HTTPException(404, f"Preset '{preset_key}' not found")
     preset = PRESETS[preset_key]
+    preset = normalize_config(preset, template=preset.get("template"))
     exp_id = await db.create_experiment(preset["name"], preset, preset_key)
     audit_log.info("Experiment from preset: id=%d preset='%s' template=%s", exp_id, preset_key, preset["template"])
     return {"experiment_id": exp_id, "name": preset["name"], "config": preset}
@@ -62,6 +118,7 @@ async def get_experiment(experiment_id: int):
     if exp is None:
         raise HTTPException(404, "Experiment not found")
     exp["config"] = json.loads(exp["config_json"])
+    exp["config"] = normalize_config(exp["config"], template=exp["config"].get("template"))
     del exp["config_json"]
     return exp
 

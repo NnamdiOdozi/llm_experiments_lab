@@ -25,6 +25,8 @@ from backend.training.templates import TEMPLATE_REGISTRY
 from backend.training.templates.transformer.data import CharDataset, load_tiny_shakespeare
 from backend.training.templates.rnn.data import DinosDataset, load_dinos_dataset
 from backend.training.templates.rnn.model import one_hot_encode
+from backend.training.tokenizers.loader import load_tokenizer
+from backend.training.tokenizers.dataset import TokenizedTextDataset
 from backend.db import sync_update_training_run
 from config.settings import settings
 
@@ -216,6 +218,13 @@ class WorkerState:
             "config": self.config,
             **extra,
         }
+        # Add tokenizer metadata for checkpoint provenance (transformer/MoE only)
+        if self.template_key in ("transformer", "moe"):
+            data_cfg = self.config.get("data", {})
+            data["tokenizer_id"] = data_cfg.get("tokenizer", "char")
+            data["tokenizer_version"] = data_cfg.get("tokenizer_version", "unknown")
+            data["tokenizer_artifact_hash"] = data_cfg.get("tokenizer_hash", "unknown")
+            data["vocab_size"] = data_cfg.get("vocab_size", 65)
         torch.save(data, artifacts.checkpoint_path(self.run_id))
 
     def load_checkpoint(self) -> dict:
@@ -320,8 +329,13 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
 
     ws.set_status(RunStatus.STARTING)
 
+    # Load tokenizer and dataset using the new abstraction
+    tokenizer = load_tokenizer(config.get("data", {"tokenizer": "char"}))
     text = load_tiny_shakespeare()
-    ws.dataset = CharDataset(text, config["model"]["block_size"], train_cfg["batch_size"])
+    ws.dataset = TokenizedTextDataset(tokenizer, text, config["model"]["block_size"], train_cfg["batch_size"])
+
+    # Sync vocab_size from dataset to model config
+    config["model"]["vocab_size"] = ws.dataset.vocab_size
 
     template = TEMPLATE_REGISTRY[template_key]
     ws.model = template["build_model"](config).to(device)

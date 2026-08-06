@@ -34,6 +34,12 @@ BASELINE_CONFIG = {
         "temperature": 0.8,
     },
     "dataset": "tiny_shakespeare",
+    "data": {
+        "dataset": "tiny_shakespeare",
+        "tokenizer": "char",
+        "tokenizer_artifact": None,
+        "vocab_size": 65,
+    },
 }
 
 MOE_CONFIG = {
@@ -66,6 +72,12 @@ MOE_CONFIG = {
         "temperature": 0.8,
     },
     "dataset": "tiny_shakespeare",
+    "data": {
+        "dataset": "tiny_shakespeare",
+        "tokenizer": "char",
+        "tokenizer_artifact": None,
+        "vocab_size": 65,
+    },
 }
 
 LR_SENSITIVITY_CONFIG = {
@@ -95,6 +107,12 @@ LR_SENSITIVITY_CONFIG = {
         "temperature": 0.8,
     },
     "dataset": "tiny_shakespeare",
+    "data": {
+        "dataset": "tiny_shakespeare",
+        "tokenizer": "char",
+        "tokenizer_artifact": None,
+        "vocab_size": 65,
+    },
 }
 
 # --- RNN templates ---
@@ -123,6 +141,12 @@ RNN_BASELINE_CONFIG = {
         "temperature": 0.8,
     },
     "dataset": "dinos",
+    "data": {
+        "dataset": "dinos",
+        "tokenizer": "char",
+        "tokenizer_artifact": None,
+        "vocab_size": 29,
+    },
 }
 
 PRESETS = {

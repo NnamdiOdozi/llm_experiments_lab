@@ -31,18 +31,16 @@ def load_tokenizer(data_config: dict) -> TokenizerProtocol:
 
     elif tokenizer_id == "bpe_1k":
         # Load pre-built 1k BPE tokenizer
-        artifact_path = data_config.get(
-            "tokenizer_artifact",
-            settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-1k-v1.json",
-        )
+        artifact_path = data_config.get("tokenizer_artifact")
+        if artifact_path is None:
+            artifact_path = settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-1k-v1.json"
         return BPETokenizer(artifact_path)
 
     elif tokenizer_id == "bpe_4k":
         # Load pre-built 4k BPE tokenizer
-        artifact_path = data_config.get(
-            "tokenizer_artifact",
-            settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-4k-v1.json",
-        )
+        artifact_path = data_config.get("tokenizer_artifact")
+        if artifact_path is None:
+            artifact_path = settings.data_dir / "tokenizers" / "tiny-shakespeare-bpe-4k-v1.json"
         return BPETokenizer(artifact_path)
 
     else:
