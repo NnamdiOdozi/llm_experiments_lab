@@ -5,6 +5,7 @@ Assembles pre-written template code with user's config values baked in.
 
 import json
 import nbformat
+from pathlib import Path
 
 from backend.training.templates.transformer.model import (
     MultiHeadSelfAttention,
@@ -17,6 +18,54 @@ from backend.training.templates.rnn.model import CharRNN
 from config.settings import settings
 
 
+def _get_tokenizer_type(config: dict) -> str:
+    """Extract tokenizer type from config. Defaults to 'char'."""
+    data_config = config.get("data", {})
+    return data_config.get("tokenizer", "char")
+
+
+def _get_tokenizer_artifact_path(config: dict) -> str | None:
+    """Extract tokenizer artifact filename from config."""
+    data_config = config.get("data", {})
+    return data_config.get("tokenizer_artifact")
+
+
+def _build_char_tokenizer_code(settings_obj) -> str:
+    """Build char-based tokenizer setup code (original behavior)."""
+    return f'''url = "{settings_obj.shakespeare_url}"
+text = requests.get(url, timeout={settings_obj.http_timeout}).text
+chars = sorted(set(text))
+vocab_size = len(chars)
+stoi = {{ch: i for i, ch in enumerate(chars)}}
+itos = {{i: ch for ch, i in stoi.items()}}
+
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda ids: "".join(itos[int(i)] for i in ids)
+'''
+
+
+def _build_bpe_tokenizer_code(config: dict, artifact_path: str) -> str:
+    """Build BPE tokenizer setup code using huggingface tokenizers."""
+    data_config = config.get("data", {})
+    vocab_size = data_config.get("vocab_size", 1024)
+
+    return f'''# Load BPE tokenizer from artifact
+# NOTE: This export requires the tokenizer artifact file '{artifact_path}'
+# alongside this script. It is included in the .zip export bundle.
+from tokenizers import Tokenizer
+
+tok = Tokenizer.from_file("{artifact_path}")
+vocab_size = {vocab_size}
+
+encode = lambda s: tok.encode(s).ids
+decode = lambda ids: tok.decode(ids)
+
+# Reconstruct text for train/val split (using original text)
+url = "{settings.shakespeare_url}"
+text = requests.get(url, timeout={settings.http_timeout}).text
+'''
+
+
 def _transformer_script(config: dict) -> str:
     """Assemble standalone transformer training script with config baked in."""
     m = config["model"]
@@ -24,10 +73,13 @@ def _transformer_script(config: dict) -> str:
     pos = m.get("pos_encoding", "learned")
     use_rope = pos == "rope"
 
+    tokenizer_type = _get_tokenizer_type(config)
+    artifact_path = _get_tokenizer_artifact_path(config)
+
     script = f'''"""Tiny Transformer LM — exported from LLM Experiments Lab.
 
 Config: {config.get("name", "custom experiment")}
-Template: transformer | Pos encoding: {pos}
+Template: transformer | Pos encoding: {pos} | Tokenizer: {tokenizer_type}
 """
 
 import math
@@ -35,7 +87,13 @@ import requests
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+'''
 
+    # Add tokenizers import for BPE
+    if tokenizer_type != "char":
+        script += "\nfrom tokenizers import Tokenizer\n"
+
+    script += f'''
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed({settings.random_seed})
 
@@ -56,16 +114,15 @@ TRAIN_VAL_SPLIT = 0.9
 
 
 # ── Data ──
-url = "{settings.shakespeare_url}"
-text = requests.get(url, timeout={settings.http_timeout}).text
-chars = sorted(set(text))
-vocab_size = len(chars)
-stoi = {{ch: i for i, ch in enumerate(chars)}}
-itos = {{i: ch for ch, i in stoi.items()}}
+'''
 
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda ids: "".join(itos[int(i)] for i in ids)
+    # Branch on tokenizer type
+    if tokenizer_type == "char":
+        script += _build_char_tokenizer_code(settings)
+    else:
+        script += _build_bpe_tokenizer_code(config, artifact_path or "tokenizer.json")
 
+    script += f'''
 data = torch.tensor(encode(text), dtype=torch.long)
 n_train = int(TRAIN_VAL_SPLIT * len(data))
 train_data, val_data = data[:n_train], data[n_train:]

@@ -89,6 +89,7 @@ async def export_notebook(experiment_id: int):
 async def export_bundle(experiment_id: int, run_id: int | None = None):
     """Download full export bundle: script, notebook, config, notes, and
     (if run_id given) the run's metrics — see docs §6.2 export bundle spec.
+    For BPE tokenizers, includes the tokenizer artifact JSON file.
     """
     exp = await db.get_experiment(experiment_id)
     if exp is None:
@@ -101,6 +102,16 @@ async def export_bundle(experiment_id: int, run_id: int | None = None):
         zf.writestr("export.ipynb", build_notebook(config))
         zf.writestr("config.json", json.dumps(config, indent=2))
         zf.writestr("notes.md", exp.get("notes_md") or "")
+
+        # Include tokenizer artifact if BPE-based
+        tokenizer_type = config.get("data", {}).get("tokenizer", "char")
+        if tokenizer_type != "char":
+            artifact_filename = config.get("data", {}).get("tokenizer_artifact")
+            if artifact_filename:
+                artifact_path = settings.data_dir / "tokenizers" / artifact_filename
+                if artifact_path.exists():
+                    zf.writestr(artifact_filename, artifact_path.read_text())
+
         if run_id is not None:
             metrics_file = settings.data_dir / "runs" / str(run_id) / "metrics.jsonl"
             if metrics_file.exists():
