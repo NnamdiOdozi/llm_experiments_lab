@@ -18,6 +18,11 @@ RUN uv sync --no-dev
 
 COPY backend ./backend
 COPY config ./config
+# Tokenizer artifacts + manifest module. backend.api.experiments imports
+# data.tokenizers.manifest at load time, and BPE runs load the *.json artifacts
+# via Tokenizer.from_file — without this the worker fails to start (char AND
+# BPE). 2026-08-06.
+COPY data/tokenizers ./data/tokenizers
 
 ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0

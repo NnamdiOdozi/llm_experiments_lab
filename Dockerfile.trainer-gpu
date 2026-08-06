@@ -30,6 +30,9 @@ RUN uv sync --no-dev
 
 COPY backend ./backend
 COPY config ./config
+# Tokenizer artifacts + manifest module (see Dockerfile.trainer-cpu) — required
+# for the worker to start and for BPE runs to load their artifacts. 2026-08-06.
+COPY data/tokenizers ./data/tokenizers
 
 ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0

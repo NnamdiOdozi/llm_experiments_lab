@@ -9,6 +9,9 @@ RUN uv sync --no-dev
 
 COPY backend ./backend
 COPY config ./config
+# backend.api.experiments imports data.tokenizers.manifest at load time, and
+# BPE runs load the *.json artifacts — required for the app to start. 2026-08-06.
+COPY data/tokenizers ./data/tokenizers
 
 ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0
