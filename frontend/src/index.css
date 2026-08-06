@@ -19,27 +19,27 @@ body {
   background: var(--bg);
   color: var(--text);
   line-height: 1.5;
+  overflow-x: hidden;
 }
 
-/* Main dashboard: three columns that shrink UNIFORMLY (all three, in
-   proportion) as the viewport narrows — e.g. when a browser side-pane opens —
-   then stack into one scrollable column below the breakpoint. All three tracks
-   are proportional fr (minmax floor 0) so none stays fixed while the others
-   shrink; the fr numbers are the target pixel widths (left 456 : centre 640 :
-   right 684), preserving the original proportions. Replaces "456px 1fr 684px",
-   where only the 1fr centre absorbed all the shrink (user report 2026-08-06).
-   2026-08-05/06 user request. */
+/* Keep this wrapper fluid. Applying CSS zoom here counteracts native browser
+   zoom because window.innerWidth changes as the browser zoom level changes. */
+#app-scale {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Preserve the intended column proportions while allowing every pane to shrink
+   with the available viewport (including when a browser side pane opens). */
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 456fr) minmax(0, 640fr) minmax(0, 684fr);
+  grid-template-columns: minmax(0, 360fr) minmax(0, 732fr) minmax(0, 380fr);
   gap: 16px;
   align-items: start;
 }
 
-@media (max-width: 1200px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 760px) {
+  .dashboard-grid { grid-template-columns: 1fr; }
 }
 
 button {

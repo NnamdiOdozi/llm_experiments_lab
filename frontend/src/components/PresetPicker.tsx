@@ -11,7 +11,7 @@ export default function PresetPicker({ onSelect }: Props) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
-  const [gpuFlavor, setGpuFlavor] = useState("l40s");
+  const [gpuFlavor, setGpuFlavor] = useState("h100");
   // Same condition TrainingControls uses to show the flavor picker — GPU +
   // serverless is the only combination where L40S vs H100 is meaningful.
   const showGpuFlavor = device.startsWith("cuda") && backend === "nebius_endpoint";

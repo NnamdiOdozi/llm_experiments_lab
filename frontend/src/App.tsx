@@ -122,7 +122,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [device, setDevice] = useState("cpu");
   const [backend, setBackend] = useState("local");
-  const [gpuFlavor, setGpuFlavor] = useState("l40s");
+  const [gpuFlavor, setGpuFlavor] = useState("h100");
   const [showOpenRuns, setShowOpenRuns] = useState(false);
   const [showExperiments, setShowExperiments] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
@@ -376,7 +376,7 @@ export default function App() {
     resetInspectorState();
     setDevice("cpu");
     setBackend("local");
-    setGpuFlavor("l40s");
+    setGpuFlavor("h100");
     saveSession(expId, null, cfg);
   }
 
@@ -395,7 +395,7 @@ export default function App() {
     setBackend(run.execution_backend);
     // GPU flavor would come from the run's data if stored; for now, default to l40s
     // (backward compat: runs created before this feature won't have it set)
-    setGpuFlavor("l40s");
+    setGpuFlavor("h100");
     saveSession(run.experiment_id, run.id, exp.config);
     setShowOpenRuns(false);
   }

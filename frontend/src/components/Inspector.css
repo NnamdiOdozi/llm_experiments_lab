@@ -1,0 +1,21 @@
+.inspector-panel * {
+  font-size: 12px !important;
+}
+
+.inspector-panel > h3,
+.inspector-panel > div > h3 {
+  font-size: 11px !important;
+}
+
+.inspector-panel table,
+.inspector-panel table * {
+  font-size: 11px !important;
+}
+
+.inspector-panel input,
+.inspector-panel select,
+.inspector-panel button {
+  min-height: 26px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}

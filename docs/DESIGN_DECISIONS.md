@@ -4157,10 +4157,10 @@ function, use the marker and a fake subprocess.
 
 **Problem:** The inner-block detail diagram showed layer stacks linearly (LayerNorm → Attention → LayerNorm → MLP) but gave no visual hint that the transformer's pre-norm architecture includes residual (skip) connections — `x + Sublayer(LN(x))` for each sublayer. This is a fundamental architectural detail that users need to understand the model structure.
 
-**Solution:** Added a continuous residual-stream visualization as an SVG overlay above the detail box row:
+**Solution:** Added a two-span residual-stream visualization as an SVG overlay above the detail box row:
 
-- **One upper residual rail**, split into two directed segments: the original input bypasses LayerNorm + attention, then the updated result is tapped again to bypass LayerNorm + MLP/MoE.
-- **Branch points** render as high-contrast junction dots: one at the original input and one on the upper rail where the first addition feeds the second bypass.
+- **Two disjoint upper spans:** the original input bypasses LayerNorm + attention and terminates at the first addition. A separate tap immediately after that addition starts the LayerNorm + MLP/MoE bypass. The visible break prevents the two different residual values from reading as one unchanged rail.
+- **Branch points** render as high-contrast junction dots: the first sits at the midpoint of the incoming block arrow (roughly 16 rendered pixels from its start at the design viewport), and the second sits on the computation centerline just after the first addition.
 - **Rejoin points** use 28px-diameter "+" operators in the redesigned variants, large enough to remain legible at normal dashboard scale while retaining at least 18px clearance from adjacent nodes.
 - A compact **RESIDUAL STREAM** label and directional chevrons remove ambiguity about what the upper line represents and which way values flow.
 
@@ -4171,7 +4171,7 @@ function, use the marker and a fake subprocess.
 - CSS centralizes stream, junction, operator, and label styling; `.arch-block-detail__flow` reserves enough head-room for the labeled upper rail.
 - Graceful degradation: if either attention or mlp/moe is missing (non-transformer templates), no arcs render — the overlay SVG elements still exist in jsdom (so tests can query them), but the arcs draw degenerate paths (zero-width, jsdom has no layout)
 
-**Why the "+" only at rejoin and not at split:** A split point is where the signal diverges to take two paths; it's not itself an addition — it's a branch. The "+" notation specifically marks an *addition* (residual connection), which happens only at the rejoin where the two paths reconverge. The first addition's output then becomes the divergence source for the second sublayer, shown by its vertical connection to the junction on the upper rail.
+**Why the "+" only at rejoin and not at split:** A split point is where the signal diverges to take two paths; it's not itself an addition — it's a branch. The "+" notation specifically marks an *addition* (residual connection), which happens only at the rejoin where the two paths reconverge. The first addition's output then travels a short distance along the main flow before a new branch dot starts the second bypass.
 
 **Tests added:** ArchSchematic.test.tsx gained three tests verifying presence of arcs/pluses for transformer blocks, pointer-events isolation, and graceful skip for non-transformer templates (no arcs rendered).
 
@@ -4190,6 +4190,83 @@ function, use the marker and a fake subprocess.
 **Invariants:** Every variant shares the same DOM nodes, callbacks, block selector, measured connector geometry, and architecture manifest. CSS modifier classes own the presentation. The educational captions are absolutely positioned so they cannot shift node centers or misalign arrows. Unknown query values fall back to `minimal`.
 
 **Regression coverage:** Tests pin all three variant names, preserve the attention→LayerNorm connector's layout width, and verify that variant selection never changes the diagram's labels.
+
+## §84: Architecture Diagram Fits the Responsive Dashboard Without Scrolling (2026-08-06)
+
+**Problem:** The dashboard can become substantially narrower when the browser viewport changes or a side pane opens. Letting either architecture row keep its natural width caused the right side of the model pipeline and expanded Transformer Block to be clipped or require horizontal scrolling. Applying the local scale without correcting the residual overlay's coordinate system also collapsed the first addition and residual span toward the left edge, because each node's positioned stage became its nearest `offsetParent`.
+
+**Solution:** Both architecture levels keep a comfortable natural layout and are uniformly fitted into the width of the centre dashboard column:
+
+- `FitScale` measures the available width and scales the complete Input → Output pipeline as one composition. It deliberately targets **90%** of that width and centers the result, leaving a 5% safety inset on both sides for browser zoom and sub-pixel rounding.
+- The expanded Transformer Block uses the same centered 90% natural-width-then-fit approach, so its input arrow, four stages, output arrow, and both residual spans remain visible together without placing Feed Forward/Experts against the clipping edge.
+- The expanded-block heading and Block badge use the exact same measured scale, natural width, and horizontal inset as the inner flow. Their text, padding, and badge therefore remain proportional to the diagram at every dashboard width instead of staying full-size above a reduced canvas.
+- The clipping wrappers reserve the scaled height and hide only transformed overflow; the architecture panel itself no longer exposes a horizontal scrollbar.
+- Residual geometry is measured with DOM rectangles relative to the expanded-flow rectangle, then divided by the observed transform/zoom scale. This restores natural SVG coordinates even when both the dashboard and the local diagram are scaled.
+- `ResizeObserver` watches the receiving width so the fit is recomputed when the dashboard changes size.
+
+**Invariant:** Fitting is presentation-only. Architecture labels, node selection, block selection, click targets, manifest data, and the two disjoint residual-stream semantics remain unchanged.
+
+## §85: Compact Configuration and Stable Dashboard Viewport (2026-08-06)
+
+**Problem:** The left Configuration panel used 15px parameter labels and section headings, roomy controls, and large vertical gaps. On a laptop-height viewport this pushed the Training controls below the fold. Separately, Lab Assistant used `scrollIntoView()` on a bottom marker whenever messages loaded; that could scroll the entire dashboard downward and hide the Loss Curves even though the chat itself already had an internal scroll viewport.
+
+**Solution:**
+
+- Configuration now has component-scoped compact styling: 12px labels/section titles, 11px panel title, 25px-high 12px controls, smaller hints, tighter field rhythm, and reduced panel padding.
+- Code and Metrics typography remain unchanged; the density reduction is deliberately scoped to Configuration.
+- Lab Assistant message/input type moves from 13px to 12px, with Markdown code/table text reduced from 12px to 11px.
+- Chat autoscroll now updates the message container's `scrollTop` directly. It never calls `scrollIntoView()`, so loading chat history cannot move the dashboard page away from Loss Curves.
+
+**Viewport check:** At the 1512 × 900 design viewport, the complete Configuration panel, Loss Curves, Architecture, and most of Training are simultaneously visible without page autoscroll.
+
+## §86: Native Browser Zoom and Dense Inspector Typography (2026-08-06)
+
+**Problem:** The application set CSS `zoom` to `window.innerWidth / 1512` after every resize. Native browser zoom changes the CSS viewport width, so this calculation applied an inverse scale and made browser zoom appear ineffective. The Inspector and generated Prompt Model output also used type that was too large for their dense panels.
+
+**Solution:**
+
+- Removed the resize-driven CSS zoom entirely. `#app-scale` is now a fluid, unscaled wrapper, so browser zoom remains native and predictable.
+- The dashboard retains the intended 360:732:380 column proportions using shrinkable fractional tracks. At phone widths it stacks to one column; opening a side pane simply reduces the available track widths.
+- Inspector content is component-scoped to 12px, with 11px headings/tables and tighter 26px controls. Canvas/chart dimensions are unchanged.
+- Generated Prompt Model output is 14px instead of 19px. Code and Metrics typography remains unchanged.
+
+**Rendered verification:** At 1512 × 900, the root has no inline zoom, computed zoom is `1`, body width equals the viewport, and the selected Inspector panel remains fully visible without horizontal overflow.
+
+## §87: Loss Curve and Prompt Output Share One Laptop Viewport (2026-08-06)
+
+**Goal:** A paused run should show the complete Loss Curves chart and the bottom of the current Prompt Model output at the same time on a 1512 × 900 viewport, without scrolling the page.
+
+**Solution:**
+
+- The single-step and continue chevrons now share the status row with `Step n of n, … tokens`; they no longer consume a separate vertical row.
+- Prompt Model uses tighter panel, heading, input, label, and button spacing. Generated text remains 14px.
+- The generated-output box has a 110px visible viewport and scrolls internally for longer generations, keeping the physical bottom of the box on screen.
+- Metric charts use a compact 170px plotting area with tighter panel chrome.
+- Architecture pipeline/detail padding and inter-section margins were reduced without changing node sizes, residual geometry, information, or interaction.
+
+**Rendered verification:** On real paused run 249 at 1512 × 900, Loss Curves occupies y=84–320, Prompt Model begins at y=643, and the output box ends at y=898. The status and chevrons have matching vertical centres, the complete architecture remains visible, and body width equals viewport width.
+
+## §88: Tokenizer-Derived Vocabulary and Legible Heatmap Axes (2026-08-06)
+
+**Configuration:** `vocab_size` remains part of the stored model configuration and continues to reach the backend, but it is no longer rendered as a user-editable Configuration row. It is determined by the tokenizer/dataset rather than being a meaningful experiment control. Removing the row also pulls Training upward in the left pane.
+
+**Heatmap:**
+
+- Short heatmaps use a 16px label-density threshold instead of 40px, so every key position is labelled for the common 8–10 position diagnostic view. A space token still occupies a deliberately blank label position.
+- “Key (attended to) →” is now a bold white caption above the key letters, with additional top space separating both label tiers from the matrix.
+- Key labels are brighter and semibold; the query caption is also higher contrast.
+- A dedicated right gutter keeps the complete Attention legend, including High/Low, inside the canvas.
+- The backing canvas scales with `devicePixelRatio` while drawing in CSS-pixel coordinates, making axes and token labels sharp under browser zoom and on HiDPI displays. Pointer hit-testing uses the same shared logical layout.
+
+**Rendered verification:** A real 10-position diagnostic from paused run 249 showed every key position, the complete white key caption, and an unclipped Attention legend. At device pixel ratio 2, the 338 × 480 CSS canvas rendered to a 676 × 960 backing store with no Inspector horizontal overflow.
+
+## §89: HP ZBook 16:10 Left-Pane Fit (2026-08-06)
+
+**Target:** Keep the application title and the complete Training action row visible together on a 16-inch HP ZBook. The conservative validation viewport is 1536 × 960 CSS pixels, corresponding to a 1920 × 1200 16:10 panel at 125% display scaling.
+
+**Approach:** Avoid another application-wide transform, which would reduce unrelated charts and reintroduce browser-zoom problems. Configuration uses approximately 95% of its original vertical rhythm: 24px field rows, 11.5px labels/controls, moderately reduced section gaps, and slightly tighter panel padding. Training has component-scoped 12px padding, a tighter status line and progress bar, and 30px action buttons. The Start-state device/backend controls receive the same compact treatment.
+
+**Rendered verification:** The longest MoE Configuration with paused run 248 ends at y=746. Training begins at y=762; Resume and Stop occupy y=874–904 and remain fully visible in a 960px-high viewport. Only the upper edge of the following export row enters the viewport rather than the complete export controls. The title remains fully visible, and the dashboard has no horizontal overflow.
 
 ## File Layout
 

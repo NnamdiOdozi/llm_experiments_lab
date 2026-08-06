@@ -44,4 +44,8 @@ describe("computeLabelStride", () => {
     expect(computeLabelStride(0, 100)).toBe(1);
     expect(computeLabelStride(100, 0)).toBe(1);
   });
+
+  it("shows every key for a short 10-position heatmap", () => {
+    expect(computeLabelStride(10, 194, 16)).toBe(1);
+  });
 });

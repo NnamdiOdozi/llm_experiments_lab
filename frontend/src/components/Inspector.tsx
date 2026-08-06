@@ -4,6 +4,7 @@ import { fetchEmbeddingTable } from "../hooks/useApi";
 import { WindowStepper } from "./WindowStepper";
 import { CopyIconButton } from "./CopyIconButton";
 import AttentionHeatmapCanvas from "./AttentionHeatmapCanvas";
+import "./Inspector.css";
 
 interface Props {
   runId: number | null;
@@ -1054,7 +1055,7 @@ export default function Inspector({
 }: Props) {
   if (!selectedNode) {
     return (
-      <div className="panel">
+      <div className="panel inspector-panel">
         <h3>Inspector</h3>
         <p style={{ fontSize: 15, color: "var(--text-dim)" }}>Click a node in the architecture diagram to inspect it.</p>
       </div>
@@ -1062,7 +1063,7 @@ export default function Inspector({
   }
 
   return (
-    <div className="panel">
+    <div className="panel inspector-panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ margin: 0 }}>Inspector</h3>
         <span style={{ fontSize: 14, color: "var(--text-dim)" }}>

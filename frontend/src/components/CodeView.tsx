@@ -35,7 +35,10 @@ export default function CodeView({ experimentId, runId }: Props) {
           2026-07-16. See docs/DESIGN_DECISIONS.md. */}
       <div style={{ display: "flex", gap: 16 }}>
         <div style={{ flex: "1 1 0", minWidth: 0 }}>
-          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          {/* flexWrap so the file tabs wrap to a second row instead of
+              overflowing the (now narrower, responsive) column and spilling
+              over the Metrics panel to the right. User report 2026-08-06. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
             {fileNames.map((f) => (
               <button key={f} onClick={() => setActiveFile(f)} style={tabStyle(f === activeFile)}>
                 {f}

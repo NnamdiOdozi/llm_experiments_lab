@@ -22,8 +22,8 @@ export default function GpuFlavorSelect({ gpuFlavor, onFlavorChange, disabled = 
         disabled={disabled}
         style={{ fontSize: 15, padding: "4px 8px" }}
       >
-        <option value="l40s">L40S (default)</option>
-        <option value="h100">H100</option>
+        <option value="h100">H100 (default)</option>
+        <option value="l40s">L40S</option>
       </select>
     </div>
   );

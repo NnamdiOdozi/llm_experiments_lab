@@ -1,5 +1,6 @@
-import { useState, useEffect, CSSProperties } from "react";
+import { useState, useEffect } from "react";
 import { ExperimentConfig } from "../types";
+import "./ConfigPanel.css";
 
 interface Props {
   config: ExperimentConfig;
@@ -20,12 +21,6 @@ const DROPDOWN_FIELDS: Record<string, string[]> = {
   decoding_mode: ["sample", "greedy"],
 };
 
-// Determined by the dataset (character-level vocab), not a real training
-// choice — editing it doesn't do anything useful and just invites
-// confusion. Shown for information only. Direct user request, 2026-07-13.
-// See docs/DESIGN_DECISIONS.md.
-const READ_ONLY_FIELDS = new Set(["vocab_size"]);
-
 // Real bug, 2026-07-15: a plain controlled <input> feeding straight
 // Number(e.target.value) back into `value` snapped decimals back to an
 // integer mid-typing — Number("0.") is 0, so typing "0" then "." erased
@@ -37,13 +32,12 @@ const READ_ONLY_FIELDS = new Set(["vocab_size"]);
 // comparing Number(text) against value, so our own onChange round-trip
 // doesn't clobber what's still being typed). See docs/DESIGN_DECISIONS.md.
 function NumericField({
-  value, onChange, disabled, title, style,
+  value, onChange, disabled, title,
 }: {
   value: number | string;
   onChange: (v: number) => void;
   disabled: boolean;
   title?: string;
-  style: CSSProperties;
 }) {
   const [text, setText] = useState(String(value));
   useEffect(() => {
@@ -52,7 +46,7 @@ function NumericField({
   }, [value]);
   return (
     <input
-      style={style}
+      className="config-field__control"
       value={text}
       disabled={disabled}
       title={title}
@@ -75,8 +69,8 @@ function renderSection(
   baselineSection?: Record<string, number | string>
 ) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      <h4 style={{ fontSize: 15, color: "var(--accent)", marginBottom: 8 }}>
+    <div className="config-section">
+      <h4 className="config-section__title">
         {title}
       </h4>
       {/* Temperature has no effect under greedy decoding — argmax(logits/T)
@@ -85,12 +79,11 @@ function renderSection(
           instead of leaving it live-but-inert. See docs/DESIGN_DECISIONS.md. */}
       {(() => {
         const isGreedy = sectionKey === "inference" && section.decoding_mode === "greedy";
-        return Object.entries(section).map(([key, val]) => {
+        return Object.entries(section).filter(([key]) => key !== "vocab_size").map(([key, val]) => {
         const options = DROPDOWN_FIELDS[key];
         const baselineVal = baselineSection?.[key];
         const changedFromBaseline = baselineVal != null && String(baselineVal) !== String(val);
-        const isReadOnly = READ_ONLY_FIELDS.has(key);
-        const fieldDisabled = disabled || (key === "temperature" && isGreedy) || isReadOnly;
+        const fieldDisabled = disabled || (key === "temperature" && isGreedy);
         const handleChange = (newVal: string | number) => {
           onChange({
             ...config,
@@ -98,18 +91,14 @@ function renderSection(
           });
         };
         return (
-          <div key={key} style={{ marginBottom: 6 }}>
+          <div key={key} className="config-field">
           <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
+            className="config-field__row"
           >
-            <label style={{ fontSize: 15, color: "var(--text-dim)" }}>{key}</label>
+            <label className="config-field__label">{key}</label>
             {options ? (
               <select
-                style={{ width: 100, textAlign: "right", fontSize: 15, padding: "4px 8px" }}
+                className="config-field__control"
                 value={String(val)}
                 disabled={disabled}
                 onChange={(e) => handleChange(e.target.value)}
@@ -120,13 +109,10 @@ function renderSection(
               </select>
             ) : (
               <NumericField
-                style={{ width: 100, textAlign: "right" }}
                 value={val}
                 disabled={fieldDisabled}
                 title={
-                  isReadOnly
-                    ? "Determined by the dataset — not editable"
-                    : key === "temperature" && isGreedy
+                  key === "temperature" && isGreedy
                       ? "No effect under greedy decoding"
                       : undefined
                 }
@@ -135,18 +121,13 @@ function renderSection(
             )}
           </div>
           {changedFromBaseline && (
-            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
+            <div className="config-field__hint">
               baseline: {String(baselineVal)}
             </div>
           )}
           {key === "temperature" && isGreedy && (
-            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
+            <div className="config-field__hint">
               no effect under greedy
-            </div>
-          )}
-          {isReadOnly && (
-            <div style={{ textAlign: "right", fontSize: 13, color: "var(--text-dim)", opacity: 0.6 }}>
-              fixed by dataset
             </div>
           )}
           </div>
@@ -174,14 +155,14 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
   };
 
   return (
-    <div className="panel">
+    <div className="panel config-panel">
       <h3>Configuration</h3>
       <div className={`tag ${normalizedConfig.template === "rnn" ? "tag-paused" : "tag-running"}`}
-        style={{ marginBottom: 12 }}>
+        style={{ marginBottom: 8 }}>
         {normalizedConfig.template}
       </div>
       {error && (
-        <div style={{ background: "var(--red, #e53e3e)", color: "#fff", padding: "6px 12px", borderRadius: 4, fontSize: 15, marginBottom: 12 }}>
+        <div className="config-panel__error">
           {error}
         </div>
       )}

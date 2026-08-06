@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RunStatus, ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "../types";
 import { getWorkerStatus } from "../hooks/useApi";
 import GpuFlavorSelect from "./GpuFlavorSelect";
+import "./TrainingControls.css";
 
 interface Props {
   runId: number | null;
@@ -45,12 +46,12 @@ function formatPreset(preset: string | null): string {
 function progressBar(current: number, total: number) {
   const pct = total > 0 ? Math.min((current / total) * 100, 100) : 0;
   return (
-    <div style={{ background: "var(--bg)", borderRadius: 4, height: 8, marginTop: 8 }}>
+    <div className="training-panel__progress-track">
       <div
         style={{
           background: "var(--accent)",
           borderRadius: 4,
-          height: 8,
+          height: "100%",
           width: `${pct}%`,
           transition: "width 0.3s",
         }}
@@ -105,7 +106,7 @@ export default function TrainingControls({
   const isStale = staleSeconds != null && staleSeconds > 10 && isActive;
 
   return (
-    <div className="panel">
+    <div className="panel training-panel">
       <h3>Training</h3>
 
       {startError && (
@@ -128,17 +129,17 @@ export default function TrainingControls({
       )}
 
       {runStatus && (
-        <div style={{ marginBottom: 12 }}>
+        <div className="training-panel__run-status">
           {runId != null && (
-            <span style={{ fontSize: 14, color: "var(--text-dim)", marginRight: 8 }}>
+            <span className="training-panel__run-id">
               Run #{runId}
             </span>
           )}
           {statusTag(runStatus.status)}
-          <span className="tag" style={{ marginLeft: 6, fontSize: 13 }}>
+          <span className="tag training-panel__worker-tag">
             {workerTag}
           </span>
-          <span style={{ fontSize: 15, color: "var(--text-dim)", marginLeft: 10 }}>
+          <span className="training-panel__step">
             Step {runStatus.current_step} / {runStatus.total_steps}
             {runStatus.elapsed_seconds > 0 && ` — ${formatElapsed(runStatus.elapsed_seconds)}`}
           </span>
@@ -147,7 +148,7 @@ export default function TrainingControls({
       )}
 
       {isDone && (
-        <div style={{ marginBottom: 10, display: "flex", gap: 16 }}>
+        <div className="training-panel__selectors">
           <div>
             <label style={{ fontSize: 15, color: "var(--text-dim)", marginRight: 8 }}>Device</label>
             <select
@@ -176,7 +177,7 @@ export default function TrainingControls({
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="training-panel__actions">
         {isDone && (
           <button className="btn-primary" onClick={() => { if (!loading) onStart(); }} disabled={loading}>
             {loading ? "Starting…" : "Start Training"}

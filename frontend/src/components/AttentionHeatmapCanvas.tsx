@@ -35,6 +35,21 @@ export function computeLabelStride(
 // Fixed drawing height for the canvas (px). The container height auto-fits
 // header + canvas, so the canvas must NOT be sized from the container.
 const CANVAS_HEIGHT = 480;
+const LEFT_MARGIN = 60;
+const TOP_MARGIN = 72;
+const RIGHT_MARGIN = 84;
+const BOTTOM_MARGIN = 24;
+
+function heatmapLayout(width: number, height: number) {
+  return {
+    leftMargin: LEFT_MARGIN,
+    topMargin: TOP_MARGIN,
+    squareSize: Math.max(0, Math.min(
+      width - LEFT_MARGIN - RIGHT_MARGIN,
+      height - TOP_MARGIN - BOTTOM_MARGIN,
+    )),
+  };
+}
 
 interface AttentionHeatmapCanvasProps {
   attentionFull: AttentionFull | null;
@@ -68,13 +83,14 @@ export default function AttentionHeatmapCanvas({
     const observer = new ResizeObserver(() => {
       if (canvasRef.current && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        canvasRef.current.width = Math.max(100, rect.width);
+        const pixelRatio = window.devicePixelRatio || 1;
+        canvasRef.current.width = Math.max(100, Math.round(rect.width * pixelRatio));
         // Height is a fixed constant (matches the canvas CSS height) — NOT the
         // container's height. Deriving it from the container (which grows to
         // fit header + canvas) made the canvas taller than its box, so it
         // overflowed and covered the Q/K/V line below it (user report,
         // 2026-08-06).
-        canvasRef.current.height = CANVAS_HEIGHT;
+        canvasRef.current.height = Math.round(CANVAS_HEIGHT * pixelRatio);
         render();
       }
     });
@@ -113,18 +129,18 @@ export default function AttentionHeatmapCanvas({
       return;
     }
 
-    // Layout: left margin for row labels, top margin for column labels
-    const leftMargin = 60;
-    const topMargin = 60;
-    const squareSize = Math.min(
-      canvas.width - leftMargin - 20,
-      canvas.height - topMargin - 40,
-    );
+    // Draw in CSS-pixel coordinates while keeping a device-pixel backing
+    // store, so labels stay sharp under browser zoom and on HiDPI screens.
+    const pixelRatio = window.devicePixelRatio || 1;
+    const logicalWidth = canvas.width / pixelRatio;
+    const logicalHeight = canvas.height / pixelRatio;
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    const { leftMargin, topMargin, squareSize } = heatmapLayout(logicalWidth, logicalHeight);
     const cellSize = squareSize / sequenceLength;
 
     // Clear background
     ctx.fillStyle = "#1a1a1a";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
 
     // Draw heatmap cells
     for (let i = 0; i < sequenceLength; i++) {
@@ -163,8 +179,8 @@ export default function AttentionHeatmapCanvas({
     }
 
     // Draw row labels (query positions, left side)
-    ctx.fillStyle = "#999999";
-    ctx.font = "11px monospace";
+    ctx.fillStyle = "#cbd5e1";
+    ctx.font = "600 11px monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
     for (let i = 0; i < sequenceLength; i++) {
@@ -173,21 +189,26 @@ export default function AttentionHeatmapCanvas({
     }
 
     // Draw column labels (key positions, top)
-    ctx.fillStyle = "#999999";
+    ctx.fillStyle = "#f8fafc";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    const stride = computeLabelStride(sequenceLength, squareSize);
+    // Character/token labels only need a compact slot. The old 40px minimum
+    // skipped alternating keys even for a short 8–10 token sequence.
+    const stride = computeLabelStride(sequenceLength, squareSize, 16);
     for (let j = 0; j < sequenceLength; j += stride) {
       const x = leftMargin + j * cellSize + cellSize / 2;
-      ctx.fillText(labels[j] || "?", x, topMargin - 20);
+      ctx.fillText(labels[j] || "?", x, topMargin - 23);
     }
 
     // Draw axis labels
-    ctx.fillStyle = "#666666";
-    ctx.font = "11px monospace";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "600 12px monospace";
     ctx.textAlign = "center";
-    ctx.fillText("Key (attended to) →", leftMargin + squareSize / 2, topMargin - 5);
+    ctx.textBaseline = "top";
+    ctx.fillText("Key (attended to) →", leftMargin + squareSize / 2, 12);
 
+    ctx.fillStyle = "#cbd5e1";
+    ctx.font = "600 11px monospace";
     ctx.save();
     ctx.translate(15, topMargin + squareSize / 2);
     ctx.rotate(-Math.PI / 2);
@@ -195,10 +216,10 @@ export default function AttentionHeatmapCanvas({
     ctx.restore();
 
     // Draw legend
-    const legendX = leftMargin + squareSize + 20;
+    const legendX = leftMargin + squareSize + 14;
     const legendY = topMargin + 10;
     const legendHeight = 150;
-    const legendWidth = 20;
+    const legendWidth = 16;
 
     // Gradient from 0 to 1
     const gradientSegments = 100;
@@ -221,7 +242,7 @@ export default function AttentionHeatmapCanvas({
     ctx.strokeRect(legendX, legendY, legendWidth, legendHeight);
 
     // Legend labels
-    ctx.fillStyle = "#999999";
+    ctx.fillStyle = "#cbd5e1";
     ctx.font = "10px monospace";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -229,8 +250,10 @@ export default function AttentionHeatmapCanvas({
     ctx.fillText("Low", legendX + legendWidth + 5, legendY + legendHeight);
 
     // Legend title
-    ctx.font = "11px monospace";
-    ctx.fillText("Attention", legendX - 50, legendY - 10);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "600 11px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Attention", legendX + legendWidth / 2, legendY - 16);
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -244,15 +267,9 @@ export default function AttentionHeatmapCanvas({
     const labels = attentionFull.token_labels;
     const sequenceLength = labels.length;
 
-    const leftMargin = 60;
-    const topMargin = 60;
-    const squareSize = Math.min(
-      canvas.width - leftMargin - 20,
-      canvas.height - topMargin - 40,
-    );
-    const cellSize = squareSize / sequenceLength;
-
     const rect = canvas.getBoundingClientRect();
+    const { leftMargin, topMargin, squareSize } = heatmapLayout(rect.width, rect.height);
+    const cellSize = squareSize / sequenceLength;
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
 

@@ -13,6 +13,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { MetricRow } from "../types";
+import "./MetricChart.css";
 
 export interface MetricSeries {
   key: keyof MetricRow;
@@ -44,7 +45,7 @@ export default function MetricChart({
 
   if (metrics.length === 0) {
     return (
-      <div className="panel">
+      <div className="panel metric-chart-panel">
         <h3>{title}</h3>
         <div style={{ color: "var(--text-dim)", fontSize: 13, padding: 20, textAlign: "center" }}>
           {emptyText}
@@ -54,9 +55,9 @@ export default function MetricChart({
   }
 
   return (
-    <div className="panel">
+    <div className="panel metric-chart-panel">
       <h3>{title}</h3>
-      <ResponsiveContainer width="100%" height={280}>
+      <ResponsiveContainer width="100%" height={170}>
         <LineChart data={metrics} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
           <CartesianGrid stroke="#334155" strokeDasharray="3 3" />
           <XAxis

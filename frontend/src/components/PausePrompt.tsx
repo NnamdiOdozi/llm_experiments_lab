@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { startDiagnostic, stepDiagnostic, generateDiagnosticStream, finalizeDiagnosticSession } from "../hooks/useApi";
 import { DiagnosticSnapshot, DiagnosticSessionResponse } from "../types";
+import "./PausePrompt.css";
 
 interface Props {
   runId: number;
@@ -116,7 +117,7 @@ export default function PausePrompt({
 
   if (!canPrompt) {
     return (
-      <div className="panel" style={{ opacity: 0.5 }}>
+      <div className="panel prompt-model-panel" style={{ opacity: 0.5 }}>
         <h3>Prompt Model</h3>
         <p style={{ fontSize: 15, color: "var(--text-dim)" }}>
           Pause or finish training to prompt the model and see its output quality.
@@ -262,21 +263,22 @@ export default function PausePrompt({
   }
 
   return (
-    <div className="panel">
+    <div className="panel prompt-model-panel">
       <h3>Prompt Model</h3>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      <div className="prompt-model__input-row">
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="Enter a prompt..."
           disabled={diagnosticSession !== null}
-          style={{ fontSize: 17 }}
+          className="prompt-model__input"
         />
       </div>
 
-      <div style={{ marginBottom: 8, fontSize: 15 }}>
-        {diagnosticSnapshot && (
-          <span style={{ color: "var(--text-dim)" }}>
+      <div className="prompt-model__status-actions">
+        <div className="prompt-model__status" aria-live="polite">
+          {diagnosticSnapshot && (
+            <span>
             {/* generated_token.position + 1 is the REAL current sequence
                 length (prompt + everything generated so far). input_tokens
                 is only ever the original prompt — fixed, never grows — so
@@ -284,46 +286,43 @@ export default function PausePrompt({
                 after the first step. See docs/DESIGN_DECISIONS.md. */}
             Step {diagnosticStep} of {maxNewTokens}, {diagnosticSnapshot.generated_token.position + 1} tokens
             {atCap && " — done, enter a new prompt"}
-          </span>
-        )}
-      </div>
+            </span>
+          )}
+        </div>
 
-      {/* Block/Head/Q-K-V-detail selection lives in the Inspector pane
-          (contextual to whichever attention node is selected in the
-          diagram) — this panel just runs the step using whatever's
-          currently configured there. The status note that used to live
-          here ("No attention node selected...") was removed entirely,
-          direct user request 2026-07-14 — wrong place for it, didn't do
-          anything useful, and duplicated Inspector's own contextual
-          messaging. See docs/DESIGN_DECISIONS.md. */}
+        {/* Block/Head/Q-K-V-detail selection lives in the Inspector pane
+            (contextual to whichever attention node is selected in the
+            diagram) — this panel just runs the step using whatever's
+            currently configured there. */}
 
-      <div style={{ display: "flex", gap: 8 }}>
-        <button
-          className="btn-primary"
-          onClick={handleStepDiagnostic}
-          disabled={diagnosticLoading || atCap || (diagnosticSession == null && !prompt.trim())}
-          title={atCap ? "Already at max_new_tokens — enter a new prompt" : !prompt.trim() && !diagnosticSession ? "Enter a prompt first" : "Run one autoregressive forward pass"}
-        >
-          {diagnosticLoading ? "..." : ">"}
-        </button>
-        <button
-          className="btn-primary"
-          onClick={handleContinueGeneration}
-          disabled={diagnosticLoading || atCap || (diagnosticSession == null && !prompt.trim())}
-          title={atCap ? "Already at max_new_tokens — enter a new prompt" : !prompt.trim() && !diagnosticSession ? "Enter a prompt first" : "Continue generation to max_new_tokens"}
-        >
-          {diagnosticLoading ? "..." : ">>"}
-        </button>
-        {diagnosticSession && !atCap && (
-          <button onClick={handleFinishSession} disabled={diagnosticLoading} title="End this session and edit a new prompt">
-            Finish (new prompt)
+        <div className="prompt-model__actions">
+          <button
+            className="btn-primary"
+            onClick={handleStepDiagnostic}
+            disabled={diagnosticLoading || atCap || (diagnosticSession == null && !prompt.trim())}
+            title={atCap ? "Already at max_new_tokens — enter a new prompt" : !prompt.trim() && !diagnosticSession ? "Enter a prompt first" : "Run one autoregressive forward pass"}
+          >
+            {diagnosticLoading ? "..." : ">"}
           </button>
-        )}
+          <button
+            className="btn-primary"
+            onClick={handleContinueGeneration}
+            disabled={diagnosticLoading || atCap || (diagnosticSession == null && !prompt.trim())}
+            title={atCap ? "Already at max_new_tokens — enter a new prompt" : !prompt.trim() && !diagnosticSession ? "Enter a prompt first" : "Continue generation to max_new_tokens"}
+          >
+            {diagnosticLoading ? "..." : ">>"}
+          </button>
+          {diagnosticSession && !atCap && (
+            <button onClick={handleFinishSession} disabled={diagnosticLoading} title="End this session and edit a new prompt">
+              Finish (new prompt)
+            </button>
+          )}
+        </div>
       </div>
 
       {generatedTokens && (
-        <div style={{ marginTop: 8, fontSize: 19 }}>
-          <div style={{ color: "var(--text-dim)", marginBottom: 4 }}>Output:</div>
+        <div className="prompt-model__output">
+          <div className="prompt-model__output-label">Output:</div>
           {/* index.css's global `pre { font-size: 12px }` rule (shared with
               CodeView's Python source display) applies directly to this
               element and overrides inheritance from the wrapper div above
@@ -332,7 +331,7 @@ export default function PausePrompt({
               CodeView. Real bug, 2026-07-15: previous fix only touched the
               wrapper, so this text never actually changed size. See
               docs/DESIGN_DECISIONS.md. */}
-          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontSize: 19 }}>{generatedTokens}</pre>
+          <pre style={{ fontSize: 14 }}>{generatedTokens}</pre>
         </div>
       )}
     </div>

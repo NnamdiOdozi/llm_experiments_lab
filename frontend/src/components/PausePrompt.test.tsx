@@ -64,12 +64,13 @@ describe("PausePrompt", () => {
       yield { final_snapshot: snapshot(2, "l") };
     });
 
-    render(<PausePrompt {...baseProps} maxNewTokens={2} />);
+    const { container } = render(<PausePrompt {...baseProps} maxNewTokens={2} />);
 
     // Type a prompt, single-step once (1 of 2 max_new_tokens).
     fireEvent.change(screen.getByPlaceholderText("Enter a prompt..."), { target: { value: "hello" } });
     fireEvent.click(screen.getByRole("button", { name: ">" }));
     await waitFor(() => expect(screen.getByText(/Step 1 of 2/)).toBeInTheDocument());
+    expect(container.querySelector("pre")).toHaveStyle({ fontSize: "14px" });
 
     // Then >> to finish the remaining budget (1 more token -> reaches cap, session auto-closes).
     fireEvent.click(screen.getByRole("button", { name: ">>" }));

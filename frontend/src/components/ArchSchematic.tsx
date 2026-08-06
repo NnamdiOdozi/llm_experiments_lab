@@ -177,12 +177,72 @@ function Arrow({
   );
 }
 
+// Leave a deliberate inset around both architecture canvases. Fitting exactly
+// edge-to-edge is vulnerable to browser zoom/sub-pixel rounding and made the
+// rightmost Output / Feed Forward / Experts nodes look truncated in a narrow
+// dashboard column. Direct user request, 2026-08-06.
+const ARCHITECTURE_FIT_RATIO = 0.9;
+
+// Scales its (natural-width) children down uniformly to 90% of the available
+// width and centers them — used for the top pipeline so it never touches the
+// clipping edge. Measures in layout px, unaffected by the global app zoom.
+function FitScale({ children }: { children: React.ReactNode }) {
+  const outerRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [leftInset, setLeftInset] = useState(0);
+  const [height, setHeight] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const outer = outerRef.current;
+    const inner = innerRef.current;
+    if (!outer || !inner) return;
+    const measure = () => {
+      const natural = Math.max(inner.offsetWidth, inner.scrollWidth);
+      const avail = outer.clientWidth;
+      const usable = avail * ARCHITECTURE_FIT_RATIO;
+      const s = natural > 0 && usable > 0 ? Math.min(1, usable / natural) : 1;
+      setScale(s);
+      setLeftInset(Math.max(0, (avail - natural * s) / 2));
+      setHeight(inner.offsetHeight * s);
+    };
+    measure();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => measure());
+      observer.observe(outer);
+      observer.observe(inner);
+    }
+    window.addEventListener("resize", measure);
+    return () => {
+      if (observer) observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  });
+  return (
+    <div ref={outerRef} style={{ width: "100%", overflow: "hidden", height }}>
+      <div
+        ref={innerRef}
+        style={{
+          width: "max-content",
+          transformOrigin: "top left",
+          transform: `translateX(${leftInset}px) scale(${scale})`,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // Centralized drawing dimensions keep the residual diagram internally
 // consistent and make future density changes a one-place edit.
 const RESIDUAL_DIAGRAM = {
   streamY: 26,
   branchRadius: 5,
-  operatorRadius: 11,
+  operatorRadius: 14,
+  attentionAddOffset: -6,
+  outputAddOffset: -12,
+  secondTapOffset: 8,
   flowArrowOffset: 18,
   flowArrowHalfHeight: 4,
   // Size of the arrowhead drawn where a main-flow connector (see
@@ -196,9 +256,10 @@ const RESIDUAL_DIAGRAM = {
  * Residual stream overlay
  *
  * A pre-norm transformer has one evolving residual stream. The first input is
- * split into the attention sublayer and the bypass; the first addition then
- * becomes the source tapped by the MLP sublayer. Drawing one continuous upper
- * rail makes that sequence clearer than two unrelated brackets.
+ * split into the attention sublayer and its bypass. That first bypass ends at
+ * the attention addition; a distinct tap just after the addition starts the
+ * MLP bypass. The visible break between spans makes the updated-stream handoff
+ * explicit instead of implying one unchanged rail across both sublayers.
  */
 function ResidualStreamOverlay({
   geometry,
@@ -230,9 +291,13 @@ function ResidualStreamOverlay({
   }
   // Start at the outer edge of the entry connector: the residual stream is
   // present from the block's very first input, before LayerNorm is applied.
-  const inputBranchX = entryArrow.left;
-  const attentionAddX = (attention.right + ln2.left) / 2;
-  const outputAddX = exitArrow.centerX;
+  const inputBranchX = entryArrow.centerX;
+  const attentionAddX = (attention.right + ln2.left) / 2
+    + RESIDUAL_DIAGRAM.attentionAddOffset;
+  const secondBranchX = attentionAddX
+    + RESIDUAL_DIAGRAM.operatorRadius
+    + RESIDUAL_DIAGRAM.secondTapOffset;
+  const outputAddX = exitArrow.centerX + RESIDUAL_DIAGRAM.outputAddOffset;
 
   const streamPath = (startX: number, endX: number) =>
     `M ${startX} ${centerlineY} V ${RESIDUAL_DIAGRAM.streamY} H ${endX} V ${centerlineY}`;
@@ -308,7 +373,7 @@ function ResidualStreamOverlay({
       {/* The updated stream is tapped again for LayerNorm + feed-forward. */}
       <path
         className="arch-residual-overlay__stream"
-        d={streamPath(attentionAddX, outputAddX)}
+        d={streamPath(secondBranchX, outputAddX)}
         data-testid="residual-arc"
       />
 
@@ -322,8 +387,8 @@ function ResidualStreamOverlay({
         d={flowChevron(outputAddX)}
       />
 
-      {/* The first dot is the only pure divergence point. The top dot over the
-          first addition shows where its result becomes the next bypass. */}
+      {/* Two distinct divergence points: the original block input and the
+          updated residual stream just after the attention addition. */}
       <circle
         className="arch-residual-overlay__branch"
         cx={inputBranchX}
@@ -333,10 +398,11 @@ function ResidualStreamOverlay({
       />
       <circle
         className="arch-residual-overlay__branch"
-        cx={attentionAddX}
-        cy={RESIDUAL_DIAGRAM.streamY}
+        cx={secondBranchX}
+        cy={centerlineY}
         r={RESIDUAL_DIAGRAM.branchRadius}
         data-testid="residual-branch-dot"
+        data-residual-role="second-tap"
       />
 
       {/* Main-flow connectors, painted before (under) the operator rings so
@@ -370,6 +436,12 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
   const entryArrowRef = useRef<HTMLDivElement>(null);
   const exitArrowRef = useRef<HTMLDivElement>(null);
   const detailFlowContainerRef = useRef<HTMLDivElement>(null);
+  // Fit-to-width: the inset lays out at its natural width and is CSS-scaled down
+  // to fit its dashboard column (computed in the geometry effect below).
+  const [fitScale, setFitScale] = useState(1);
+  const [fitInset, setFitInset] = useState(0);
+  const [fitNaturalWidth, setFitNaturalWidth] = useState<number | null>(null);
+  const [fitHeight, setFitHeight] = useState<number | null>(null);
 
   // Serverless GPU workers cold-start on first use — a real, observed 7.5
   // minute wake-up (session log, 2026-07-13 21:32-21:40). A run always gets
@@ -453,54 +525,72 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
     }
 
     const measureGeometry = () => {
+      // Measure every box in the FLOW'S coordinate system. `offsetLeft` cannot
+      // be used directly here: each node's positioned `.arch-stage` becomes
+      // its nearest offset parent, which makes all four boxes appear to begin
+      // close to x=0 and collapses the first residual span. DOM rects include
+      // both the local fit transform and the dashboard's global CSS zoom, so
+      // divide by the observed scale to recover the natural SVG coordinates.
       const containerRect = container.getBoundingClientRect();
+      const scaleX = container.offsetWidth > 0 && containerRect.width > 0
+        ? containerRect.width / container.offsetWidth
+        : 1;
+      const scaleY = container.offsetHeight > 0 && containerRect.height > 0
+        ? containerRect.height / container.offsetHeight
+        : scaleX;
+      const relativeGeometry = (el: HTMLElement): BoxGeometry => {
+        const rect = el.getBoundingClientRect();
+        const left = (rect.left - containerRect.left) / scaleX;
+        const top = (rect.top - containerRect.top) / scaleY;
+        const width = rect.width / scaleX;
+        const height = rect.height / scaleY;
+        return {
+          left,
+          right: left + width,
+          centerX: left + width / 2,
+          top,
+          bottom: top + height,
+          height,
+        };
+      };
 
-      // Measure detail boxes.
       const geometry = new Map<number, BoxGeometry>();
       refs.forEach((el, idx) => {
-        const rect = el.getBoundingClientRect();
-        geometry.set(idx, {
-          left: rect.left - containerRect.left,
-          right: rect.right - containerRect.left,
-          centerX: rect.left - containerRect.left + rect.width / 2,
-          top: rect.top - containerRect.top,
-          bottom: rect.bottom - containerRect.top,
-          height: rect.height,
-        });
+        geometry.set(idx, relativeGeometry(el));
       });
       setResidualGeometry(geometry);
 
-      // Measure entry arrow position (left edge of flow container or arrow element).
       if (entryArrow) {
-        const entryRect = entryArrow.getBoundingClientRect();
-        setEntryArrowGeometry({
-          left: entryRect.left - containerRect.left,
-          right: entryRect.right - containerRect.left,
-          centerX: entryRect.left - containerRect.left + entryRect.width / 2,
-        });
+        setEntryArrowGeometry(relativeGeometry(entryArrow));
       } else {
-        setEntryArrowGeometry({
-          left: 0,
-          right: 0,
-          centerX: 0,
+        setEntryArrowGeometry({ left: 0, right: 0, centerX: 0 });
+      }
+
+      if (exitArrow) {
+        setExitArrowGeometry(relativeGeometry(exitArrow));
+      } else {
+        setExitArrowGeometry({
+          left: container.offsetWidth,
+          right: container.offsetWidth,
+          centerX: container.offsetWidth,
         });
       }
 
-      // Measure exit arrow position (right edge of flow container or arrow element).
-      if (exitArrow) {
-        const exitRect = exitArrow.getBoundingClientRect();
-        setExitArrowGeometry({
-          left: exitRect.left - containerRect.left,
-          right: exitRect.right - containerRect.left,
-          centerX: exitRect.left - containerRect.left + exitRect.width / 2,
-        });
-      } else {
-        setExitArrowGeometry({
-          left: containerRect.width,
-          right: containerRect.width,
-          centerX: containerRect.width,
-        });
-      }
+      // Fit-to-width: scale the natural-width flow down to its clipping parent
+      // (the dashboard column) so the whole inset is visible without scrolling
+      // and shrinks uniformly with the column. offsetWidth/scrollHeight are
+      // layout values (unaffected by the transform we set), so this is stable.
+      const fitParent = container.parentElement;
+      const naturalWidth = Math.max(container.offsetWidth, container.scrollWidth);
+      const avail = fitParent ? fitParent.clientWidth : naturalWidth;
+      const usable = avail * ARCHITECTURE_FIT_RATIO;
+      const scale = naturalWidth > 0 && usable > 0 ? Math.min(1, usable / naturalWidth) : 1;
+      setFitNaturalWidth(naturalWidth);
+      setFitScale(scale);
+      setFitInset(Math.max(0, (avail - naturalWidth * scale) / 2));
+      // Reserve only the SCALED height so nothing empty is left below (transform
+      // doesn't shrink the layout box on its own).
+      setFitHeight(container.offsetHeight * scale);
     };
 
     // Measure immediately and on resize.
@@ -512,6 +602,10 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
     let observer: ResizeObserver | null = null;
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(() => measureGeometry());
+      // Observe the clipping parent (the dashboard column), whose width changes
+      // when a side-pane opens — the flow's own natural width does not, so
+      // observing it wouldn't catch a column resize.
+      if (container.parentElement) observer.observe(container.parentElement);
       observer.observe(container);
     }
 
@@ -546,7 +640,10 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
     >
       <h3>Architecture</h3>
 
-      {/* Horizontal pipeline diagram */}
+      {/* Horizontal pipeline diagram — wrapped in FitScale so it scales down to
+          fit its column instead of clipping/scrolling (e.g. LM Head cut off at
+          the right). 2026-08-06 user report. */}
+      <FitScale>
       <div className="arch-pipeline">
         {/* Input/Output bookends — direct user request, 2026-07-15: no
             indication anywhere of where data enters/exits the model.
@@ -628,6 +725,7 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
           </div>
         )}
       </div>
+      </FitScale>
 
       {/* Second-level diagram for the selected block — per
           docs/Model_Diagram.md: "Inside a selected transformer block, show
@@ -647,14 +745,31 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
         // it doesn't hold (e.g. an RNN template's children), the overlay
         // renders nothing and the plain arrows below should stay untouched.
         const showResidualPath = blockGroup.children.length === 4;
+        const headingScale = fitNaturalWidth ? fitScale : 1;
         return (
           <div className="arch-block-detail">
-            <div className="arch-block-detail__heading">
-              <span className="arch-block-detail__branch" aria-hidden="true">↳</span>
-              <span>Inside selected transformer block</span>
-              <strong>Block {selectedBlockIdx + 1}</strong>
+            <div
+              className="arch-block-detail__heading-fit"
+              style={{ height: 34 * headingScale }}
+            >
+              <div
+                className="arch-block-detail__heading"
+                style={{
+                  width: fitNaturalWidth ?? "100%",
+                  transform: `translateX(${fitInset}px) scale(${headingScale})`,
+                }}
+              >
+                <span className="arch-block-detail__branch" aria-hidden="true">↳</span>
+                <span>Inside selected transformer block</span>
+                <strong>Block {selectedBlockIdx + 1}</strong>
+              </div>
             </div>
-            <div className="arch-block-detail__flow" ref={detailFlowContainerRef}>
+            <div className="arch-block-detail__fit" style={{ height: fitHeight ?? undefined }}>
+            <div
+              className="arch-block-detail__flow"
+              ref={detailFlowContainerRef}
+              style={{ transform: `translateX(${fitInset}px) scale(${fitScale})` }}
+            >
               {/* Residual-stream overlay. */}
               <ResidualStreamOverlay
                 geometry={residualGeometry}
@@ -709,6 +824,7 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
                   overlay is active: it draws the connector through the
                   second operator ring in this exact spot instead. */}
               <Arrow variant="exit" elementRef={exitArrowRef} muted={showResidualPath} />
+            </div>
             </div>
           </div>
         );

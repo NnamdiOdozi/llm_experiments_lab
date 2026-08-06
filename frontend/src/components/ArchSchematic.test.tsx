@@ -220,7 +220,7 @@ describe("ArchSchematic residual connection visualization", () => {
     // Addition points must remain readable at normal dashboard scale.
     const operatorCircles = container.querySelectorAll(".arch-residual-overlay__operator");
     expect(operatorCircles).toHaveLength(2);
-    operatorCircles.forEach((operator) => expect(operator).toHaveAttribute("r", "11"));
+    operatorCircles.forEach((operator) => expect(operator).toHaveAttribute("r", "14"));
 
     // The bypass is explicitly identified instead of relying on line shape alone.
     expect(container.querySelector(".arch-residual-overlay__label")).toHaveTextContent("RESIDUAL STREAM");
@@ -267,14 +267,21 @@ describe("ArchSchematic residual connection visualization", () => {
         if (label === "Causal S. Attention") return rect(300, 150);
         if (label === "Feed Forward") return rect(700, 150);
         const detailNodes = Array.from(document.querySelectorAll(".arch-flow-item--detail .arch-node"));
-        return rect(detailNodes.indexOf(this) === 0 ? 100 : 500, 150);
+        return rect(detailNodes.indexOf(this) === 0 ? 100 : 520, 150);
       }
       return rect(0, 0, 0, 0);
     });
 
     try {
       const { container } = render(<ArchSchematic runId={1} />);
-      await waitFor(() => expect(container.querySelector(".arch-residual-overlay__operator")).toHaveAttribute("cx", "475"));
+      await waitFor(() => expect(container.querySelector(".arch-residual-overlay__operator")).toHaveAttribute("cx", "479"));
+
+      const arcs = container.querySelectorAll('[data-testid="residual-arc"]');
+      expect(arcs[0]).toHaveAttribute("d", "M 50 83 V 26 H 479 V 83");
+      expect(arcs[1]).toHaveAttribute("d", "M 501 83 V 26 H 898 V 83");
+      expect(container.querySelectorAll('[data-testid="residual-branch-dot"]')[0]).toHaveAttribute("cx", "50");
+      expect(container.querySelector('[data-residual-role="second-tap"]')).toHaveAttribute("cx", "501");
+      expect(container.querySelectorAll(".arch-residual-overlay__operator")[1]).toHaveAttribute("cx", "898");
     } finally {
       geometrySpy.mockRestore();
     }

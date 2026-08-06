@@ -53,7 +53,7 @@ function MarkdownMessage({ content }: MarkdownMessageProps) {
               borderRadius: "4px",
               border: "1px solid var(--border)",
               margin: "4px 0",
-              fontSize: "12px",
+              fontSize: "11px",
             }}
           >
             {children}
@@ -67,7 +67,7 @@ function MarkdownMessage({ content }: MarkdownMessageProps) {
                   backgroundColor: "var(--bg)",
                   padding: "2px 4px",
                   borderRadius: "2px",
-                  fontSize: "12px",
+                  fontSize: "11px",
                 }}
                 {...props}
               >
@@ -82,7 +82,7 @@ function MarkdownMessage({ content }: MarkdownMessageProps) {
             <table
               style={{
                 borderCollapse: "collapse",
-                fontSize: "12px",
+                fontSize: "11px",
               }}
             >
               {children}
@@ -139,17 +139,17 @@ function MarkdownMessage({ content }: MarkdownMessageProps) {
           </blockquote>
         ),
         h1: ({ children }) => (
-          <h1 style={{ fontSize: "16px", margin: "4px 0", fontWeight: "bold" }}>
+          <h1 style={{ fontSize: "15px", margin: "4px 0", fontWeight: "bold" }}>
             {children}
           </h1>
         ),
         h2: ({ children }) => (
-          <h2 style={{ fontSize: "14px", margin: "4px 0", fontWeight: "bold" }}>
+          <h2 style={{ fontSize: "13px", margin: "4px 0", fontWeight: "bold" }}>
             {children}
           </h2>
         ),
         h3: ({ children }) => (
-          <h3 style={{ fontSize: "13px", margin: "4px 0", fontWeight: "bold" }}>
+          <h3 style={{ fontSize: "12px", margin: "4px 0", fontWeight: "bold" }}>
             {children}
           </h3>
         ),
@@ -166,7 +166,7 @@ export default function ChatPanel({ experimentId }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [feedbackOverrides, setFeedbackOverrides] = useState<Record<number, "up" | "down" | null>>({});
   const [confirmingClear, setConfirmingClear] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   // Two-click confirm (not a native confirm() dialog, to match the rest of
   // this app's UI) — resets a stuck/confused conversation without
@@ -182,8 +182,12 @@ export default function ChatPanel({ experimentId }: Props) {
   }
 
   useEffect(() => {
-    if (bottomRef.current?.scrollIntoView) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    const messagesElement = messagesRef.current;
+    if (messagesElement) {
+      // Keep chat autoscroll inside the message viewport. scrollIntoView on a
+      // bottom marker also scrolled the dashboard page, hiding Loss Curves on
+      // initial load. Direct user report, 2026-08-06.
+      messagesElement.scrollTop = messagesElement.scrollHeight;
     }
   }, [messages]);
 
@@ -221,7 +225,7 @@ export default function ChatPanel({ experimentId }: Props) {
   return (
     <div className="panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Lab Assistant</h3>
+        <h3 style={{ margin: 0, fontSize: 11 }}>Lab Assistant</h3>
         {messages.length > 0 && (
           <button
             onClick={handleClearChat}
@@ -242,6 +246,7 @@ export default function ChatPanel({ experimentId }: Props) {
         )}
       </div>
       <div
+        ref={messagesRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -263,7 +268,7 @@ export default function ChatPanel({ experimentId }: Props) {
               borderRadius: 8,
               padding: "6px 10px",
               maxWidth: "85%",
-              fontSize: 13,
+              fontSize: 12,
               whiteSpace: m.role === "user" ? "pre-wrap" : "normal",
             }}
           >
@@ -320,7 +325,6 @@ export default function ChatPanel({ experimentId }: Props) {
             )}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
       {error && <p style={{ fontSize: 12, color: "var(--red)" }}>{error}</p>}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -339,7 +343,7 @@ export default function ChatPanel({ experimentId }: Props) {
           style={{
             width: "100%",
             resize: "vertical",
-            fontSize: 13,
+            fontSize: 12,
             fontFamily: "inherit",
             background: "var(--bg)",
             color: "var(--text)",

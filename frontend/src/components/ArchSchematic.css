@@ -19,18 +19,31 @@
   min-width: 760px;
 }
 
-/* Keep the residual stream visibly separate from the computation row. Wider
-   min-width and gap than the compact top pipeline — this is the "zoomed in"
-   view, boxes get room to breathe. 2026-08-05, direct user report ("boxes
-   could be wider... look a bit squashed"). */
+/* The inset lays out at this comfortable NATURAL size (boxes breathe), then the
+   whole thing is CSS-scaled down by ArchSchematic to fit its dashboard column
+   with no horizontal scroll — so it shrinks uniformly with the column (e.g.
+   when a browser side-pane opens) while everything stays visible. The residual
+   overlay measures in layout (offset*) coordinates, which the transform scales
+   along with the boxes, keeping the arrows aligned. 2026-08-06 user report
+   ("should see the entire inset ... uniformly reduced but everything visible").
+   width:max-content so the flex row takes its natural width (not the clipped
+   parent's), giving the scaler a real natural width to divide by. */
 .arch-block-detail__flow {
   display: flex;
   align-items: center;
-  width: 100%;
+  width: max-content;
   min-width: 900px;
   --arch-flow-gap: 20px;
   position: relative;
   padding-top: 58px;
+  transform-origin: top left;
+}
+
+/* Clips the horizontal overflow of the natural-width inset while the scale
+   transform brings it down to the column width. */
+.arch-block-detail__fit {
+  width: 100%;
+  overflow: hidden;
 }
 
 .arch-residual-overlay {
@@ -115,8 +128,9 @@
 }
 
 .arch-pipeline {
-  overflow-x: auto;
-  padding: 10px 2px 16px;
+  /* No overflow-x scroll — FitScale wraps this and scales it to fit the column
+     so both ends stay visible without scrolling. 2026-08-06 user report. */
+  padding: 5px 2px 8px;
 }
 
 .arch-flow-item {
@@ -294,9 +308,9 @@
 
 .arch-block-detail {
   position: relative;
-  margin: 6px 0 18px;
-  padding: 18px 20px 20px;
-  overflow-x: auto;
+  margin: 4px 0 10px;
+  padding: 12px 20px;
+  overflow: hidden;
   border: 2px solid #4f46e5;
   border-radius: 10px;
   background: rgba(79, 70, 229, 0.06);
@@ -307,9 +321,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 16px;
   color: var(--text);
   font-size: 14px;
+  transform-origin: top left;
+}
+
+.arch-block-detail__heading-fit {
+  width: 100%;
+  margin-bottom: 8px;
+  overflow: hidden;
 }
 
 .arch-block-detail__heading strong {
@@ -430,12 +450,6 @@
 
 .arch-schematic--minimal .arch-block-detail__flow {
   padding-top: 62px;
-}
-
-.arch-schematic--minimal .arch-residual-overlay__operator,
-.arch-schematic--technical .arch-residual-overlay__operator,
-.arch-schematic--educational .arch-residual-overlay__operator {
-  r: 14px;
 }
 
 .arch-schematic--minimal .arch-residual-overlay__operator {
