@@ -4268,6 +4268,16 @@ function, use the marker and a fake subprocess.
 
 **Rendered verification:** The longest MoE Configuration with paused run 248 ends at y=746. Training begins at y=762; Resume and Stop occupy y=874–904 and remain fully visible in a 960px-high viewport. Only the upper edge of the following export row enters the viewport rather than the complete export controls. The title remains fully visible, and the dashboard has no horizontal overflow.
 
+## §90: Architecture Node Interaction Feedback (2026-08-06)
+
+**Goal:** Make it obvious that architecture nodes are interactive without causing the diagnostic Inspector to jump as the pointer crosses the diagram.
+
+**Behavior:** Clickable nodes and the numbered block selectors now use a pointer cursor. Hover or keyboard focus raises the target by 2px, brightens it slightly, strengthens its border, and adds a restrained shadow/ring. Other nodes—or inactive block numbers in the same selector—fade to 76% opacity, while the currently selected item remains fully visible. The top-level pipeline and expanded block do not dim each other. A selected node retains the strongest ring. Transitions run for 140ms and are disabled under `prefers-reduced-motion`.
+
+**Interaction invariant:** Hover/focus is presentation-only. Inspector selection and diagnostic context change only after click, Enter, or Space. Clickable diagram nodes now expose button semantics, keyboard focus, accessible labels, and `aria-pressed` selection state. The native numbered buttons also expose `aria-pressed` for the active layer.
+
+**Rendered verification:** In the real MoE architecture, Causal Self-Attention rendered with a -2px lift, 16% brightness increase, soft two-tier shadow, and sibling opacity of 0.76. Inspector remained closed while hovering and opened only after selection.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

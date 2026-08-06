@@ -202,11 +202,13 @@
   line-height: 1.25;
   text-align: center;
   white-space: pre-line;
-  transition: transform 0.15s, box-shadow 0.15s;
+  position: relative;
+  transition: opacity 140ms ease, filter 140ms ease, transform 140ms ease,
+    border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.arch-node:hover {
-  transform: translateY(-1px);
+.arch-node--interactive {
+  cursor: pointer;
 }
 
 .arch-node--expanded {
@@ -293,11 +295,8 @@
   cursor: pointer;
   font-size: 13px;
   font-weight: 700;
-  transition: transform 0.15s, background 0.15s;
-}
-
-.arch-block-selector__button:hover {
-  transform: translateY(-1px);
+  transition: opacity 140ms ease, filter 140ms ease, transform 140ms ease,
+    border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
 
 .arch-block-selector__button.is-active {
@@ -756,6 +755,80 @@
   border-color: #989fdb;
   background: #4b5487;
   color: #fff;
+}
+
+/* Node interaction hierarchy: normal < hovered/focused < selected. Keep this
+   after the visual variants so the feedback is consistent across all three
+   directions without changing their resting colours. Inspector selection is
+   still click/keyboard-driven; hover is visual preview only. */
+.arch-schematic .arch-node--interactive:hover:not(.arch-node--selected),
+.arch-schematic .arch-node--interactive:focus-visible:not(.arch-node--selected) {
+  z-index: 2;
+  border-color: #c7d7ee !important;
+  box-shadow: 0 0 0 2px rgba(199, 215, 238, 0.2),
+    0 8px 18px rgba(3, 10, 24, 0.34) !important;
+  filter: brightness(1.16) saturate(1.06);
+  outline: none;
+  transform: translateY(-2px);
+}
+
+.arch-schematic .arch-node--interactive.arch-node--selected:hover,
+.arch-schematic .arch-node--interactive.arch-node--selected:focus-visible {
+  z-index: 3;
+  border-color: #e2ebf8 !important;
+  box-shadow: 0 0 0 3px rgba(199, 215, 238, 0.24),
+    0 9px 20px rgba(3, 10, 24, 0.4) !important;
+  filter: brightness(1.12);
+  outline: none;
+  transform: translateY(-2px);
+}
+
+.arch-pipeline:has(.arch-node--interactive:is(:hover, :focus-visible))
+  .arch-node:not(:hover):not(:focus-visible):not(.arch-node--selected),
+.arch-block-detail__flow:has(.arch-node--interactive:is(:hover, :focus-visible))
+  .arch-node:not(:hover):not(:focus-visible):not(.arch-node--selected) {
+  opacity: 0.76;
+  filter: brightness(0.9) saturate(0.82);
+}
+
+.arch-block-selector__button:hover:not(.is-active),
+.arch-block-selector__button:focus-visible:not(.is-active) {
+  z-index: 2;
+  border-color: #c7d7ee !important;
+  box-shadow: 0 0 0 2px rgba(199, 215, 238, 0.2),
+    0 7px 15px rgba(3, 10, 24, 0.32) !important;
+  filter: brightness(1.16) saturate(1.06);
+  outline: none;
+  transform: translateY(-2px);
+}
+
+.arch-block-selector__button.is-active:hover,
+.arch-block-selector__button.is-active:focus-visible {
+  z-index: 3;
+  border-color: #e2ebf8 !important;
+  box-shadow: 0 0 0 3px rgba(199, 215, 238, 0.24),
+    0 8px 17px rgba(3, 10, 24, 0.38) !important;
+  filter: brightness(1.12);
+  outline: none;
+  transform: translateY(-2px);
+}
+
+.arch-block-selector:has(.arch-block-selector__button:is(:hover, :focus-visible))
+  .arch-block-selector__button:not(:hover):not(:focus-visible):not(.is-active) {
+  opacity: 0.76;
+  filter: brightness(0.9) saturate(0.82);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arch-node,
+  .arch-block-selector__button {
+    transition: none;
+  }
+
+  .arch-schematic .arch-node--interactive:is(:hover, :focus-visible),
+  .arch-block-selector__button:is(:hover, :focus-visible) {
+    transform: none;
+  }
 }
 
 @media (max-width: 1100px) {

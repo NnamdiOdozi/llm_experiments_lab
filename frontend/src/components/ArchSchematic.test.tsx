@@ -50,7 +50,14 @@ describe("ArchSchematic block selector", () => {
     );
     await waitFor(() => expect(screen.getByText(/Transformer\s+Block 1 of 4/)).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "3" }));
+    const firstBlock = screen.getByRole("button", { name: "1" });
+    const thirdBlock = screen.getByRole("button", { name: "3" });
+    expect(firstBlock).toHaveAttribute("aria-pressed", "true");
+    expect(thirdBlock).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(thirdBlock);
+
+    expect(firstBlock).toHaveAttribute("aria-pressed", "false");
+    expect(thirdBlock).toHaveAttribute("aria-pressed", "true");
 
     expect(onNodeClick).toHaveBeenCalledWith(
       "block.2.attention",
@@ -82,6 +89,24 @@ describe("ArchSchematic block selector", () => {
     expect(onNodeClick).toHaveBeenCalledWith(
       "block.0.attention",
       expect.objectContaining({ label: "Causal Self-Attention" }),
+    );
+  });
+
+  it("makes clickable nodes keyboard-operable without selecting on hover", async () => {
+    const onNodeClick = vi.fn();
+    render(<ArchSchematic runId={1} onNodeClick={onNodeClick} />);
+
+    const attention = await screen.findByRole("button", { name: "Causal Self-Attention" });
+    expect(attention).toHaveClass("arch-node--interactive");
+    expect(attention).toHaveAttribute("tabindex", "0");
+
+    fireEvent.mouseOver(attention);
+    expect(onNodeClick).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(attention, { key: "Enter" });
+    expect(onNodeClick).toHaveBeenCalledWith(
+      "block.0.attention",
+      expect.objectContaining({ kind: "attention" }),
     );
   });
 

@@ -126,13 +126,22 @@ function NodeBox({ label, fullLabel, kind, elementRef, isSelected, isExpanded, o
     <div
       ref={elementRef}
       data-kind={kind}
-      className={`arch-node${isSelected ? " arch-node--selected" : ""}${isExpanded ? " arch-node--expanded" : ""}`}
+      className={`arch-node${onClick ? " arch-node--interactive" : ""}${isSelected ? " arch-node--selected" : ""}${isExpanded ? " arch-node--expanded" : ""}`}
       onClick={onClick}
+      onKeyDown={onClick ? (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick();
+        }
+      } : undefined}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? (fullLabel || label).replace(/\n/g, " ") : undefined}
+      aria-pressed={onClick ? Boolean(isSelected) : undefined}
       title={fullLabel && fullLabel !== label ? fullLabel : undefined}
       style={{
         backgroundColor: colors.bg,
         border: `2px solid ${colors.border}`,
-        cursor: onClick ? "pointer" : "default",
         borderColor: isSelected ? "#ff6b6b" : colors.border,
         boxShadow: isSelected ? "0 0 8px rgba(255, 107, 107, 0.5)" : "none",
       }}
@@ -683,6 +692,7 @@ export default function ArchSchematic({ runId, config, onNodeClick, selectedNode
                       <button
                         key={idx}
                         className={`arch-block-selector__button${selectedBlockIdx === idx ? " is-active" : ""}`}
+                        aria-pressed={selectedBlockIdx === idx}
                         onClick={() => {
                           setSelectedBlockIdx(idx);
                           const m = selectedNodeId?.match(/^block\.\d+\.(.+)$/);
