@@ -21,14 +21,17 @@ body {
   line-height: 1.5;
 }
 
-/* Main dashboard: three columns on wide screens, fluid so they shrink to fit
-   a laptop or a browser with a side-pane open, then stack into one scrollable
-   column below the breakpoint. Replaces a fixed "456px 1fr 684px" grid that
-   overflowed. minmax() lets the side columns shrink from their comfortable max
-   to a readable min while the centre takes the slack. 2026-08-05 user request. */
+/* Main dashboard: three columns that shrink UNIFORMLY (all three, in
+   proportion) as the viewport narrows — e.g. when a browser side-pane opens —
+   then stack into one scrollable column below the breakpoint. All three tracks
+   are proportional fr (minmax floor 0) so none stays fixed while the others
+   shrink; the fr numbers are the target pixel widths (left 456 : centre 640 :
+   right 684), preserving the original proportions. Replaces "456px 1fr 684px",
+   where only the 1fr centre absorbed all the shrink (user report 2026-08-06).
+   2026-08-05/06 user request. */
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 456px) minmax(0, 1fr) minmax(360px, 684px);
+  grid-template-columns: minmax(0, 456fr) minmax(0, 640fr) minmax(0, 684fr);
   gap: 16px;
   align-items: start;
 }

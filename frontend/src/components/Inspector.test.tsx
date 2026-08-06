@@ -181,6 +181,16 @@ describe("Inspector heatmap with eager attention_maps", () => {
     expect(screen.getByText(/Layer 2, Head 2/)).toBeInTheDocument();
   });
 
+  it("Q/K/V tables are hidden unless 'Show Q/K/V detail' is on", () => {
+    // showQKVDetail=false (default): heatmap shows, vector tables do not.
+    const { unmount } = renderInspector(0, 0, SNAPSHOT_WITH_MAPS, false);
+    expect(screen.queryByText(/0\.41/)).not.toBeInTheDocument();
+    unmount();
+    // showQKVDetail=true: the Q/K/V tables (0.41 marker) appear.
+    renderInspector(0, 0, SNAPSHOT_WITH_MAPS, true);
+    expect(screen.getByText(/0\.41/)).toBeInTheDocument();
+  });
+
   it("heatmap shows 'Not captured' when attention_full is absent (e.g. old backend)", () => {
     const { container } = renderInspector(0, 0, SNAPSHOT_NO_MAPS);
     expect(container.querySelector("canvas")).toBeNull();

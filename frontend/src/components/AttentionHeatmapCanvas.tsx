@@ -32,6 +32,10 @@ export function computeLabelStride(
   return Math.pow(2, Math.ceil(Math.log2(stride)));
 }
 
+// Fixed drawing height for the canvas (px). The container height auto-fits
+// header + canvas, so the canvas must NOT be sized from the container.
+const CANVAS_HEIGHT = 480;
+
 interface AttentionHeatmapCanvasProps {
   attentionFull: AttentionFull | null;
   blockNum: number | null;
@@ -65,7 +69,12 @@ export default function AttentionHeatmapCanvas({
       if (canvasRef.current && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         canvasRef.current.width = Math.max(100, rect.width);
-        canvasRef.current.height = Math.max(100, rect.height);
+        // Height is a fixed constant (matches the canvas CSS height) — NOT the
+        // container's height. Deriving it from the container (which grows to
+        // fit header + canvas) made the canvas taller than its box, so it
+        // overflowed and covered the Q/K/V line below it (user report,
+        // 2026-08-06).
+        canvasRef.current.height = CANVAS_HEIGHT;
         render();
       }
     });
@@ -290,7 +299,7 @@ export default function AttentionHeatmapCanvas({
   }
 
   return (
-    <div ref={containerRef} style={{ position: "relative", width: "100%", height: 500 }}>
+    <div ref={containerRef} style={{ position: "relative", width: "100%" }}>
       <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         Layer {blockNum != null ? blockNum + 1 : "?"}, Head {head != null ? head + 1 : "?"}
         {attentionFull.total_positions && ` — ${attentionFull.total_positions} positions`}
@@ -303,7 +312,7 @@ export default function AttentionHeatmapCanvas({
         onMouseLeave={handleMouseLeave}
         style={{
           width: "100%",
-          height: "100%",
+          height: CANVAS_HEIGHT,
           display: "block",
           backgroundColor: "#1a1a1a",
           borderRadius: 4,

@@ -534,7 +534,7 @@ function NodeVectorTable({
 
 // Phase 2: Render attention heatmap (canvas) + Q/K/V detail browser for attention nodes
 function AttentionHeatmap({
-  snapshot, blockNum, head, onOpenDataTab, qkvWindowOffset, onQkvWindowOffsetChange,
+  snapshot, blockNum, head, onOpenDataTab, qkvWindowOffset, onQkvWindowOffsetChange, showQKVDetail,
 }: {
   snapshot: DiagnosticSnapshot;
   blockNum: number | null;
@@ -542,6 +542,7 @@ function AttentionHeatmap({
   onOpenDataTab: (title: string, content: number[]) => void;
   qkvWindowOffset: number;
   onQkvWindowOffsetChange: (offset: number) => void;
+  showQKVDetail: boolean;
 }) {
   // Canvas heatmap: render full T×T matrix (or T×block_size) from attention_full
   // Q/K/V detail: use windowed data from attention_maps or attention.qkv_detail
@@ -573,46 +574,55 @@ function AttentionHeatmap({
         head={head}
       />
 
-      {/* Q/K/V windowed detail — separate stepper control via qkvWindowOffset */}
-      {qkvTotalPositions > qkvWindowSize && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 14, color: "var(--text-dim)", marginBottom: 8 }}>
-            Q/K/V Detail (windowed view, 12 positions)
-          </div>
-          <WindowStepper
-            windowStart={qkvWindowStart}
-            windowSize={qkvWindowSize}
-            totalPositions={qkvTotalPositions}
-            offset={qkvWindowOffset}
-            onOffsetChange={onQkvWindowOffsetChange}
-          />
-        </div>
-      )}
+      {/* Q/K/V detail is opt-in via the "Show Q/K/V detail" checkbox — the
+          heatmap above always shows, the vector tables only when asked for.
+          Gate the whole block (stepper + tables) on showQKVDetail; this gate
+          was dropped in the canvas refactor, so vectors showed unconditionally
+          (direct user report, 2026-08-06). */}
+      {showQKVDetail && (
+        <>
+          {/* Q/K/V windowed detail — separate stepper control via qkvWindowOffset */}
+          {qkvTotalPositions > qkvWindowSize && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 14, color: "var(--text-dim)", marginBottom: 8 }}>
+                Q/K/V Detail (windowed view, 12 positions)
+              </div>
+              <WindowStepper
+                windowStart={qkvWindowStart}
+                windowSize={qkvWindowSize}
+                totalPositions={qkvTotalPositions}
+                offset={qkvWindowOffset}
+                onOffsetChange={onQkvWindowOffsetChange}
+              />
+            </div>
+          )}
 
-      {/* Q/K/V tables: prefer eager maps over single-pair fallback. When
-          attention_maps includes qkv, use that (all pairs captured); otherwise
-          fall back to snapshot.attention.qkv_detail (single pair, on-demand).
-          Runtime guard: qkv_detail's shape changed 2026-07-14 — old trainers
-          may return wrong format, check Array.isArray(positions). */}
-      {hasMaps && blockNum !== null && head !== null && snapshot.attention_maps?.qkv && (
-        <QKVTable
-          qkv={{
-            positions: snapshot.attention_maps.positions ?? [],
-            tokens: snapshot.attention_maps.token_labels ?? [],
-            q: snapshot.attention_maps.qkv[blockNum]?.[head]?.q ?? [],
-            k: snapshot.attention_maps.qkv[blockNum]?.[head]?.k ?? [],
-            v: snapshot.attention_maps.qkv[blockNum]?.[head]?.v ?? [],
-          }}
-          blockNum={blockNum}
-          head={head}
-          onOpenDataTab={onOpenDataTab}
-        />
-      )}
-      {/* Single-pair fallback also covers the maps-without-qkv case (a §76
-          backend predating eager Q/K/V): there App still peeks per pair, and
-          the response's qkv_detail is the only vector source. */}
-      {!snapshot.attention_maps?.qkv && snapshot.attention.qkv_detail && Array.isArray(snapshot.attention.qkv_detail.positions) && (
-        <QKVTable qkv={snapshot.attention.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
+          {/* Q/K/V tables: prefer eager maps over single-pair fallback. When
+              attention_maps includes qkv, use that (all pairs captured); otherwise
+              fall back to snapshot.attention.qkv_detail (single pair, on-demand).
+              Runtime guard: qkv_detail's shape changed 2026-07-14 — old trainers
+              may return wrong format, check Array.isArray(positions). */}
+          {hasMaps && blockNum !== null && head !== null && snapshot.attention_maps?.qkv && (
+            <QKVTable
+              qkv={{
+                positions: snapshot.attention_maps.positions ?? [],
+                tokens: snapshot.attention_maps.token_labels ?? [],
+                q: snapshot.attention_maps.qkv[blockNum]?.[head]?.q ?? [],
+                k: snapshot.attention_maps.qkv[blockNum]?.[head]?.k ?? [],
+                v: snapshot.attention_maps.qkv[blockNum]?.[head]?.v ?? [],
+              }}
+              blockNum={blockNum}
+              head={head}
+              onOpenDataTab={onOpenDataTab}
+            />
+          )}
+          {/* Single-pair fallback also covers the maps-without-qkv case (a §76
+              backend predating eager Q/K/V): there App still peeks per pair, and
+              the response's qkv_detail is the only vector source. */}
+          {!snapshot.attention_maps?.qkv && snapshot.attention.qkv_detail && Array.isArray(snapshot.attention.qkv_detail.positions) && (
+            <QKVTable qkv={snapshot.attention.qkv_detail} blockNum={blockNum} head={head} onOpenDataTab={onOpenDataTab} />
+          )}
+        </>
       )}
     </div>
   );
@@ -925,6 +935,7 @@ function Runtime({
           onOpenDataTab={onOpenDataTab}
           qkvWindowOffset={qkvWindowOffset}
           onQkvWindowOffsetChange={onQkvWindowOffsetChange}
+          showQKVDetail={showQKVDetail}
         />
       </div>
     );
