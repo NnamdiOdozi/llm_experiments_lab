@@ -714,7 +714,7 @@ export default function App() {
           <ConfigPanel
             config={config}
             onChange={handleConfigChange}
-            disabled={runStatus?.status === "running"}
+            disabled={runStatus != null && !TERMINAL_RUN_STATUSES.has(runStatus.status)}
             baseline={baselineConfig}
             error={configError}
           />
