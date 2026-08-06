@@ -240,9 +240,13 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
       </div>
       {renderSection("Model", normalizedConfig.model, "model", normalizedConfig, onChange, disabled, baseline?.model)}
       {renderSection("Training", normalizedConfig.training, "training", normalizedConfig, onChange, disabled, baseline?.training)}
-      {/* Inference section controls generation params (temperature, max_new_tokens)
-          used when prompting a paused model from the dashboard. */}
-      {renderSection("Inference", normalizedConfig.inference!, "inference", normalizedConfig, onChange, disabled)}
+      {/* Inference section controls generation params (temperature, max_new_tokens,
+          decoding_mode) used when prompting a paused model. These don't affect the
+          model's weights/shape, so they stay editable even during an active run —
+          the user may tweak them to prompt a paused model. Pass false for the
+          run-lock; the intrinsic greedy-temperature rule still applies internally.
+          Direct user request, 2026-08-06. */}
+      {renderSection("Inference", normalizedConfig.inference!, "inference", normalizedConfig, onChange, false)}
     </div>
   );
 }
