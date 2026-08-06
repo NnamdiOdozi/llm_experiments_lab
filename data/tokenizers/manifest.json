@@ -1,0 +1,27 @@
+{
+  "tokenizers": [
+    {
+      "id": "char",
+      "vocab_size": 65,
+      "version": "v1"
+    },
+    {
+      "id": "bpe_1k",
+      "variant": "1k",
+      "target_vocab_size": 1024,
+      "actual_vocab_size": 1024,
+      "sha256": "dff94500592473356f4ce9c9b5f9609fb995e75af9d74cd5ac681207015fea90",
+      "file_size": 62934,
+      "version": "v1"
+    },
+    {
+      "id": "bpe_4k",
+      "variant": "4k",
+      "target_vocab_size": 4096,
+      "actual_vocab_size": 4096,
+      "sha256": "a1dd77b62b952d051d52683571276c322e22e8815375cbff794e2735d1a8b482",
+      "file_size": 270832,
+      "version": "v1"
+    }
+  ]
+}
