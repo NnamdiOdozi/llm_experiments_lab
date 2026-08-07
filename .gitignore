@@ -20,6 +20,11 @@ yarn-error.log*
 # Training data & run artifacts
 data/runs/
 
+# Demo videos — hosted on GitHub's attachment CDN via README, not committed
+# (keeps repo/LFS-free size down; source files stay local in evidence/)
+evidence/*.mp4
+*.mp4
+
 *.db
 *.db-shm
 *.db-wal
