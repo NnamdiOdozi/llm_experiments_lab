@@ -28,7 +28,12 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 
 
+https://github.com/user-attachments/assets/20a234dd-d612-4531-94c4-11da92cc251b
+
+
+
 Uploading LLM Experiments Lab — 2026-08-07 10-35-44_Edited_v4_1080p_compressed.mp4…
+
 
 
 
