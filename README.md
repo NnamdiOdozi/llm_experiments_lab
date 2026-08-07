@@ -25,9 +25,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 *Main dashboard — config panel, live loss chart, and training controls.*
 
-<video src="evidence/LLM%20Experiments%20Lab%20%E2%80%94%20Mozilla%20Firefox%202026-08-07%2010-35-44_Edited_v2.mp4" width="500" controls></video>
-
-*Video of a training run — dashboard live loss graphs, prompting the model, and the Inspector's causal self-attention map / Q/K/V vectors.*
+**[▶ Watch: training run — dashboard live loss graphs, prompting the model, and the Inspector's causal self-attention map / Q/K/V vectors](evidence/LLM%20Experiments%20Lab%20%E2%80%94%20Mozilla%20Firefox%202026-08-07%2010-35-44_Edited_v2.mp4)**
 
 ## What It Does
 
