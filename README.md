@@ -1,9 +1,3 @@
-
-
-https://github.com/user-attachments/assets/35ef0475-64d4-4138-b9db-a2b985ced25c
-
-
-
 # LLM Experiments Lab
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
