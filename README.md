@@ -26,12 +26,13 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 *Main dashboard — config panel, live loss chart, and training controls.*
 
 
-https://github.com/user-attachments/assets/a07d8a45-a14d-465d-b182-bfd62e372647
+https://github.com/user-attachments/assets/45e1efd8-e7fd-43aa-8db2-c8964eaa3fe7
+
 
 
 ## What It Does
 
-You select from preset experiments (tiny transformers,MoE variant, RNNs), optionally adjust config (layers, heads, learning rate, etc.), hit "Start", and watch training happen with live loss charts. You can pause training mid-run, prompt the model with text to see current output quality, then resume or stop. When done, export your experiment as a standalone `.py` script or Jupyter notebook.
+You select from preset experiments (tiny transformers, MoE variant, RNNs), optionally adjust config (layers, heads, learning rate, etc.), hit "Start", and watch training happen with live loss charts. You can pause training mid-run, prompt the model with text to see current output quality, then resume or stop. When done, export your experiment as a standalone `.py` script or Jupyter notebook.
 
 **Available presets:**
 
