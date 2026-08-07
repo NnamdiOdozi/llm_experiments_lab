@@ -27,6 +27,12 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 **[▶ Watch: training run — dashboard live loss graphs, prompting the model, and the Inspector's causal self-attention map / Q/K/V vectors](evidence/LLM%20Experiments%20Lab%20%E2%80%94%20Mozilla%20Firefox%202026-08-07%2010-35-44_Edited_v2.mp4)**
 
+
+
+
+https://github.com/user-attachments/assets/a07d8a45-a14d-465d-b182-bfd62e372647
+
+
 ## What It Does
 
 You select from preset experiments (tiny transformers,MoE variant, RNNs), optionally adjust config (layers, heads, learning rate, etc.), hit "Start", and watch training happen with live loss charts. You can pause training mid-run, prompt the model with text to see current output quality, then resume or stop. When done, export your experiment as a standalone `.py` script or Jupyter notebook.
