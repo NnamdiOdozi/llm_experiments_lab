@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Browser-based lab for hands-on LLM architecture experiments. Pick a preset model config, tweak hyperparameters, train on CPU or GPU — locally or on a Nebius serverless endpoint — and watch loss curves update live. Built for the Nebius Serverless AI Builders Challenge.
+Browser-based lab for hands-on LLM architecture experiments. Pick a preset model config. Select from three tokenizers: character, BPE small, and BPE medium. Tweak hyperparameters, train on CPU or GPU — locally or on a Nebius serverless endpoint — and watch loss curves update live. Built for the Nebius Serverless AI Builders Challenge.
 
 ## Why This Exists
 
@@ -21,13 +21,13 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 
 *Landing page — pick a preset to start from.*
 
-<img src="evidence/nebius-endpoint/React_dashboard_v2.png" width="500" alt="Main dashboard — config, loss chart, training controls">
+<img src="evidence/Screenshot%202026-08-07%20103044.png" width="500" alt="Main dashboard — config, loss chart, training controls">
 
 *Main dashboard — config panel, live loss chart, and training controls.*
 
-<img src="evidence/nebius-endpoint/Attention_map_and%20qkv_vectors.png" width="500" alt="Inspector — causal self-attention map and Q/K/V vectors">
+<video src="evidence/LLM%20Experiments%20Lab%20%E2%80%94%20Mozilla%20Firefox%202026-08-07%2010-35-44_Edited_v2.mp4" width="500" controls></video>
 
-*Inspector panel — step-by-step causal self-attention map and Q/K/V vectors for a selected node.*
+*Video of a training run — dashboard live loss graphs, prompting the model, and the Inspector's causal self-attention map / Q/K/V vectors.*
 
 ## What It Does
 
@@ -144,7 +144,7 @@ GPU/CPU endpoints instead:
 ## How to Use
 
 1. **Pick a preset** from the landing page — this creates an experiment in the database.
-2. **Tweak config** in the left sidebar (model dimensions, training hyperparams).
+2. **Tweak config** in the left sidebar (tokenizer, model dimensions, training hyperparams).
 3. **Click Start** — training begins on the selected device (CPU or GPU). Loss chart updates live.
 4. **Pause** mid-training to prompt the model and see its current text generation quality.
 5. **Resume or Stop** when ready.
