@@ -1,3 +1,9 @@
+
+
+https://github.com/user-attachments/assets/35ef0475-64d4-4138-b9db-a2b985ced25c
+
+
+
 # LLM Experiments Lab
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -26,8 +32,7 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 *Main dashboard — config panel, live loss chart, and training controls.*
 
 
-https://github.com/user-attachments/assets/45e1efd8-e7fd-43aa-8db2-c8964eaa3fe7
-
+https://github.com/user-attachments/assets/829fcb1b-731e-4eca-8485-bd18bda68e97
 
 
 ## What It Does
