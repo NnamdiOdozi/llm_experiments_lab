@@ -34,7 +34,7 @@ export function computeLabelStride(
 
 // Fixed drawing height for the canvas (px). The container height auto-fits
 // header + canvas, so the canvas must NOT be sized from the container.
-const CANVAS_HEIGHT = 480;
+const CANVAS_HEIGHT = 340;
 const LEFT_MARGIN = 60;
 const TOP_MARGIN = 72;
 const RIGHT_MARGIN = 84;

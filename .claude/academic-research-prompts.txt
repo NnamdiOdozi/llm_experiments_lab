@@ -1,0 +1,107 @@
+
+1. **Gap analysis**
+
+> I’m working on [YOUR TOPIC].  
+> Build a gap-analysis matrix from the literature I provide.  
+> For each paper, extract:  
+> research question / claim,  
+> method,  
+> dataset or experimental setting,  
+> supervision/input assumptions,  
+> baselines,  
+> evaluation metrics,  
+> reported limitations,  
+> and what was not tested.  
+>   
+> Then identify candidate gaps in four categories:  
+> methodological, empirical, evaluation, and assumption-level.  
+>   
+> For every proposed gap, show which papers establish it and distinguish:  
+> (a) explicitly acknowledged gap,  
+> (b) gap inferred from the comparison,  
+> (c) idea not supported by the supplied literature.  
+>   
+> Do not claim novelty from absence alone.
+
+2. **Stress-test my thinking**
+
+> I’m investigating [YOUR RESEARCH QUESTION].  
+> My current understanding is [YOUR REASONING / INTUITION].  
+> Map the logic of this argument and challenge it.  
+>   
+> Identify:  
+> assumptions I may be treating as established,  
+> logical jumps,  
+> missing variables or mechanisms,  
+> alternative explanations,  
+> concepts I may be conflating,  
+> and relevant directions I may not have considered.  
+>   
+> For each issue, explain why it matters and what evidence would resolve it.  
+>   
+> Then suggest 2–3 technically plausible ways to extend or reframe the idea, but do not assume those suggestions are correct or novel.
+
+3. **Look for contradictions**
+
+> Audit my current research setup for internal inconsistencies.  
+> I will provide:  
+> research claim: [CLAIM]  
+> method/architecture: [METHOD]  
+> training setup: [SETUP]  
+> evaluation: [EVALUATION]  
+> results: [RESULTS]  
+>   
+> Build a contradiction and assumption table with:  
+> Claim | Assumption | Evidence supporting it | Evidence contradicting it | Missing evidence | Severity | What must be checked  
+>   
+> Specifically test for:  
+> train/test leakage,  
+> mismatched baselines,  
+> uncontrolled variables,  
+> metric–claim mismatch,  
+> architectural descriptions inconsistent with implementation,  
+> conclusions stronger than the experiment,  
+> conflicting labels/results,  
+> and assumptions being treated as facts.  
+>   
+> Do not repair the problem yet. Diagnose it first.
+
+4. **Rehearse research questions**
+
+> I’m presenting/defending [YOUR STUDY]. My central claim is [CLAIM], and I’ll provide the method, experiments and results.  
+>   
+> Generate the questions a technically informed reviewer, advisor or committee member is most likely to ask.  
+>   
+> Include questions about:  
+> why this research question matters,  
+> why I chose this method rather than plausible alternatives,  
+> what each major component contributes,  
+> how I know the observed effect comes from the mechanism I claim,  
+> unexpected or negative results,  
+> limitations and boundary conditions,  
+> interpretation of the results,  
+> and what the work does not establish.  
+>   
+> For each question, return:  
+> question + why they would ask it + evidence from my work needed to answer it + strongest answer supported by that evidence + follow-up question they could ask
+
+5. **Refine writing without losing your voice**
+
+> I’m writing about [YOUR TOPIC / RESULT].  
+> Before rewriting anything, identify:  
+> the exact claim this paragraph/section needs to establish,  
+> the evidence that supports it,  
+> any logical jump or overclaim,  
+> terminology that must remain technically precise,  
+> and anything that is repetitive, vague, or stronger than the results justify.  
+>   
+> Then revise the text while preserving:  
+> my original argument,  
+> technical meaning,  
+> citation boundaries,  
+> level of certainty,  
+> and my writing style.  
+>   
+> Do not add new claims, citations, interpretations, or “academic-sounding” language that is not supported.  
+>   
+> If a sentence cannot be improved without changing its meaning, flag it instead of rewriting it.

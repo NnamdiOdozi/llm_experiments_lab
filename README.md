@@ -2,7 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Browser-based lab for hands-on LLM architecture experiments. Pick a preset model config. Select from three tokenizers: character, BPE small, and BPE medium. Tweak hyperparameters, train on CPU or GPU — locally or on a Nebius serverless endpoint — and watch loss curves update live. Built for the Nebius Serverless AI Builders Challenge.
+This is a browser-based lab for hands-on LLM architecture experiments. Pick a preset model config. Select from three tokenizers: character, BPE small, and BPE medium. Tweak hyperparameters, train on CPU or GPU — locally or on a Nebius serverless endpoint — and watch loss curves update live. Built for the Nebius Serverless AI Builders Challenge where it won an award:
+
+- [Credly badge](https://www.credly.com/badges/9534c97b-96a9-45bf-a115-8d4a0aa7166d)
+- [LinkedIn announcement](https://www.linkedin.com/posts/stan-fedotov_this-summer-nebius-and-nebius-academy-ran-share-7495130381227118592-cREJ/?utm_source=share&utm_medium=member_desktop&rcm=ACoAAAHTsHwBOdu-WztF04WZ_KdS_Re3vTiZ4ms)
+
+<img src="evidence/credly-badge.png" width="150" alt="Nebius Academy Champion — Serverless AI badge">
 
 ## Why This Exists
 

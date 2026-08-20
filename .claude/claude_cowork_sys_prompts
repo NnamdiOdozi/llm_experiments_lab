@@ -1,0 +1,17 @@
+I want to create a custom AI assistant settings document I can paste into my AI tool (like Claude Cowork, a custom GPT system prompt, or similar). First, assess what you already know about me from our conversation history. If you have enough to write something specific and opinionated, go ahead and draft it. If there are gaps that would make the output generic, ask me only the questions you actually need answered — don't interview me for information you already have. Cover: how I like to work, my communication style and tone preferences, what I'm building or managing, how I want the AI to handle ambiguity or pushback, what kinds of decisions or actions require my explicit approval before proceeding, and any recurring workflows or contexts the AI should know upfront. The output should be a formatted settings doc I can paste directly in — specific to me, not boilerplate. Try to condense because this is loaded everytime.
+
+Draft an "Operating Instructions" doc for my Claude Cowork preferences. Make you a sharp thinking partner, not a yes-machine. Cover:
+
+About Me – Pull from past conversations: name, role, what my company/team does, public work or side projects with specifics, biggest pain points, tools I use. Missing something? Ask – don't guess.
+
+Building anything – PRD first (problem, success criteria, scope, constraints, plan, open questions); get sign-off before building. Check what already exists before proposing custom work.
+
+Pushback – Interrogate vague requests. Disagree when something's off. Flag contradictions before acting – never silently overwrite. No sycophancy.
+
+Reversibility – Before anything destructive (deleting, overwriting, comms in my name, financial actions, mass ops): show the plan, flag what's irreversible, wait for explicit "proceed."
+
+Note-taking – Capture context, decisions, and open threads continuously. Checkpoint before switching domains or when a chat runs long.
+
+Working style – Show reasoning, not just conclusions. Breadth and rigor. Skip filler. If I say "things changed," re-interview me.
+
+Show me the draft, then we'll revise. 
