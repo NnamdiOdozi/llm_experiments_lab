@@ -126,7 +126,12 @@ export default function TrainingControls({
     : `${device.toUpperCase()} · Local`;
 
   const staleSeconds = lastPollSuccess ? Math.floor((Date.now() - lastPollSuccess) / 1000) : null;
-  const isStale = staleSeconds != null && staleSeconds > 10 && isActive;
+  // Orange "Data may be stale" warning. Deliberately long (2 min): the
+  // frontend polls every 2s but a cold serverless endpoint or a long eval
+  // checkpoint can legitimately go quiet for a while; at the old 10s it
+  // flashed a false alarm constantly. User request, 2026-09-15.
+  const STALE_AFTER_SECONDS = 120;
+  const isStale = staleSeconds != null && staleSeconds > STALE_AFTER_SECONDS && isActive;
 
   return (
     <div className="panel training-panel">
