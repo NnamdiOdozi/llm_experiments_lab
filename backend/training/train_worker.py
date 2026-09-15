@@ -119,10 +119,20 @@ class WorkerState:
         self.dataset = None
         self.current_step = 0
         self.started_at = 0.0
+        # Elapsed seconds accumulated across pause/resume segments. A pause
+        # writes the running total to the checkpoint; on resume this offset is
+        # restored so elapsed_seconds keeps counting from the run's FIRST start,
+        # not the resume moment. Without it, resume showed "elapsed ~0s" again.
+        self.elapsed_before = 0.0
         self.metrics: list[dict] = []
         self.resume = resume
         self.checkpoint_extra: dict = {}  # extra fields to include in checkpoint (e.g. epoch)
         self._last_progress: float = 0.0  # wall-clock of last progress update
+
+    def elapsed(self) -> float:
+        """Cumulative training seconds: this segment (now - started_at) plus
+        everything accumulated before the current pause/resume cycle."""
+        return self.elapsed_before + (time.time() - self.started_at if self.started_at > 0 else 0)
 
     def _total_steps(self) -> int:
         t = self.config.get("training", {})
@@ -157,7 +167,7 @@ class WorkerState:
         self.write_run_meta(dataset_name)
 
     def set_status(self, status: str):
-        elapsed = time.time() - self.started_at if self.started_at > 0 else 0
+        elapsed = self.elapsed()
         artifacts.write_status(self.run_id, {
             "run_id": self.run_id,
             "status": status,
@@ -178,7 +188,7 @@ class WorkerState:
 
     def update_progress(self):
         """Update status.json with current step/metrics count without changing status."""
-        elapsed = time.time() - self.started_at if self.started_at > 0 else 0
+        elapsed = self.elapsed()
         status = artifacts.read_status(self.run_id)
         current_status = status["status"] if status else RunStatus.RUNNING
         artifacts.write_status(self.run_id, {
@@ -217,6 +227,9 @@ class WorkerState:
             "optimizer_state": self.optimizer.state_dict(),
             "step": step,
             "config": self.config,
+            # Cumulative training seconds so a resume keeps counting total
+            # elapsed time instead of restarting at 0.
+            "elapsed_accum": self.elapsed(),
             **extra,
         }
         # Add tokenizer metadata for checkpoint provenance (transformer/MoE/nanogpt only)
@@ -237,6 +250,9 @@ class WorkerState:
         self.model.load_state_dict(cp["model_state"])
         self.optimizer.load_state_dict(cp["optimizer_state"])
         self.current_step = cp["step"]
+        # Restore cumulative elapsed time from before the pause. Older
+        # checkpoints predate this field, so default to 0 (fresh-run behavior).
+        self.elapsed_before = cp.get("elapsed_accum", 0.0)
         # Reload previous metrics from disk
         mf = artifacts.metrics_path(self.run_id)
         if mf.exists():
@@ -458,7 +474,7 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
 
         if step > 0 and step % log_interval == 0:
             eval_results = eval_fn(ws.model, ws.dataset, device, num_eval_iters)
-            metric_row = build_metric_row(step, eval_results, current_lr, ws.started_at, ws.model)
+            metric_row = build_metric_row(step, eval_results, current_lr, ws.elapsed(), ws.model)
             ws.write_metric(metric_row)
             ws.save_checkpoint(step)
 
@@ -467,20 +483,22 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
     ws.set_status(RunStatus.COMPLETED)
 
 
-def _build_transformer_metric_row(step: int, eval_results: dict, lr: float, started_at: float, model) -> dict:
-    """Build metric row dict for transformer eval results."""
+def _build_transformer_metric_row(step: int, eval_results: dict, lr: float, elapsed: float, model) -> dict:
+    """Build metric row dict for transformer eval results. `elapsed` is the
+    CUMULATIVE training time (across pause/resume), computed by ws.elapsed()."""
     return {
         "step": step,
         "train_loss": round(eval_results["train"], 4),
         "val_loss": round(eval_results["val"], 4),
         "learning_rate": lr,
-        "elapsed_seconds": round(time.time() - started_at, 1),
+        "elapsed_seconds": round(elapsed, 1),
         "param_count": _param_count(model),
     }
 
 
-def _build_moe_metric_row(step: int, eval_results: dict, lr: float, started_at: float, model) -> dict:
-    """Build metric row dict for MoE eval results, including drop rates."""
+def _build_moe_metric_row(step: int, eval_results: dict, lr: float, elapsed: float, model) -> dict:
+    """Build metric row dict for MoE eval results, including drop rates.
+    `elapsed` is the cumulative training time (across pause/resume)."""
     return {
         "step": step,
         "train_loss": round(eval_results["train"]["loss"], 4),
@@ -488,7 +506,7 @@ def _build_moe_metric_row(step: int, eval_results: dict, lr: float, started_at: 
         "train_drop_rate": round(eval_results["train"]["drop_rate"] * 100, 1),
         "val_drop_rate": round(eval_results["val"]["drop_rate"] * 100, 1),
         "learning_rate": lr,
-        "elapsed_seconds": round(time.time() - started_at, 1),
+        "elapsed_seconds": round(elapsed, 1),
         "param_count": _param_count(model),
     }
 
@@ -627,7 +645,7 @@ def train_rnn(ws: WorkerState):
                     "train_loss": round(loss.item(), 4),
                     "val_loss": round(float(np.mean(val_losses)), 4),
                     "learning_rate": lr,
-                    "elapsed_seconds": round(time.time() - ws.started_at, 1),
+                    "elapsed_seconds": round(ws.elapsed(), 1),
                     "param_count": _param_count(ws.model),
                 })
                 ws.save_checkpoint(counter, **ws.checkpoint_extra)

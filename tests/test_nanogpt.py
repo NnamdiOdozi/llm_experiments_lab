@@ -7,6 +7,7 @@ under tmp_path). See docs/DESIGN_DECISIONS.md.
 """
 
 import math
+import time
 
 import torch
 
@@ -191,3 +192,37 @@ def test_nanogpt_preset_reaches_1244m_with_gpt2():
     m = build_model_from_config(p)
     n = sum(x.numel() for x in m.parameters())
     assert abs(n / 1e6 - 124.4) < 0.5, f"expected ~124.4M, got {n/1e6:.1f}M"
+
+
+# ── Cumulative training time across pause/resume ─────────────────────
+
+def test_elapsed_accumulates_across_pause_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    from backend.training.templates.transformer.model import build_model_from_config
+
+    cfg = {
+        "template": "transformer",
+        "model": {"vocab_size": 16, "block_size": 8, "n_embd": 8, "n_head": 2, "n_layer": 1, "dropout": 0.0},
+    }
+
+    # Segment 1: run ~5s, then pause (save checkpoint).
+    ws = train_worker.WorkerState(run_id=888888, config=cfg, device="cpu")
+    ws.model = build_model_from_config(cfg)
+    ws.optimizer = torch.optim.AdamW(ws.model.parameters(), lr=1e-3)
+    ws.started_at = time.time() - 5.0
+    ws.current_step = 10
+    ws.save_checkpoint(10)
+
+    # Segment 2: resume from that checkpoint in a NEW worker.
+    ws2 = train_worker.WorkerState(run_id=888888, config=cfg, device="cpu", resume=True)
+    ws2.model = build_model_from_config(cfg)
+    ws2.optimizer = torch.optim.AdamW(ws2.model.parameters(), lr=1e-3)
+    ws2.load_checkpoint()
+    ws2.started_at = time.time()  # fresh segment clock, like the training loop
+
+    assert ws2.current_step == 10
+    assert ws2.elapsed_before >= 5.0, f"elapsed_before not restored: {ws2.elapsed_before}"
+    # Cumulative total = pre-pause time + new segment — definitely above the
+    # 5s pre-pause value, and never reset toward 0.
+    assert ws2.elapsed() >= ws2.elapsed_before
+    assert ws2.elapsed() > 5.0
