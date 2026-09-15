@@ -393,7 +393,7 @@ export default function App() {
     resetInspectorState();
     setDevice(run.device);
     setBackend(run.execution_backend);
-    // GPU flavor would come from the run's data if stored; for now, default to l40s
+    // GPU flavor would come from the run's data if stored; for now, default to h100
     // (backward compat: runs created before this feature won't have it set)
     setGpuFlavor("h100");
     saveSession(run.experiment_id, run.id, exp.config);

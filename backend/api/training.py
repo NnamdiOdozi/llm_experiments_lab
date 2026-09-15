@@ -59,10 +59,11 @@ class StartRunRequest(BaseModel):
     # NOT settings.training_backend, which is only that dropdown's initial
     # suggestion. See docs/DESIGN_DECISIONS.md §11.
     backend: str = "local"
-    # GPU flavor for serverless runs: "l40s" (default) or "h100".
+    # GPU flavor for serverless runs: "h100" (default) or "l40s".
     # Only relevant when backend == "nebius_endpoint" and device starts with "cuda".
-    # Ignored for local runs. See docs/DESIGN_DECISIONS.md.
-    gpu_flavor: str = "l40s"
+    # Ignored for local runs. H100 is the default; L40S is an explicit option.
+    # See docs/DESIGN_DECISIONS.md.
+    gpu_flavor: str = "h100"
 
 
 class PromptRequest(BaseModel):
@@ -194,7 +195,7 @@ async def _touch_worker_for_run(db_run: dict) -> None:
     await db.touch_worker_session(session_id)
 
 
-async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str = "l40s") -> None:
+async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str = "h100") -> None:
     """Mirror the experiment onto the CPU/GPU endpoint and start training there.
 
     The endpoint is an ephemeral execution worker, not durable storage — the
@@ -202,7 +203,8 @@ async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str
     frontend only ever deals with the local run_id; remote_run_id is an
     internal detail used to address the endpoint's own copy of the run.
 
-    For GPU, gpu_flavor selects the hardware variant ("h100" or "l40s"/default).
+    For GPU, gpu_flavor selects the hardware variant ("h100" or "l40s").
+    h100 is the default; l40s is the explicit alternative.
 
     Runs as a backgrounded asyncio.Task (see start_training), not awaited
     directly inside the HTTP request — provisioning can take up to ~6

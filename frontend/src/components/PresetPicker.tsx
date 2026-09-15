@@ -27,7 +27,7 @@ export default function PresetPicker({ onSelect }: Props) {
       model: p.model,
       training: p.training,
     };
-    onSelect(experiment_id, config, device, backend, showGpuFlavor ? gpuFlavor : "l40s");
+    onSelect(experiment_id, config, device, backend, showGpuFlavor ? gpuFlavor : "h100");
   }
 
   return (
