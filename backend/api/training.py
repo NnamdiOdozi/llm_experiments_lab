@@ -878,6 +878,16 @@ async def _build_architecture_manifest(config: dict, local_run_id: int | None) -
         model = TEMPLATE_REGISTRY[template_key]["build_model"](config)
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        # nanoGPT matches Karpathy's get_num_params(non_embedding=True): the
+        # reported count EXCLUDES position embeddings (wpe) but keeps the token
+        # embedding (weight-tied to lm_head, so it's used). This is what makes
+        # the 6/6/384 config read 10.6M and the 12/12/768 config read ~124M,
+        # identical to nanoGPT's own printout. Without it our full count (incl.
+        # pos_emb) reads 11.0M vs nanoGPT's 10.6M. See docs/DESIGN_DECISIONS.md.
+        if template_key == "nanogpt" and hasattr(model, "pos_emb"):
+            wpe = model.pos_emb.weight.numel()
+            total -= wpe
+            trainable -= wpe
         return total, trainable
 
     total_params = 0

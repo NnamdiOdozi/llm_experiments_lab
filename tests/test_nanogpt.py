@@ -11,6 +11,8 @@ import time
 
 import torch
 
+from backend.api.training import _build_architecture_manifest
+
 from backend.training import train_worker
 from config.presets import PRESETS
 from config.settings import settings
@@ -226,3 +228,29 @@ def test_elapsed_accumulates_across_pause_resume(tmp_path, monkeypatch):
     # 5s pre-pause value, and never reset toward 0.
     assert ws2.elapsed() >= ws2.elapsed_before
     assert ws2.elapsed() > 5.0
+
+
+# ── Karpathy-matching param counts (exclude position embeddings) ─────
+
+def _manifest_param_count_m(model: dict) -> float:
+    import asyncio
+    cfg = {"template": "nanogpt", "model": model}
+    m = asyncio.run(_build_architecture_manifest(cfg, local_run_id=None))
+    return m["param_count"] / 1e6
+
+
+def test_param_count_matches_karpathy_66_384():
+    # Karpathy's shakespeare_char 6/6/384 reports 10.6M. His get_num_params()
+    # EXCLUDES position embeddings; ours must too, or we'd read 11.0M.
+    pc = _manifest_param_count_m({
+        "vocab_size": 65, "block_size": 1024, "n_embd": 384,
+        "n_head": 6, "n_layer": 6, "dropout": 0.0, "pos_encoding": "learned",
+        "activation": "gelu", "bias": False, "tie_weights": True,
+    })
+    assert abs(pc - 10.647) < 0.01, f"expected ~10.6M, got {pc:.3f}M"
+
+
+def test_param_count_matches_karpathy_124m():
+    # GPT-2 config 12/12/768 reads ~124M (nanoGPT printout 123.59M, full 124.4M).
+    pc = _manifest_param_count_m(PRESETS["nanogpt"]["model"])
+    assert 123.5 < pc < 124.5, f"expected ~124M, got {pc:.3f}M"
