@@ -41,6 +41,7 @@ class MultiHeadSelfAttention(nn.Module):
         block_size: int,
         dropout: float,
         pos_encoding: str = "learned",
+        bias: bool = True,
     ):
         super().__init__()
         assert n_embd % n_head == 0
@@ -50,7 +51,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.pos_encoding = pos_encoding
 
         self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        self.out_proj = nn.Linear(n_embd, n_embd)
+        self.out_proj = nn.Linear(n_embd, n_embd, bias=bias)
 
         mask = torch.tril(torch.ones(block_size, block_size))
         self.register_buffer("mask", mask)
@@ -89,13 +90,13 @@ ACTIVATIONS = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}
 class FeedForward(nn.Module):
     """Position-wise FFN: Linear -> activation -> Linear -> Dropout."""
 
-    def __init__(self, n_embd: int, dropout: float, activation: str = "gelu"):
+    def __init__(self, n_embd: int, dropout: float, activation: str = "gelu", bias: bool = True):
         super().__init__()
         act_cls = ACTIVATIONS.get(activation, nn.GELU)
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
+            nn.Linear(n_embd, 4 * n_embd, bias=bias),
             act_cls(),
-            nn.Linear(4 * n_embd, n_embd),
+            nn.Linear(4 * n_embd, n_embd, bias=bias),
             nn.Dropout(dropout),
         )
 
@@ -114,12 +115,13 @@ class Block(nn.Module):
         dropout: float,
         pos_encoding: str = "learned",
         activation: str = "gelu",
+        bias: bool = True,
     ):
         super().__init__()
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout, pos_encoding)
-        self.ln2 = nn.LayerNorm(n_embd)
-        self.ffn = FeedForward(n_embd, dropout, activation)
+        self.ln1 = nn.LayerNorm(n_embd, bias=bias)
+        self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout, pos_encoding, bias=bias)
+        self.ln2 = nn.LayerNorm(n_embd, bias=bias)
+        self.ffn = FeedForward(n_embd, dropout, activation, bias=bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -140,6 +142,7 @@ class TinyTransformerLM(nn.Module):
         dropout: float,
         pos_encoding: str = "learned",
         activation: str = "gelu",
+        bias: bool = True,
     ):
         super().__init__()
         self.block_size = block_size
@@ -151,10 +154,10 @@ class TinyTransformerLM(nn.Module):
             self.pos_emb = nn.Embedding(block_size, n_embd)
 
         self.blocks = nn.Sequential(
-            *[Block(n_embd, n_head, block_size, dropout, pos_encoding, activation) for _ in range(n_layer)]
+            *[Block(n_embd, n_head, block_size, dropout, pos_encoding, activation, bias) for _ in range(n_layer)]
         )
-        self.ln_f = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.ln_f = nn.LayerNorm(n_embd, bias=bias)
+        self.lm_head = nn.Linear(n_embd, vocab_size, bias=bias)
 
         self.apply(self._init_weights)
 
@@ -260,4 +263,5 @@ def build_model_from_config(config: dict) -> TinyTransformerLM:
         dropout=model_cfg["dropout"],
         pos_encoding=model_cfg.get("pos_encoding", "learned"),
         activation=model_cfg.get("activation", "gelu"),
+        bias=model_cfg.get("bias", True),
     )
