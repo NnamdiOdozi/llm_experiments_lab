@@ -5,7 +5,7 @@ from pathlib import Path
 from backend.training.templates.transformer.data import load_tiny_shakespeare
 from backend.training.tokenizers.base import TokenizerProtocol
 from backend.training.tokenizers.char import CharTokenizer
-from backend.training.tokenizers.bpe import BPETokenizer
+from backend.training.tokenizers.bpe import BPETokenizer, Gpt2Tokenizer
 from config.settings import settings
 
 
@@ -29,7 +29,7 @@ def load_tokenizer(data_config: dict) -> TokenizerProtocol:
         text = load_tiny_shakespeare()
         return CharTokenizer.from_text(text)
 
-    elif tokenizer_id in ("bpe_1k", "bpe_4k"):
+    elif tokenizer_id in ("bpe_1k", "bpe_4k", "gpt2"):
         # Load a pre-built BPE tokenizer. The config's tokenizer_artifact is a
         # bare filename (e.g. "tiny-shakespeare-bpe-4k-v1.json") sent by the
         # frontend, NOT a full path — resolve it under data/tokenizers/. Only
@@ -37,15 +37,18 @@ def load_tokenizer(data_config: dict) -> TokenizerProtocol:
         default_name = {
             "bpe_1k": "tiny-shakespeare-bpe-1k-v1.json",
             "bpe_4k": "tiny-shakespeare-bpe-4k-v1.json",
+            "gpt2": "gpt2.json",
         }[tokenizer_id]
         artifact = data_config.get("tokenizer_artifact") or default_name
         artifact_path = Path(artifact)
         if not artifact_path.is_absolute():
             artifact_path = settings.data_dir / "tokenizers" / artifact_path.name
+        if tokenizer_id == "gpt2":
+            return Gpt2Tokenizer(artifact_path)
         return BPETokenizer(artifact_path)
 
     else:
         raise ValueError(
             f"Unknown tokenizer ID: {tokenizer_id!r}. "
-            f"Supported: 'char', 'bpe_1k', 'bpe_4k'."
+            f"Supported: 'char', 'bpe_1k', 'bpe_4k', 'gpt2'."
         )

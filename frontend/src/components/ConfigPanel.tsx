@@ -7,6 +7,7 @@ const TOKENIZER_VOCAB_SIZES: Record<string, number> = {
   char: 65,
   bpe_1k: 1024,
   bpe_4k: 4096,
+  gpt2: 50304,
 };
 
 // Tokenizer artifact mappings
@@ -14,6 +15,7 @@ const TOKENIZER_ARTIFACTS: Record<string, string | null> = {
   char: null,
   bpe_1k: "tiny-shakespeare-bpe-1k-v1.json",
   bpe_4k: "tiny-shakespeare-bpe-4k-v1.json",
+  gpt2: "gpt2.json",
 };
 
 interface Props {
@@ -232,6 +234,7 @@ export default function ConfigPanel({ config, onChange, disabled = false, baseli
                 <option value="char">Character — 65 tokens</option>
                 <option value="bpe_1k">BPE Small — 1,024 tokens</option>
                 <option value="bpe_4k">BPE Medium — 4,096 tokens</option>
+                <option value="gpt2">GPT-2 BPE — 50,257 tokens</option>
               </select>
             </div>
           </div>

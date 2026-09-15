@@ -163,3 +163,31 @@ def test_train_nanogpt_does_exactly_max_iters_steps_with_grad_accum(monkeypatch,
     assert calls["n"] == 4, f"expected max_iters=4 optimizer steps, got {calls['n']}"
     assert ws.current_step == 4
     assert ws.model.lm_head.weight is ws.model.token_emb.weight
+
+
+# ── GPT-2 tokenizer (124.4M goal) ────────────────────────────────────
+
+def test_gpt2_tokenizer_reports_50304_and_roundtrips():
+    from backend.training.tokenizers.bpe import Gpt2Tokenizer
+    t = Gpt2Tokenizer("data/tokenizers/gpt2.json")
+    assert t.vocab_size == 50304                      # padded for 124.4M
+    ids = t.encode("To be or not to be")
+    assert max(ids) < 50257                           # real GPT-2 ids only
+    assert t.decode(ids) == "To be or not to be"
+
+
+def test_gpt2_tokenizer_padding_id_does_not_crash():
+    from backend.training.tokenizers.bpe import Gpt2Tokenizer
+    t = Gpt2Tokenizer("data/tokenizers/gpt2.json")
+    meta = t.id_to_token(50303)                       # a padding row
+    assert meta["raw"].startswith("<pad:")
+
+
+def test_nanogpt_preset_reaches_1244m_with_gpt2():
+    from backend.training.templates.nanogpt.model import build_model_from_config
+    p = PRESETS["nanogpt"]
+    assert p["model"]["vocab_size"] == 50304
+    assert p["data"]["tokenizer"] == "gpt2"
+    m = build_model_from_config(p)
+    n = sum(x.numel() for x in m.parameters())
+    assert abs(n / 1e6 - 124.4) < 0.5, f"expected ~124.4M, got {n/1e6:.1f}M"

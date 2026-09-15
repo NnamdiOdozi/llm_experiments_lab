@@ -117,13 +117,14 @@ LR_SENSITIVITY_CONFIG = {
 
 # --- nanoGPT template ---
 
-# Karpathy's nanoGPT default hyperparameters (GPT-2 style): 124M params,
+# Karpathy's nanoGPT default hyperparameters (GPT-2 style): 124.4M params,
 # block_size 1024, weight tying, bias=False, weight-decay optimizer with a
 # decay/no-decay split, and a warmup + cosine LR schedule. Every field is
-# editable from the dashboard ConfigPanel. vocab_size is synced at train
-# time from the chosen tokenizer (char=65 / bpe_1k=1024 / bpe_4k=4096) —
-# the sidepane tokenizer dropdown sets it. Defaults to char so the preset
-# runs out of the box on CPU; switch to BPE for the closer-to-nanoGPT setup.
+# editable from the dashboard ConfigPanel. Uses the REAL pretrained GPT-2 BPE
+# tokenizer (vocab 50304) — this is what makes it 124.4M, not 86M: the tied
+# embedding/lm_head is 50304 x 768 = 38.6M (char vocab 65 would be ~0.05M).
+# The GPT-2 tokenizer is NOT trainable on Tiny Shakespeare; it's a bundled
+# artifact (data/tokenizers/gpt2.json).
 #
 # Memory gotcha (confirmed OOM, 2026-09-15): batch_size must stay at 12.
 # Attention activation memory scales as batch x n_head x block_size^2; at
@@ -133,10 +134,10 @@ LR_SENSITIVITY_CONFIG = {
 # for the smaller batch (effective tokens/step = 12*5*1024).
 NANOGPT_CONFIG = {
     "name": "nanoGPT (GPT-2 mini)",
-    "description": "GPT-2 style nanoGPT defaults, ~86M params (vs 1.8M baseline). Notable: warmup+cosine LR scheduler, weight-decay optimizer, weight tying.",
+    "description": "GPT-2 style nanoGPT, ~124.4M params (vs 1.8M baseline). Real GPT-2 BPE tokenizer (50,257 tokens). Notable: warmup+cosine LR scheduler, weight-decay optimizer, weight tying.",
     "template": "nanogpt",
     "model": {
-        "vocab_size": 65,
+        "vocab_size": 50304,
         "block_size": 1024,
         "n_embd": 768,
         "n_head": 12,
@@ -168,9 +169,9 @@ NANOGPT_CONFIG = {
     "dataset": "tiny_shakespeare",
     "data": {
         "dataset": "tiny_shakespeare",
-        "tokenizer": "char",
-        "tokenizer_artifact": None,
-        "vocab_size": 65,
+        "tokenizer": "gpt2",
+        "tokenizer_artifact": "gpt2.json",
+        "vocab_size": 50304,
     },
 }
 

@@ -70,3 +70,42 @@ class BPETokenizer:
             "display": display,
             "decoded": decoded,
         }
+
+
+# Karpathy's nanoGPT rounds the real GPT-2 BPE vocab (50257) up to the next
+# multiple of 64 = 50304, purely for GPU memory alignment. The model's
+# embedding/lm_head are sized 50304; the 47 extra rows (50257..50303) are
+# never trained. Reporting 50304 here is what makes the nanoGPT preset reach
+# the full 124.4M-param count. See config/presets.py.
+GPT2_VOCAB = 50304
+GPT2_REAL_VOCAB = 50257
+
+
+class Gpt2Tokenizer(BPETokenizer):
+    """The pretrained GPT-2 BPE tokenizer (openai-community/gpt2 artifact).
+
+    Reuses BPETokenizer for encode/decode/id_to_token, but reports a padded
+    vocab_size of 50304 (GPT-2 rounded up to a multiple of 64) so the model
+    embedding matches nanoGPT's 124.4M-param configuration. Encode never
+    emits an id >= 50257 (the real GPT-2 vocab), so the padding rows are
+    simply never selected.
+    """
+
+    def __init__(self, tokenizer_path: str | Path):
+        super().__init__(tokenizer_path)
+        self._real_vocab = super().vocab_size  # 50257 from the artifact
+
+    @property
+    def vocab_size(self) -> int:
+        return GPT2_VOCAB
+
+    def id_to_token(self, token_id: int) -> dict:
+        if token_id >= self._real_vocab:
+            # Padding row — no real token exists. Return a placeholder instead
+            # of crashing on an out-of-range lookup.
+            return {
+                "raw": f"<pad:{token_id}>",
+                "display": f"<pad:{token_id}>",
+                "decoded": "",
+            }
+        return super().id_to_token(token_id)
