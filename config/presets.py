@@ -126,7 +126,7 @@ LR_SENSITIVITY_CONFIG = {
 # runs out of the box on CPU; switch to BPE for the closer-to-nanoGPT setup.
 NANOGPT_CONFIG = {
     "name": "nanoGPT (GPT-2 mini)",
-    "description": "Karpathy's nanoGPT defaults: 12-layer GPT-2 style LM (block_size 1024, n_embd 768) with weight tying, bias-free layers, weight-decay AdamW, warmup+cosine LR. ~124M params at nanoGPT's full BPE vocab; ~86M with the default char tokenizer.",
+    "description": "GPT-2 style nanoGPT defaults, ~86M params (vs 1.8M baseline). Notable: warmup+cosine LR scheduler, weight-decay optimizer, weight tying.",
     "template": "nanogpt",
     "model": {
         "vocab_size": 65,
