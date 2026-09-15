@@ -7,6 +7,7 @@ import argparse
 import datetime
 import importlib.metadata
 import json
+import math
 import os
 import subprocess as sp
 import sys
@@ -314,6 +315,63 @@ def _moe_eval(model, dataset, device: str, num_iters: int) -> dict[str, dict[str
     return out
 
 
+def _configure_optimizer(model: nn.Module, train_cfg: dict) -> torch.optim.Optimizer:
+    """Build the optimizer for a model from training config.
+
+    When weight_decay is unset or 0, falls back to the plain
+    AdamW(lr) used by every existing template — identical behavior.
+    When weight_decay > 0, groups parameters into decay (>=2D weights)
+    vs no-decay (1D params / embeddings / biases) groups and applies
+    betas if provided, matching nanoGPT's configure_optimizers.
+    """
+    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
+    lr = train_cfg["learning_rate"]
+    weight_decay = train_cfg.get("weight_decay", 0.0)
+    if weight_decay <= 0.0:
+        return opt_cls(model.parameters(), lr=lr)
+
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim >= 2:
+            decay.append(param)
+        else:
+            no_decay.append(param)
+
+    betas = tuple(train_cfg.get("betas", (0.9, 0.95)))
+    return opt_cls(
+        [
+            {"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=lr,
+        betas=betas,
+    )
+
+
+def _get_lr(step: int, train_cfg: dict) -> float:
+    """Per-step LR: linear warmup then cosine decay to min_lr.
+
+    Returns the configured learning_rate when no schedule is set
+    (lr_decay_iters absent), so transformer/MoE/RNN keep a constant LR.
+    Mirrors nanoGPT's get_lr.
+    """
+    lr = train_cfg["learning_rate"]
+    if train_cfg.get("lr_decay_iters") is None:
+        return lr
+    lr_decay_iters = train_cfg["lr_decay_iters"]
+    warmup_iters = train_cfg.get("warmup_iters", 0)
+    min_lr = train_cfg.get("min_lr", 0.0)
+    if step < warmup_iters:
+        return lr * (step + 1) / (warmup_iters + 1)
+    if step > lr_decay_iters:
+        return min_lr
+    decay_ratio = (step - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (lr - min_lr)
+
+
 def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row):
     """Unified training loop for character-level LMs (transformer/MoE).
 
@@ -339,8 +397,7 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
 
     template = TEMPLATE_REGISTRY[template_key]
     ws.model = template["build_model"](config).to(device)
-    opt_cls = OPTIMIZERS.get(train_cfg.get("optimizer", "adamw"), torch.optim.AdamW)
-    ws.optimizer = opt_cls(ws.model.parameters(), lr=train_cfg["learning_rate"])
+    ws.optimizer = _configure_optimizer(ws.model, train_cfg)
 
     if ws.resume:
         ws.load_checkpoint()
@@ -352,6 +409,11 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
     max_iters = train_cfg["max_iters"]
     log_interval = train_cfg["eval_interval"]
     num_eval_iters = min(train_cfg.get("eval_iters", 10), 10)
+    # Gradient accumulation (default 1 = one micro-batch per step, the
+    # behavior every existing template has always had). When > 1, several
+    # micro-batches are forward/backward'd with gradients summed before a
+    # single optimizer step, matching nanoGPT's gradient_accumulation_steps.
+    accum_steps = max(1, train_cfg.get("grad_accum_steps", 1))
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
@@ -366,16 +428,26 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
     for step in range(start_step, max_iters + 1):
         ws.current_step = step
 
-        xb, yb = ws.dataset.get_batch("train", device)
-        fwd_output = ws.model(xb, yb)
-        # Unpack forward output: transformer returns (logits, loss),
-        # MoE returns (logits, loss, drop_rate)
-        if len(fwd_output) == 3:
-            _, loss, _ = fwd_output
-        else:
-            _, loss = fwd_output
+        # Apply the (possibly scheduled) LR before the step's forward pass.
+        # The eval/metric path below uses the same value so the logged
+        # learning_rate reflects what actually trained this step.
+        current_lr = _get_lr(step, train_cfg)
+        for g in ws.optimizer.param_groups:
+            g["lr"] = current_lr
+
         ws.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        for _ in range(accum_steps):
+            xb, yb = ws.dataset.get_batch("train", device)
+            fwd_output = ws.model(xb, yb)
+            # Unpack forward output: transformer returns (logits, loss),
+            # MoE returns (logits, loss, drop_rate)
+            if len(fwd_output) == 3:
+                _, loss, _ = fwd_output
+            else:
+                _, loss = fwd_output
+            # Scale by accum_steps so summed gradients equal the mean loss
+            # across micro-batches (nanoGPT does the same).
+            (loss / accum_steps).backward()
         ws.optimizer.step()
         ws.yield_gpu(step)
         ws.maybe_update_progress()
@@ -386,7 +458,7 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
 
         if step > 0 and step % log_interval == 0:
             eval_results = eval_fn(ws.model, ws.dataset, device, num_eval_iters)
-            metric_row = build_metric_row(step, eval_results, lr, ws.started_at, ws.model)
+            metric_row = build_metric_row(step, eval_results, current_lr, ws.started_at, ws.model)
             ws.write_metric(metric_row)
             ws.save_checkpoint(step)
 
@@ -429,6 +501,17 @@ def train_transformer(ws: WorkerState):
 def train_moe(ws: WorkerState):
     """Train a MoE LM on tiny_shakespeare."""
     _train_char_lm(ws, "moe", _moe_eval, _build_moe_metric_row)
+
+
+def train_nanogpt(ws: WorkerState):
+    """Train a nanoGPT LM on tiny_shakespeare.
+
+    Shares the transformer's (logits, loss) return signature and its
+    eval/metric builders; the nanoGPT-specific optimizer (weight decay,
+    betas), LR schedule, and gradient accumulation are driven entirely by
+    optional training-config keys handled inside _train_char_lm.
+    """
+    _train_char_lm(ws, "nanogpt", _transformer_eval, _build_transformer_metric_row)
 
 
 # ── RNN ─────────────────────────────────────────────────────────────
@@ -559,6 +642,7 @@ def train_rnn(ws: WorkerState):
 TRAIN_DISPATCHERS = {
     "transformer": train_transformer,
     "moe": train_moe,
+    "nanogpt": train_nanogpt,
     "rnn": train_rnn,
 }
 
