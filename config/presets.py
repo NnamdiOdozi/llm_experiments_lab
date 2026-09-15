@@ -115,6 +115,58 @@ LR_SENSITIVITY_CONFIG = {
     },
 }
 
+# --- nanoGPT template ---
+
+# Karpathy's nanoGPT default hyperparameters (GPT-2 style): 124M params,
+# block_size 1024, weight tying, bias=False, weight-decay optimizer with a
+# decay/no-decay split, and a warmup + cosine LR schedule. Every field is
+# editable from the dashboard ConfigPanel. vocab_size is synced at train
+# time from the chosen tokenizer (char=65 / bpe_1k=1024 / bpe_4k=4096) —
+# the sidepane tokenizer dropdown sets it. Defaults to char so the preset
+# runs out of the box on CPU; switch to BPE for the closer-to-nanoGPT setup.
+NANOGPT_CONFIG = {
+    "name": "nanoGPT (GPT-2 mini)",
+    "description": "Karpathy's nanoGPT defaults: 12-layer GPT-2 style LM (block_size 1024, n_embd 768) with weight tying, bias-free layers, weight-decay AdamW, warmup+cosine LR. ~124M params at nanoGPT's full BPE vocab; ~86M with the default char tokenizer.",
+    "template": "nanogpt",
+    "model": {
+        "vocab_size": 65,
+        "block_size": 1024,
+        "n_embd": 768,
+        "n_head": 12,
+        "n_layer": 12,
+        "dropout": 0.0,
+        "pos_encoding": "learned",
+        "activation": "gelu",
+        "bias": False,
+        "tie_weights": True,
+    },
+    "training": {
+        "batch_size": 64,
+        "learning_rate": 3e-4,
+        "weight_decay": 0.1,
+        "betas": [0.9, 0.95],
+        "warmup_iters": 200,
+        "lr_decay_iters": 3000,
+        "min_lr": 3e-5,
+        "grad_accum_steps": 4,
+        "max_iters": 3000,
+        "eval_interval": 10,
+        "eval_iters": 2,
+        "optimizer": "adamw",
+    },
+    "inference": {
+        "max_new_tokens": 100,
+        "temperature": 0.8,
+    },
+    "dataset": "tiny_shakespeare",
+    "data": {
+        "dataset": "tiny_shakespeare",
+        "tokenizer": "char",
+        "tokenizer_artifact": None,
+        "vocab_size": 65,
+    },
+}
+
 # --- RNN templates ---
 
 RNN_BASELINE_CONFIG = {
@@ -154,4 +206,5 @@ PRESETS = {
     "moe": MOE_CONFIG,
     "lr_sensitivity": LR_SENSITIVITY_CONFIG,
     "rnn_baseline": RNN_BASELINE_CONFIG,
+    "nanogpt": NANOGPT_CONFIG,
 }
