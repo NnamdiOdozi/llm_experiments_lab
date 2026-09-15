@@ -1,8 +1,10 @@
+export type Template = "transformer" | "moe" | "rnn" | "nanogpt";
+
 export interface Preset {
   key: string;
   name: string;
   description: string;
-  template: "transformer" | "moe" | "rnn";
+  template: Template;
   model: Record<string, number | string>;
   training: Record<string, number | string>;
   inference?: Record<string, number | string>;
@@ -10,7 +12,7 @@ export interface Preset {
 }
 
 export interface ExperimentConfig {
-  template: "transformer" | "moe" | "rnn";
+  template: Template;
   model: Record<string, number | string>;
   training: Record<string, number | string>;
   inference?: Record<string, number | string>;
