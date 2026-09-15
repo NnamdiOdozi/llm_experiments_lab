@@ -124,6 +124,13 @@ LR_SENSITIVITY_CONFIG = {
 # time from the chosen tokenizer (char=65 / bpe_1k=1024 / bpe_4k=4096) —
 # the sidepane tokenizer dropdown sets it. Defaults to char so the preset
 # runs out of the box on CPU; switch to BPE for the closer-to-nanoGPT setup.
+#
+# Memory gotcha (confirmed OOM, 2026-09-15): batch_size must stay at 12.
+# Attention activation memory scales as batch x n_head x block_size^2; at
+# block_size 1024 a batch of 64 needs ~3 GiB PER LAYER and OOMs an 80 GB
+# H100 (one layer's scores alone is 64*12*1024^2*4 = 3.2 GiB). batch 12 is
+# the canonical nanoGPT single-80 GB-GPU value; grad_accum_steps compensates
+# for the smaller batch (effective tokens/step = 12*5*1024).
 NANOGPT_CONFIG = {
     "name": "nanoGPT (GPT-2 mini)",
     "description": "GPT-2 style nanoGPT defaults, ~86M params (vs 1.8M baseline). Notable: warmup+cosine LR scheduler, weight-decay optimizer, weight tying.",
@@ -141,14 +148,14 @@ NANOGPT_CONFIG = {
         "tie_weights": True,
     },
     "training": {
-        "batch_size": 64,
+        "batch_size": 12,
         "learning_rate": 3e-4,
         "weight_decay": 0.1,
         "betas": [0.9, 0.95],
         "warmup_iters": 200,
         "lr_decay_iters": 3000,
         "min_lr": 3e-5,
-        "grad_accum_steps": 4,
+        "grad_accum_steps": 5,
         "max_iters": 3000,
         "eval_interval": 10,
         "eval_iters": 2,
