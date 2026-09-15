@@ -219,8 +219,8 @@ class WorkerState:
             "config": self.config,
             **extra,
         }
-        # Add tokenizer metadata for checkpoint provenance (transformer/MoE only)
-        if self.template_key in ("transformer", "moe"):
+        # Add tokenizer metadata for checkpoint provenance (transformer/MoE/nanogpt only)
+        if self.template_key in ("transformer", "moe", "nanogpt"):
             data_cfg = self.config.get("data", {})
             data["tokenizer_id"] = data_cfg.get("tokenizer", "char")
             data["tokenizer_version"] = data_cfg.get("tokenizer_version", "unknown")

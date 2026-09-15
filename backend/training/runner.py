@@ -314,7 +314,7 @@ def prompt_paused_model(run_id: int, prompt_text: str, max_new_tokens: int = 200
 
     result = None
 
-    if template_key in ("transformer", "moe"):
+    if template_key in ("transformer", "moe", "nanogpt"):
         # Use tokenizer-based dataset
         tokenizer = load_tokenizer(model_config.get("data", {"tokenizer": "char"}))
         text = load_tiny_shakespeare()

@@ -1138,7 +1138,7 @@ async def get_embedding_table(run_id: int):
         raise HTTPException(404, "Run config not found")
     config = json.loads(config_path.read_text())
     template_key = config.get("template", "transformer")
-    if template_key not in ("transformer", "moe"):
+    if template_key not in ("transformer", "moe", "nanogpt"):
         raise HTTPException(400, f"No embedding table for template: {template_key}")
 
     cp_path = artifacts.checkpoint_path(run_id)
@@ -1263,7 +1263,7 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
         # Load tokenizer — must match the run's configured tokenizer (char /
         # bpe_1k / bpe_4k), else a BPE model's generated token ids (>=65) blow
         # up the char decoder with a KeyError. 2026-08-06.
-        if template_key in ("transformer", "moe"):
+        if template_key in ("transformer", "moe", "nanogpt"):
             from backend.training.tokenizers.loader import load_tokenizer
             tokenizer = load_tokenizer(config.get("data", {"tokenizer": "char"}))
         elif template_key == "rnn":
