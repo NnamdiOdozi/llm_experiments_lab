@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { ExperimentConfig } from "../types";
+import { ExperimentConfig, ConfigValue } from "../types";
 import "./ConfigPanel.css";
 
 // Static vocab_size mappings for each tokenizer
@@ -75,12 +75,12 @@ function NumericField({
 
 function renderSection(
   title: string,
-  section: Record<string, number | string>,
+  section: Record<string, ConfigValue>,
   sectionKey: "model" | "training" | "inference",
   config: ExperimentConfig,
   onChange: Props["onChange"],
   disabled: boolean,
-  baselineSection?: Record<string, number | string>
+  baselineSection?: Record<string, ConfigValue>
 ) {
   return (
     <div className="config-section">
@@ -98,7 +98,7 @@ function renderSection(
         const baselineVal = baselineSection?.[key];
         const changedFromBaseline = baselineVal != null && String(baselineVal) !== String(val);
         const fieldDisabled = disabled || (key === "temperature" && isGreedy);
-        const handleChange = (newVal: string | number) => {
+        const handleChange = (newVal: ConfigValue) => {
           onChange({
             ...config,
             [sectionKey]: { ...config[sectionKey], [key]: newVal },
@@ -110,7 +110,17 @@ function renderSection(
             className="config-field__row"
           >
             <label className="config-field__label">{key}</label>
-            {options ? (
+            {typeof val === "boolean" ? (
+              <select
+                className="config-field__control"
+                value={String(val)}
+                disabled={disabled}
+                onChange={(e) => handleChange(e.target.value === "true")}
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            ) : options ? (
               <select
                 className="config-field__control"
                 value={String(val)}

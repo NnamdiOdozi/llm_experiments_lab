@@ -80,6 +80,28 @@ describe("ConfigPanel numeric fields", () => {
     expect(tokenizer).toBeInTheDocument();
   });
 
+  it("renders boolean model fields (bias, tie_weights) as a true/false select", () => {
+    const nanogptConfig: ExperimentConfig = {
+      ...config,
+      template: "nanogpt",
+      model: { ...config.model, bias: false, tie_weights: true },
+    };
+    const onChange = vi.fn();
+    render(<ConfigPanel config={nanogptConfig} onChange={onChange} />);
+    const bias = screen.getByDisplayValue("false") as HTMLSelectElement;
+    const tie = screen.getByDisplayValue("true") as HTMLSelectElement;
+    expect(bias.value).toBe("false");
+    expect(tie.value).toBe("true");
+    fireEvent.change(bias, { target: { value: "true" } });
+    // Emits an actual boolean, not the string "true", so the backend model
+    // builder reads bias truthfully.
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: expect.objectContaining({ bias: true, tie_weights: true }),
+      })
+    );
+  });
+
   it("hides the Tokenizer dropdown for RNN template", () => {
     const rnnConfig: ExperimentConfig = {
       ...config,

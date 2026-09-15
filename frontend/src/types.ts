@@ -1,21 +1,23 @@
 export type Template = "transformer" | "moe" | "rnn" | "nanogpt";
 
+export type ConfigValue = number | string | boolean;
+
 export interface Preset {
   key: string;
   name: string;
   description: string;
   template: Template;
-  model: Record<string, number | string>;
-  training: Record<string, number | string>;
-  inference?: Record<string, number | string>;
+  model: Record<string, ConfigValue>;
+  training: Record<string, ConfigValue>;
+  inference?: Record<string, ConfigValue>;
   dataset: string;
 }
 
 export interface ExperimentConfig {
   template: Template;
-  model: Record<string, number | string>;
-  training: Record<string, number | string>;
-  inference?: Record<string, number | string>;
+  model: Record<string, ConfigValue>;
+  training: Record<string, ConfigValue>;
+  inference?: Record<string, ConfigValue>;
   data?: {
     dataset: string;
     tokenizer: string;
