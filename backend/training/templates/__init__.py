@@ -12,6 +12,10 @@ from backend.training.templates.moe.model import (
     TinyMoeLM,
     build_model_from_config as build_moe,
 )
+from backend.training.templates.nanogpt.model import (
+    NanoGPTModel,
+    build_model_from_config as build_nanogpt,
+)
 
 TEMPLATE_REGISTRY = {
     "transformer": {
@@ -25,5 +29,9 @@ TEMPLATE_REGISTRY = {
     "moe": {
         "build_model": build_moe,
         "model_class": TinyMoeLM,
+    },
+    "nanogpt": {
+        "build_model": build_nanogpt,
+        "model_class": NanoGPTModel,
     },
 }
