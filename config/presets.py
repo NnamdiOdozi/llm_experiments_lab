@@ -134,7 +134,7 @@ LR_SENSITIVITY_CONFIG = {
 # for the smaller batch (effective tokens/step = 12*5*1024).
 NANOGPT_CONFIG = {
     "name": "nanoGPT (GPT-2 mini)",
-    "description": "GPT-2 style nanoGPT, ~124M params (vs 1.8M baseline; nanoGPT counting excludes position embeddings). Real GPT-2 BPE tokenizer (50,257 tokens). Notable: warmup+cosine LR scheduler, weight-decay optimizer, weight tying.",
+    "description": "GPT-2 style nanoGPT, ~124M params (vs 1.8M baseline). Real GPT-2 BPE tokenizer instead of character-level. Token embeddings reused as the LM head (weight tying).",
     "template": "nanogpt",
     "model": {
         "vocab_size": 50304,
