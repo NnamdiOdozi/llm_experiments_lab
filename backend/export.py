@@ -68,6 +68,67 @@ text = requests.get(url, timeout={settings.http_timeout}).text
 '''
 
 
+# ── Optimizer / training-loop variants ──
+# Kept at module level (not inline in the builder) so _char_lm_script stays
+# readable. Selected by template in _char_lm_script.
+
+_ADAMW_PLAIN = """optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)"""
+
+_ADAMW_NANOGPT = '''# nanoGPT parameter split: 2D tensors (matmuls, embeddings) are weight
+# decayed; 1D tensors (biases, LayerNorm gains) are not.
+_decay = [p for p in model.parameters() if p.dim() >= 2]
+_no_decay = [p for p in model.parameters() if p.dim() < 2]
+optimizer = torch.optim.AdamW(
+    [{"params": _decay, "weight_decay": WEIGHT_DECAY},
+     {"params": _no_decay, "weight_decay": 0.0}],
+    lr=LEARNING_RATE, betas=BETAS,
+)
+
+
+def get_lr(it):
+    """Linear warmup, then cosine decay down to MIN_LR."""
+    if it < WARMUP_ITERS:
+        return LEARNING_RATE * (it + 1) / (WARMUP_ITERS + 1)
+    if it > LR_DECAY_ITERS:
+        return MIN_LR
+    ratio = (it - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * ratio))
+    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)'''
+
+_LOOP_PLAIN = '''for it in range(MAX_ITERS + 1):
+    if it % EVAL_INTERVAL == 0:
+        losses = estimate_loss()
+        print(f"iter {it:5d} | train {losses['train']:.4f} | val {losses['val']:.4f}")
+    xb, yb = get_batch("train")
+    _, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()'''
+
+# Mirrors _train_char_lm: zero_grad once, accumulate GRAD_ACCUM_STEPS
+# micro-batches scaled by 1/accum, then a single optimizer step.
+_LOOP_NANOGPT = '''for it in range(MAX_ITERS + 1):
+    lr = get_lr(it)
+    for _group in optimizer.param_groups:
+        _group["lr"] = lr
+    if it % EVAL_INTERVAL == 0:
+        losses = estimate_loss()
+        print(f"iter {it:5d} | lr {lr:.2e} | train {losses['train']:.4f} | val {losses['val']:.4f}")
+    optimizer.zero_grad(set_to_none=True)
+    for _ in range(GRAD_ACCUM_STEPS):
+        xb, yb = get_batch("train")
+        _, loss = model(xb, yb)
+        (loss / GRAD_ACCUM_STEPS).backward()
+    optimizer.step()'''
+
+# GPT-2 scaled init on residual projections: out_proj is attention's residual
+# projection, net.2 is FeedForward's second Linear.
+_SCALED_INIT_NANOGPT = '''
+
+        for _n, _p in self.named_parameters():
+            if _n.endswith("out_proj.weight") or _n.endswith("net.2.weight"):
+                nn.init.normal_(_p, mean=0.0, std=0.02 / math.sqrt(2 * N_LAYER))'''
+
 # transformer / nanogpt / moe are all char-level LMs built from the same
 # attention blocks, so ONE builder serves all three and each contributes only
 # its differences (see _char_lm_script). Only the RNN needs its own builder.
@@ -77,6 +138,12 @@ _SCRIPT_TITLES = {
     "moe": "Mixture-of-Experts LM",
 }
 
+_MODEL_CLASS_NAMES = {
+    "transformer": "TinyTransformerLM",
+    "nanogpt": "NanoGPT",
+    "moe": "MoELM",
+}
+
 
 def _char_lm_script(config: dict, template: str = "transformer") -> str:
     """Assemble a standalone char-LM training script with config baked in."""
@@ -84,6 +151,25 @@ def _char_lm_script(config: dict, template: str = "transformer") -> str:
     t = config["training"]
     pos = m.get("pos_encoding", "learned")
     use_rope = pos == "rope"
+    # bias / tie_weights are user-editable in the config pane. transformer and
+    # moe presets set neither, so these defaults leave their output unchanged.
+    bias_arg = "" if m.get("bias", True) else ", bias=False"
+    tie_weights = m.get("tie_weights", False)
+    # The nanoGPT training recipe (AdamW decay split, warmup+cosine schedule,
+    # gradient accumulation) keys off the TEMPLATE rather than off config
+    # presence, so the exported script matches how the app trains it.
+    is_nanogpt = template == "nanogpt"
+    model_class = _MODEL_CLASS_NAMES[template]
+    optimizer_code = _ADAMW_NANOGPT if is_nanogpt else _ADAMW_PLAIN
+    train_loop = _LOOP_NANOGPT if is_nanogpt else _LOOP_PLAIN
+    scaled_init = _SCALED_INIT_NANOGPT if is_nanogpt else ""
+    # Appended to the END of the lm_head line rather than emitted as their
+    # own conditional lines: an empty conditional line would add a blank
+    # line and break the byte-identical transformer golden.
+    tie_line = (
+        "\n        self.lm_head.weight = self.token_emb.weight  # weight tying"
+        if tie_weights else ""
+    )
 
     tokenizer_type = _get_tokenizer_type(config)
     artifact_path = _get_tokenizer_artifact_path(config)
@@ -123,7 +209,19 @@ EVAL_INTERVAL = {t["eval_interval"]}
 EVAL_ITERS = {t.get("eval_iters", 200)}
 GENERATE_TOKENS = 500
 TRAIN_VAL_SPLIT = 0.9
+'''
 
+    if is_nanogpt:
+        betas = t.get("betas", [0.9, 0.95])
+        script += f'''WEIGHT_DECAY = {t.get("weight_decay", 0.1)}
+BETAS = ({betas[0]}, {betas[1]})
+WARMUP_ITERS = {t.get("warmup_iters", 200)}
+LR_DECAY_ITERS = {t.get("lr_decay_iters", t["max_iters"])}
+MIN_LR = {t.get("min_lr", t["learning_rate"] / 10)}
+GRAD_ACCUM_STEPS = {t.get("grad_accum_steps", 1)}
+'''
+
+    script += '''
 
 # ── Data ──
 '''
@@ -181,7 +279,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.n_head = n_head
         self.head_size = n_embd // n_head
         self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        self.out_proj = nn.Linear(n_embd, n_embd)
+        self.out_proj = nn.Linear(n_embd, n_embd{bias_arg})
         self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
         self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
@@ -206,8 +304,8 @@ class FeedForward(nn.Module):
     def __init__(self, n_embd, dropout):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd), nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd), nn.Dropout(dropout),
+            nn.Linear(n_embd, 4 * n_embd{bias_arg}), nn.GELU(),
+            nn.Linear(4 * n_embd, n_embd{bias_arg}), nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -230,7 +328,7 @@ class Block(nn.Module):
 
 
 # ── Full Model ──
-class TinyTransformerLM(nn.Module):
+class {model_class}(nn.Module):
     def __init__(self):
         super().__init__()
         self.block_size = BLOCK_SIZE
@@ -240,7 +338,7 @@ class TinyTransformerLM(nn.Module):
             *[Block(N_EMBD, N_HEAD, BLOCK_SIZE, DROPOUT) for _ in range(N_LAYER)]
         )
         self.ln_f = nn.LayerNorm(N_EMBD)
-        self.lm_head = nn.Linear(N_EMBD, vocab_size)
+        self.lm_head = nn.Linear(N_EMBD, vocab_size{bias_arg}){tie_line}{scaled_init}
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -264,9 +362,9 @@ class TinyTransformerLM(nn.Module):
 
 
 # ── Training ──
-model = TinyTransformerLM().to(device)
+model = {model_class}().to(device)
 print(f"Parameters: {{sum(p.numel() for p in model.parameters()) / 1e6:.2f}}M")
-optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+{optimizer_code}
 
 
 @torch.no_grad()
@@ -284,15 +382,7 @@ def estimate_loss():
     return out
 
 
-for it in range(MAX_ITERS + 1):
-    if it % EVAL_INTERVAL == 0:
-        losses = estimate_loss()
-        print(f"iter {{it:5d}} | train {{losses['train']:.4f}} | val {{losses['val']:.4f}}")
-    xb, yb = get_batch("train")
-    _, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+{train_loop}
 
 
 # ── Generate ──
@@ -492,6 +582,7 @@ for _ in range(NUM_SAMPLES):
 
 SCRIPT_BUILDERS = {
     "transformer": partial(_char_lm_script, template="transformer"),
+    "nanogpt": partial(_char_lm_script, template="nanogpt"),
     "rnn": _rnn_script,
 }
 

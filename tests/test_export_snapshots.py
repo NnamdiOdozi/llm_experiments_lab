@@ -22,7 +22,7 @@ import pytest
 from backend.export import build_script
 
 FIXTURES = Path(__file__).parent / "fixtures" / "export"
-SNAPSHOT_TEMPLATES = ["transformer", "rnn"]
+SNAPSHOT_TEMPLATES = ["transformer", "rnn", "nanogpt"]
 
 
 def _load(key: str) -> tuple[dict, str]:

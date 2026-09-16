@@ -1,0 +1,222 @@
+"""nanoGPT (GPT-2 mini) — exported from LLM Experiments Lab.
+
+Config: Snapshot nanoGPT
+Template: nanogpt | Pos encoding: learned | Tokenizer: gpt2
+"""
+
+import math
+import requests
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from tokenizers import Tokenizer
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(1337)
+
+# ── Hyperparameters (from your experiment config) ──
+BLOCK_SIZE = 1024
+N_EMBD = 768
+N_HEAD = 12
+N_LAYER = 12
+DROPOUT = 0.0
+POS_ENCODING = "learned"
+BATCH_SIZE = 12
+LEARNING_RATE = 0.0003
+MAX_ITERS = 3000
+EVAL_INTERVAL = 10
+EVAL_ITERS = 2
+GENERATE_TOKENS = 500
+TRAIN_VAL_SPLIT = 0.9
+WEIGHT_DECAY = 0.1
+BETAS = (0.9, 0.95)
+WARMUP_ITERS = 200
+LR_DECAY_ITERS = 3000
+MIN_LR = 3e-05
+GRAD_ACCUM_STEPS = 5
+
+
+# ── Data ──
+# Load BPE tokenizer from artifact
+# NOTE: This export requires the tokenizer artifact file 'gpt2.json'
+# alongside this script. It is included in the .zip export bundle.
+from tokenizers import Tokenizer
+
+tok = Tokenizer.from_file("gpt2.json")
+vocab_size = 50304
+
+encode = lambda s: tok.encode(s).ids
+decode = lambda ids: tok.decode(ids)
+
+# Reconstruct text for train/val split (using original text)
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+text = requests.get(url, timeout=30).text
+
+data = torch.tensor(encode(text), dtype=torch.long)
+n_train = int(TRAIN_VAL_SPLIT * len(data))
+train_data, val_data = data[:n_train], data[n_train:]
+
+
+def get_batch(split):
+    d = train_data if split == "train" else val_data
+    ix = torch.randint(len(d) - BLOCK_SIZE - 1, (BATCH_SIZE,))
+    x = torch.stack([d[i : i + BLOCK_SIZE] for i in ix])
+    y = torch.stack([d[i + 1 : i + 1 + BLOCK_SIZE] for i in ix])
+    return x.to(device), y.to(device)
+
+
+# ── Attention ──
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, n_embd, n_head, block_size, dropout):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.head_size = n_embd // n_head
+        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.out_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_size)
+        scores = scores.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
+        att = self.attn_dropout(torch.softmax(scores, dim=-1))
+        y = torch.matmul(att, v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.out_proj(y))
+
+
+# ── Feed-forward ──
+class FeedForward(nn.Module):
+    def __init__(self, n_embd, dropout):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd, bias=False), nn.GELU(),
+            nn.Linear(4 * n_embd, n_embd, bias=False), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# ── Transformer Block ──
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head, block_size, dropout):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout)
+        self.ln2 = nn.LayerNorm(n_embd)
+        self.ffn = FeedForward(n_embd, dropout)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+
+# ── Full Model ──
+class NanoGPT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block_size = BLOCK_SIZE
+        self.token_emb = nn.Embedding(vocab_size, N_EMBD)
+        self.pos_emb = nn.Embedding(BLOCK_SIZE, N_EMBD)
+        self.blocks = nn.Sequential(
+            *[Block(N_EMBD, N_HEAD, BLOCK_SIZE, DROPOUT) for _ in range(N_LAYER)]
+        )
+        self.ln_f = nn.LayerNorm(N_EMBD)
+        self.lm_head = nn.Linear(N_EMBD, vocab_size, bias=False)
+        self.lm_head.weight = self.token_emb.weight  # weight tying
+
+        for _n, _p in self.named_parameters():
+            if _n.endswith("out_proj.weight") or _n.endswith("net.2.weight"):
+                nn.init.normal_(_p, mean=0.0, std=0.02 / math.sqrt(2 * N_LAYER))
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        tok = self.token_emb(idx)
+        x = tok + self.pos_emb(torch.arange(T, device=device))
+        x = self.blocks(x)
+        logits = self.lm_head(self.ln_f(x))
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1))
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        self.train(False)
+        for _ in range(max_new_tokens):
+            logits, _ = self(idx[:, -self.block_size:])
+            probs = F.softmax(logits[:, -1, :], dim=-1)
+            idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
+        return idx
+
+
+# ── Training ──
+model = NanoGPT().to(device)
+print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+# nanoGPT parameter split: 2D tensors (matmuls, embeddings) are weight
+# decayed; 1D tensors (biases, LayerNorm gains) are not.
+_decay = [p for p in model.parameters() if p.dim() >= 2]
+_no_decay = [p for p in model.parameters() if p.dim() < 2]
+optimizer = torch.optim.AdamW(
+    [{"params": _decay, "weight_decay": WEIGHT_DECAY},
+     {"params": _no_decay, "weight_decay": 0.0}],
+    lr=LEARNING_RATE, betas=BETAS,
+)
+
+
+def get_lr(it):
+    """Linear warmup, then cosine decay down to MIN_LR."""
+    if it < WARMUP_ITERS:
+        return LEARNING_RATE * (it + 1) / (WARMUP_ITERS + 1)
+    if it > LR_DECAY_ITERS:
+        return MIN_LR
+    ratio = (it - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * ratio))
+    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
+
+
+@torch.no_grad()
+def estimate_loss():
+    model.train(False)
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(EVAL_ITERS)
+        for k in range(EVAL_ITERS):
+            x, y = get_batch(split)
+            _, loss = model(x, y)
+            losses[k] = loss.item()
+        out[split] = losses.mean().item()
+    model.train(True)
+    return out
+
+
+for it in range(MAX_ITERS + 1):
+    lr = get_lr(it)
+    for _group in optimizer.param_groups:
+        _group["lr"] = lr
+    if it % EVAL_INTERVAL == 0:
+        losses = estimate_loss()
+        print(f"iter {it:5d} | lr {lr:.2e} | train {losses['train']:.4f} | val {losses['val']:.4f}")
+    optimizer.zero_grad(set_to_none=True)
+    for _ in range(GRAD_ACCUM_STEPS):
+        xb, yb = get_batch("train")
+        _, loss = model(xb, yb)
+        (loss / GRAD_ACCUM_STEPS).backward()
+    optimizer.step()
+
+
+# ── Generate ──
+ctx = torch.zeros((1, 1), dtype=torch.long, device=device)
+print("\n--- Generated text ---")
+print(decode(model.generate(ctx, GENERATE_TOKENS)[0].tolist()))
