@@ -30,6 +30,9 @@ evidence/*.mp4
 *.db-wal
 *.sqlite
 *.sqlite3
+# timestamped DB safety copies (e.g. lab.db.bak-20260915-231512)
+*.db.bak-*
+*.db.bak
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
