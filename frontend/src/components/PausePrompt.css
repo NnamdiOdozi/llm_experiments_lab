@@ -55,7 +55,13 @@
 }
 
 .prompt-model__output pre {
-  max-height: 110px;
+  /* Grows with the content rather than sitting in a fixed window. 110px was
+     ~6 lines at this font size, so a 500-token generation was almost entirely
+     hidden behind a scrollbar. Short samples now render at their natural
+     height; long ones expand until they would take over the page, then scroll.
+     Beats the global `pre { max-height: 400px }` in index.css on specificity.
+     User report 2026-09-16. */
+  max-height: 60vh;
   margin: 0;
   padding: 9px 10px;
   white-space: pre-wrap;
