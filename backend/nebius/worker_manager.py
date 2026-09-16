@@ -66,10 +66,16 @@ async def _live_state(session: dict) -> dict:
 
     state = endpoint.get("status", {}).get("state")
     reachable = None
-    # Only probe the URL if Nebius reports RUNNING — probing a STOPPED/STOPPING/ERROR
+    # Probe the URL Nebius reports for this endpoint RIGHT NOW, not the one cached
+    # in the DB. A stale cached URL probes dead, which sent ensure_worker down the
+    # "dead gateway" branch (Decision 5) and tore down a perfectly healthy RUNNING
+    # endpoint. The DB URL stays only as a fallback for records where Nebius has
+    # not published a public URL yet.
+    probe_url = endpoints_client.extract_public_url(endpoint) or session.get("endpoint_url")
+    # Only probe if Nebius reports RUNNING — probing a STOPPED/STOPPING/ERROR
     # endpoint's URL would be pointless (no container to answer).
-    if state == "RUNNING" and session.get("endpoint_url"):
-        reachable = await endpoints_client.probe_endpoint_url(session["endpoint_url"])
+    if state == "RUNNING" and probe_url:
+        reachable = await endpoints_client.probe_endpoint_url(probe_url)
 
     return {
         "exists": True,
@@ -285,11 +291,20 @@ async def ensure_worker(device: str, gpu_flavor: str | None = None) -> dict:
             await db.touch_worker_session(session_id)
             if session and session["worker_status"] != WorkerStatus.READY:
                 await db.update_worker_session(session_id, worker_status=WorkerStatus.READY)
-                spec = live["endpoint"].get("spec", {})
-                url = endpoints_client.extract_public_url(live["endpoint"])
-                if url:
-                    await db.update_worker_session(session_id, endpoint_url=url,
-                        actual_platform=spec.get("platform"), actual_preset=spec.get("preset"))
+            # Refresh the cached URL/spec on EVERY reuse, not only on the
+            # not-READY transition. A session already marked READY but holding a
+            # stale URL previously kept it forever, so runs were dispatched to a
+            # dead tunnel (observed as 429s / timeouts from the wrong host).
+            spec = live["endpoint"].get("spec", {})
+            url = endpoints_client.extract_public_url(live["endpoint"])
+            if url and url != (session or {}).get("endpoint_url"):
+                nebius_log.info(
+                    "Refreshing stale endpoint_url — session_id=%s %s -> %s",
+                    session_id, (session or {}).get("endpoint_url"), url,
+                )
+            if url:
+                await db.update_worker_session(session_id, endpoint_url=url,
+                    actual_platform=spec.get("platform"), actual_preset=spec.get("preset"))
             nebius_log.info(
                 "Worker reused (was %s in DB) — session_id=%s endpoint_id=%s",
                 session.get("worker_status") if session else "unknown", session_id, endpoint_id,

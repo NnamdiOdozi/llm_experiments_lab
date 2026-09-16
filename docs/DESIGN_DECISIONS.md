@@ -4284,6 +4284,47 @@ Adding the Data section's Tokenizer selector and read-only vocabulary size made 
 
 At the conservative 1536 × 960 CSS viewport, the tokenizer-enabled MoE Configuration ends at y=747 and the complete Training panel ends at y=900. Resume and Stop end at y=891, with no horizontal overflow.
 
+## §92: Reachability probes the LIVE endpoint URL, not the cached one (2026-09-15)
+
+**Symptom.** nanoGPT runs sat at `queued` forever, or dispatched to a tunnel host
+that answered `429 Too Many Requests`. The `worker-gpu-h100` session row held the
+correct `nebius_endpoint_id` (`aiendpoint-e00xdvn4tr0tvtf5rn`, state RUNNING) but a
+stale `endpoint_url` (`port8000-hr97jj8vp65ps52...`) left over from an earlier
+incarnation of the endpoint. Nebius was publishing `port8000-bm9mc967tj9207z...`.
+Probing the two confirmed it: stale returned False, live returned True.
+
+**Root cause — a self-reinforcing trap.** `_live_state()` decided reachability by
+probing `session["endpoint_url"]`, the value cached in the DB. The *only* code that
+refreshes that cached value lived inside Decision 3 (`RUNNING and reachable`), which
+that very probe had just failed. So a stale URL guaranteed `reachable=False`, which
+skipped the one branch that would have corrected it. The URL could never heal.
+
+Worse, `reachable is False` on a RUNNING endpoint is Decision 5's definition of a
+"dead gateway", whose remedy is to STOP the endpoint and create a new one. A single
+stale string therefore tore down a healthy, running, billing H100 and rebuilt it
+(~6 minutes) on every start.
+
+**Fix (two parts, both in `backend/nebius/worker_manager.py`).**
+1. `_live_state()` now probes `extract_public_url(endpoint)` — the URL Nebius reports
+   for the endpoint *at this moment* — falling back to the cached DB value only when
+   Nebius has not published one yet (e.g. mid-provision). Provenance now flows from
+   Nebius to the DB, never the reverse.
+2. Decision 3 refreshes `endpoint_url`/`actual_platform`/`actual_preset` on *every*
+   reuse, not only on the not-READY transition. Previously a session already marked
+   READY kept a stale URL indefinitely, dispatching runs to a dead tunnel — the
+   likeliest cause of the 429s seen on run 275.
+
+**Do not refactor back.** Reintroducing `session["endpoint_url"]` as the probe target
+restores the trap. The cached URL is a *fallback*, never the source of truth.
+
+**Note on the concurrent DNS failure.** This bug was found while diagnosing a separate
+WSL problem: the host resolver (172.21.240.1) was returning one wildcard address
+(90.207.238.183) for every `*.nebius.cloud` name — ISP DNS interception — so the
+`nebius` CLI failed with `dial tcp 90.207.238.183:443: i/o timeout` and nothing
+reached Nebius at all. Fixed outside the repo by setting `generateResolvConf = false`
+in `/etc/wsl.conf` and pointing `/etc/resolv.conf` at 1.1.1.1 / 8.8.8.8. The two
+faults are unrelated; the DNS outage merely masked the stale-URL bug.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
