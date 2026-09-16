@@ -80,7 +80,14 @@ capability; the nanoGPT path just doesn't use it.)
 
 At 124M parameters with a 50k vocabulary, one unlucky batch can produce a very
 large gradient. Clipping caps it. It is the standard guard against a run that
-trains fine for hours then spikes into garbage. **Tracked in `DEFERRED_WORK.md`.**
+trains fine for hours then spikes into garbage.
+
+**CLOSED 2026-09-16.** `_train_char_lm` now clips when `grad_clip` is set, and
+`NANOGPT_CONFIG` sets it to 1.0 — Karpathy's value. The call is config-driven
+(three lines, no template branching), so transformer and MoE deliberately stay
+unclipped and runs from before this change remain comparable. Behaviour pinned by
+`tests/test_grad_clip.py`, which asserts it fires once per step at 1.0 and *not*
+at all when the key is absent or 0.0.
 
 ### Top-k sampling
 He truncates generation to the 200 most likely tokens (`top_k = 200`). We don't

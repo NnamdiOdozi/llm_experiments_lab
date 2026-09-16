@@ -53,8 +53,14 @@ names ending `out_proj.weight` or `net.2.weight`.
 stops being the projection and the init quietly stops applying — no error. The
 lab's own model doesn't have this problem; only the exported copy does.
 
-**Risk if wrong:** slightly different initialisation in exported runs. Would not
-crash, and would be hard to notice. A named submodule would be sturdier.
+**Risk if wrong:** slightly different initialisation in exported runs.
+
+**Mitigated 2026-09-16 (user's suggestion):** the generated script now counts how
+many projections it matched and raises a `RuntimeError` naming the likely cause if
+it is not 2 per layer. `tests/test_export_snapshots.py` pins the same invariant
+against the lab's own model (24 matches for 12 layers), so a rename fails in CI
+rather than in someone's download. A named submodule would still be sturdier than
+matching `net.2`, but the failure is now loud rather than silent.
 
 ---
 
@@ -96,5 +102,7 @@ path would have stopped a healthy, billing H100 and rebuilt it (~6 min). The use
 approved the specific edit.
 
 **Affects:** one field, one row. A safety copy was taken first
-(`lab.db.bak-20260915-231512`, now gitignored). The underlying code bug is fixed
-in `worker_manager.py` and documented as §92, so this shouldn't recur.
+(`lab.db.bak-20260915-231512`); the user confirmed the live DB was healthy on
+2026-09-16 and asked for that copy to be deleted, so it is gone. `integrity_check`
+was `ok` with all tables populated before removal. The underlying code bug is
+fixed in `worker_manager.py` and documented as §92, so this shouldn't recur.
