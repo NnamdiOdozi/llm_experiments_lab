@@ -4325,6 +4325,21 @@ reached Nebius at all. Fixed outside the repo by setting `generateResolvConf = f
 in `/etc/wsl.conf` and pointing `/etc/resolv.conf` at 1.1.1.1 / 8.8.8.8. The two
 faults are unrelated; the DNS outage merely masked the stale-URL bug.
 
+## §93: nanoGPT vs Karpathy — verified comparison lives in its own doc (2026-09-16)
+
+Which nanoGPT settings are Karpathy's defaults and which are ours kept coming up
+(it drove the landing-page card rewrite, and it is the first thing anyone asks
+when they see "~124M params"). It is now written down once, verified against his
+actual source rather than from memory, in **`docs/NANOGPT_VS_KARPATHY.md`**.
+
+That doc covers: the architecture values that match him exactly; the training
+schedule values we changed and why (short single-GPU demo on Tiny Shakespeare);
+the noisy-validation-curve trade-off from eval_interval=10 / eval_iters=2; two
+things he does that we do not (gradient clipping at 1.0, top-k=200 sampling);
+and the bias=True/False inconsistency between his own model.py and train.py.
+
+Gradient clipping is a genuine gap, not a preference — tracked in DEFERRED_WORK.md.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
