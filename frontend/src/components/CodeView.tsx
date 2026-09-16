@@ -10,16 +10,24 @@ interface Props {
 
 export default function CodeView({ experimentId, runId }: Props) {
   const [code, setCode] = useState<CodeFiles | null>(null);
+  const [codeError, setCodeError] = useState<string | null>(null);
   const [activeFile, setActiveFile] = useState("model.py");
 
   useEffect(() => {
-    fetchCode(experimentId).then(setCode);
+    setCode(null);
+    setCodeError(null);
+    fetchCode(experimentId)
+      .then(setCode)
+      // Metrics (right-hand column) do NOT depend on this fetch — they only
+      // need runId. Real bug, 2026-09-16: a missing nanogpt entry in the
+      // backend's TEMPLATE_DIRS made this 404, and the old bare
+      // `if (!code) return null` hid the WHOLE panel, metrics included.
+      // Catch here so each column fails independently.
+      .catch((e) => setCodeError(e?.message || "Template code unavailable"));
   }, [experimentId]);
 
-  if (!code) return null;
-
-  const fileNames = Object.keys(code.files);
-  const content = code.files[activeFile] || "// file not found";
+  const fileNames = code ? Object.keys(code.files) : [];
+  const content = code ? code.files[activeFile] || "// file not found" : "";
   const tabStyle = (active: boolean) => ({
     fontSize: 12,
     background: active ? "var(--accent-dim)" : undefined,
@@ -28,7 +36,7 @@ export default function CodeView({ experimentId, runId }: Props) {
 
   return (
     <div className="panel">
-      <h3>Template Code ({code.template})</h3>
+      <h3>Template Code{code ? ` (${code.template})` : ""}</h3>
       {/* Side-by-side, not a tab toggle — Template Code and Metrics used to
           be mutually exclusive views of this panel, but the panel has
           plenty of unused width to show both at once. Direct user request,
@@ -51,7 +59,11 @@ export default function CodeView({ experimentId, runId }: Props) {
               WorkerPanel's own max-height again. Direct user report
               (bottom edges misaligned), 2026-07-16. See
               docs/DESIGN_DECISIONS.md. */}
-          <pre style={{ maxHeight: 400, overflow: "auto" }}>{content}</pre>
+          {codeError ? (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{codeError}</div>
+          ) : (
+            <pre style={{ maxHeight: 400, overflow: "auto" }}>{content}</pre>
+          )}
         </div>
         <div style={{ flex: "1 1 0", minWidth: 0 }}>
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10, padding: "6px 0" }}>Metrics</div>

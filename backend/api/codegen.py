@@ -17,6 +17,9 @@ router = APIRouter(prefix="/api/code", tags=["code"])
 TEMPLATE_DIRS = {
     "transformer": Path(__file__).parent.parent / "training" / "templates" / "transformer",
     "moe": Path(__file__).parent.parent / "training" / "templates" / "moe",
+    # nanogpt has model.py but no data.py — it reuses the transformer's data
+    # path. The loop below skips files that don't exist, so that's fine.
+    "nanogpt": Path(__file__).parent.parent / "training" / "templates" / "nanogpt",
     "rnn": Path(__file__).parent.parent / "training" / "templates" / "rnn",
 }
 
