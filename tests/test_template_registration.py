@@ -9,8 +9,6 @@ the same component and was hidden along with the code).
 These tests exist so the NEXT template can't be half-registered the same way.
 """
 
-import pytest
-
 from backend.api.codegen import TEMPLATE_DIRS
 from backend.export import SCRIPT_BUILDERS
 from backend.training.templates import TEMPLATE_REGISTRY
@@ -36,18 +34,7 @@ def test_code_view_directories_actually_exist_on_disk():
         assert (path / "model.py").exists(), f"{key}: no model.py in {path}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN GAP, 2026-09-16: SCRIPT_BUILDERS only covers transformer and rnn, "
-        "so /api/code/{id}/export.py|.ipynb|.zip return HTTP 500 for moe and "
-        "nanogpt. MoE has been broken this way since before nanoGPT existed. "
-        "Writing correct builders is real work (the transformer builder is ~410 "
-        "lines) and is tracked in DEFERRED_WORK.md. When it is fixed, DELETE "
-        "this xfail marker — strict=True makes the suite fail on an unexpected "
-        "pass, which is the reminder."
-    ),
-)
 def test_every_template_has_an_export_script_builder():
+    """Closed 2026-09-16: nanogpt and moe now reuse _char_lm_script."""
     missing = set(TEMPLATE_REGISTRY) - set(SCRIPT_BUILDERS)
     assert not missing, f"templates missing from SCRIPT_BUILDERS: {sorted(missing)}"

@@ -68,6 +68,66 @@ text = requests.get(url, timeout={settings.http_timeout}).text
 '''
 
 
+_MOE_CLASSES = '''
+# ── Experts ──
+class ExpertFeedForward(nn.Module):
+    """One expert. DeepSeek-style half-sized hidden dim (2*n_embd, not 4*)."""
+
+    def __init__(self, n_embd, hidden, dropout):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, hidden), nn.GELU(),
+            nn.Linear(hidden, n_embd), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class MoE(nn.Module):
+    """Top-K sparse mixture of experts with capacity-based token dropping.
+
+    NOTE: the lab's own MoE layer also returns a drop-rate diagnostic
+    alongside the output. This exported copy returns only the tensor, so it
+    can sit inside nn.Sequential like a dense FFN. The routing and capacity
+    maths is identical; only the metric is omitted.
+    """
+
+    def __init__(self, n_embd, dropout, num_experts, top_k, capacity_factor):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.capacity_factor = capacity_factor
+        self.experts = nn.ModuleList([
+            ExpertFeedForward(n_embd, 2 * n_embd, dropout)
+            for _ in range(num_experts)
+        ])
+        self.router = nn.Linear(n_embd, num_experts, bias=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        x_flat = x.reshape(B * T, C)
+        total_tokens = x_flat.shape[0]
+        capacity = int(total_tokens * self.top_k / self.num_experts * self.capacity_factor)
+
+        probs = torch.softmax(self.router(x_flat), dim=-1)
+        topk_weights, topk_indices = torch.topk(probs, k=self.top_k, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        output = torch.zeros_like(x_flat)
+        for expert_idx, expert in enumerate(self.experts):
+            token_idx, route_idx = torch.where(topk_indices == expert_idx)
+            if token_idx.numel() == 0:
+                continue
+            if token_idx.numel() > capacity:
+                token_idx = token_idx[:capacity]
+                route_idx = route_idx[:capacity]
+            expert_weight = topk_weights[token_idx, route_idx].unsqueeze(-1)
+            output.index_add_(0, token_idx, expert(x_flat[token_idx]) * expert_weight)
+        return output.view(B, T, C)
+
+'''
+
 # ── Optimizer / training-loop variants ──
 # Kept at module level (not inline in the builder) so _char_lm_script stays
 # readable. Selected by template in _char_lm_script.
@@ -159,10 +219,16 @@ def _char_lm_script(config: dict, template: str = "transformer") -> str:
     # gradient accumulation) keys off the TEMPLATE rather than off config
     # presence, so the exported script matches how the app trains it.
     is_nanogpt = template == "nanogpt"
+    is_moe = template == "moe"
     model_class = _MODEL_CLASS_NAMES[template]
     optimizer_code = _ADAMW_NANOGPT if is_nanogpt else _ADAMW_PLAIN
     train_loop = _LOOP_NANOGPT if is_nanogpt else _LOOP_PLAIN
     scaled_init = _SCALED_INIT_NANOGPT if is_nanogpt else ""
+    moe_classes = _MOE_CLASSES if is_moe else ""
+    block_ffn = (
+        "MoE(n_embd, dropout, NUM_EXPERTS, TOP_K, CAPACITY_FACTOR)"
+        if is_moe else "FeedForward(n_embd, dropout)"
+    )
     # Appended to the END of the lm_head line rather than emitted as their
     # own conditional lines: an empty conditional line would add a blank
     # line and break the byte-identical transformer golden.
@@ -219,6 +285,12 @@ WARMUP_ITERS = {t.get("warmup_iters", 200)}
 LR_DECAY_ITERS = {t.get("lr_decay_iters", t["max_iters"])}
 MIN_LR = {t.get("min_lr", t["learning_rate"] / 10)}
 GRAD_ACCUM_STEPS = {t.get("grad_accum_steps", 1)}
+'''
+
+    if is_moe:
+        script += f'''NUM_EXPERTS = {m.get("num_experts", 8)}
+TOP_K = {m.get("top_k", 2)}
+CAPACITY_FACTOR = {m.get("capacity_factor", 1.25)}
 '''
 
     script += '''
@@ -291,7 +363,7 @@ class MultiHeadSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2)
-{"        q = self.rope(q)\\n        k = self.rope(k)" if use_rope else ""}
+{"        q = self.rope(q)\n        k = self.rope(k)" if use_rope else ""}
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_size)
         scores = scores.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         att = self.attn_dropout(torch.softmax(scores, dim=-1))
@@ -310,7 +382,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
+{moe_classes}
 
 # ── Transformer Block ──
 class Block(nn.Module):
@@ -319,7 +391,7 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(n_embd)
         self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.ffn = FeedForward(n_embd, dropout)
+        self.ffn = {block_ffn}
 
     def forward(self, x):
         x = x + self.attn(self.ln1(x))
@@ -583,6 +655,7 @@ for _ in range(NUM_SAMPLES):
 SCRIPT_BUILDERS = {
     "transformer": partial(_char_lm_script, template="transformer"),
     "nanogpt": partial(_char_lm_script, template="nanogpt"),
+    "moe": partial(_char_lm_script, template="moe"),
     "rnn": _rnn_script,
 }
 

@@ -1,0 +1,263 @@
+"""Mixture-of-Experts LM — exported from LLM Experiments Lab.
+
+Config: Snapshot MoE
+Template: moe | Pos encoding: rope | Tokenizer: char
+"""
+
+import math
+import requests
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(1337)
+
+# ── Hyperparameters (from your experiment config) ──
+BLOCK_SIZE = 128
+N_EMBD = 192
+N_HEAD = 6
+N_LAYER = 4
+DROPOUT = 0.1
+POS_ENCODING = "rope"
+BATCH_SIZE = 64
+LEARNING_RATE = 0.0003
+MAX_ITERS = 3000
+EVAL_INTERVAL = 10
+EVAL_ITERS = 2
+GENERATE_TOKENS = 500
+TRAIN_VAL_SPLIT = 0.9
+NUM_EXPERTS = 8
+TOP_K = 2
+CAPACITY_FACTOR = 1.25
+
+
+# ── Data ──
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+text = requests.get(url, timeout=30).text
+chars = sorted(set(text))
+vocab_size = len(chars)
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for ch, i in stoi.items()}
+
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda ids: "".join(itos[int(i)] for i in ids)
+
+data = torch.tensor(encode(text), dtype=torch.long)
+n_train = int(TRAIN_VAL_SPLIT * len(data))
+train_data, val_data = data[:n_train], data[n_train:]
+
+
+def get_batch(split):
+    d = train_data if split == "train" else val_data
+    ix = torch.randint(len(d) - BLOCK_SIZE - 1, (BATCH_SIZE,))
+    x = torch.stack([d[i : i + BLOCK_SIZE] for i in ix])
+    y = torch.stack([d[i + 1 : i + 1 + BLOCK_SIZE] for i in ix])
+    return x.to(device), y.to(device)
+
+
+# ── RoPE ──
+class RotaryPositionalEncoding(nn.Module):
+    def __init__(self, head_size, block_size):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, head_size, 2).float() / head_size))
+        positions = torch.arange(block_size).float()
+        freqs = torch.einsum("i,j->ij", positions, inv_freq)
+        emb = torch.cat([freqs, freqs], dim=-1)
+        self.register_buffer("cos_cached", emb.cos())
+        self.register_buffer("sin_cached", emb.sin())
+
+    def forward(self, x):
+        T = x.shape[2]
+        cos = self.cos_cached[:T].unsqueeze(0).unsqueeze(0)
+        sin = self.sin_cached[:T].unsqueeze(0).unsqueeze(0)
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return x * cos + torch.cat([-x2, x1], dim=-1) * sin
+
+
+# ── Attention ──
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, n_embd, n_head, block_size, dropout):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.head_size = n_embd // n_head
+        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.out_proj = nn.Linear(n_embd, n_embd)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.rope = RotaryPositionalEncoding(self.head_size, block_size)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        q = self.rope(q)
+        k = self.rope(k)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_size)
+        scores = scores.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
+        att = self.attn_dropout(torch.softmax(scores, dim=-1))
+        y = torch.matmul(att, v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.out_proj(y))
+
+
+# ── Feed-forward ──
+class FeedForward(nn.Module):
+    def __init__(self, n_embd, dropout):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd), nn.GELU(),
+            nn.Linear(4 * n_embd, n_embd), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# ── Experts ──
+class ExpertFeedForward(nn.Module):
+    """One expert. DeepSeek-style half-sized hidden dim (2*n_embd, not 4*)."""
+
+    def __init__(self, n_embd, hidden, dropout):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, hidden), nn.GELU(),
+            nn.Linear(hidden, n_embd), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class MoE(nn.Module):
+    """Top-K sparse mixture of experts with capacity-based token dropping.
+
+    NOTE: the lab's own MoE layer also returns a drop-rate diagnostic
+    alongside the output. This exported copy returns only the tensor, so it
+    can sit inside nn.Sequential like a dense FFN. The routing and capacity
+    maths is identical; only the metric is omitted.
+    """
+
+    def __init__(self, n_embd, dropout, num_experts, top_k, capacity_factor):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.capacity_factor = capacity_factor
+        self.experts = nn.ModuleList([
+            ExpertFeedForward(n_embd, 2 * n_embd, dropout)
+            for _ in range(num_experts)
+        ])
+        self.router = nn.Linear(n_embd, num_experts, bias=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        x_flat = x.reshape(B * T, C)
+        total_tokens = x_flat.shape[0]
+        capacity = int(total_tokens * self.top_k / self.num_experts * self.capacity_factor)
+
+        probs = torch.softmax(self.router(x_flat), dim=-1)
+        topk_weights, topk_indices = torch.topk(probs, k=self.top_k, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        output = torch.zeros_like(x_flat)
+        for expert_idx, expert in enumerate(self.experts):
+            token_idx, route_idx = torch.where(topk_indices == expert_idx)
+            if token_idx.numel() == 0:
+                continue
+            if token_idx.numel() > capacity:
+                token_idx = token_idx[:capacity]
+                route_idx = route_idx[:capacity]
+            expert_weight = topk_weights[token_idx, route_idx].unsqueeze(-1)
+            output.index_add_(0, token_idx, expert(x_flat[token_idx]) * expert_weight)
+        return output.view(B, T, C)
+
+
+
+# ── Transformer Block ──
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head, block_size, dropout):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.attn = MultiHeadSelfAttention(n_embd, n_head, block_size, dropout)
+        self.ln2 = nn.LayerNorm(n_embd)
+        self.ffn = MoE(n_embd, dropout, NUM_EXPERTS, TOP_K, CAPACITY_FACTOR)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+
+# ── Full Model ──
+class MoELM(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block_size = BLOCK_SIZE
+        self.token_emb = nn.Embedding(vocab_size, N_EMBD)
+
+        self.blocks = nn.Sequential(
+            *[Block(N_EMBD, N_HEAD, BLOCK_SIZE, DROPOUT) for _ in range(N_LAYER)]
+        )
+        self.ln_f = nn.LayerNorm(N_EMBD)
+        self.lm_head = nn.Linear(N_EMBD, vocab_size)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        tok = self.token_emb(idx)
+        x = tok  # RoPE applied inside attention
+        x = self.blocks(x)
+        logits = self.lm_head(self.ln_f(x))
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1))
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        self.train(False)
+        for _ in range(max_new_tokens):
+            logits, _ = self(idx[:, -self.block_size:])
+            probs = F.softmax(logits[:, -1, :], dim=-1)
+            idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
+        return idx
+
+
+# ── Training ──
+model = MoELM().to(device)
+print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+
+@torch.no_grad()
+def estimate_loss():
+    model.train(False)
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(EVAL_ITERS)
+        for k in range(EVAL_ITERS):
+            x, y = get_batch(split)
+            _, loss = model(x, y)
+            losses[k] = loss.item()
+        out[split] = losses.mean().item()
+    model.train(True)
+    return out
+
+
+for it in range(MAX_ITERS + 1):
+    if it % EVAL_INTERVAL == 0:
+        losses = estimate_loss()
+        print(f"iter {it:5d} | train {losses['train']:.4f} | val {losses['val']:.4f}")
+    xb, yb = get_batch("train")
+    _, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+
+# ── Generate ──
+ctx = torch.zeros((1, 1), dtype=torch.long, device=device)
+print("\n--- Generated text ---")
+print(decode(model.generate(ctx, GENERATE_TOKENS)[0].tolist()))
