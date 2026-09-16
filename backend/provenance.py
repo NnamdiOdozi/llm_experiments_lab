@@ -30,6 +30,20 @@ _SKIP_PARTS = {"__pycache__", ".pytest_cache"}
 
 
 def _tracked_files() -> list[Path]:
+    """Real .py files under the tracked dirs, symlinks deliberately excluded.
+
+    backend/training/templates/moe/data.py is a symlink to an ABSOLUTE host
+    path, so it dangles inside the container (repo is at /app there). Reading
+    it raised FileNotFoundError, which would have crashed /api/health in the
+    trainer — the very endpoint the staleness check calls. Caught 2026-09-16 by
+    running the fingerprint inside the freshly pushed image.
+
+    Skipping (rather than tolerating) symlinks is what keeps the controller and
+    the container in agreement: following the link works on the host and fails
+    in the container, which would flag every image as stale forever. Nothing is
+    lost — the link's target lives under the same tracked tree and is hashed in
+    its own right.
+    """
     files: list[Path] = []
     for name in _TRACKED_DIRS:
         base = _ROOT / name
@@ -37,6 +51,8 @@ def _tracked_files() -> list[Path]:
             continue
         for path in base.rglob("*.py"):
             if _SKIP_PARTS & set(path.parts):
+                continue
+            if path.is_symlink() or not path.is_file():
                 continue
             files.append(path)
     return sorted(files)

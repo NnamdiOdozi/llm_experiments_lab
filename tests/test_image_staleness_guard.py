@@ -92,3 +92,18 @@ async def test_unreachable_health_warns_but_does_not_raise(monkeypatch, caplog):
         await training_api._warn_if_image_is_stale("http://endpoint", 9)   # must not raise
     assert any("Could not read remote source fingerprint" in r.getMessage()
                for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_fingerprint_skips_symlinks_so_host_and_container_agree():
+    """backend/training/templates/moe/data.py is a symlink to an ABSOLUTE host
+    path, so it dangles inside the trainer container. Reading it raised
+    FileNotFoundError and would have crashed /api/health in the trainer.
+    Following symlinks would also make the two sides disagree forever, flagging
+    every image as stale. Both sides must skip them."""
+    from backend import provenance
+
+    tracked = provenance._tracked_files()
+    assert tracked, "fingerprint tracks no files at all"
+    assert not [p for p in tracked if p.is_symlink()], "symlinks must be excluded"
+    # and it must not raise on this repo, which contains exactly such a symlink
+    assert provenance.source_fingerprint()

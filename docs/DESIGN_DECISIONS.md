@@ -4340,6 +4340,40 @@ and the bias=True/False inconsistency between his own model.py and train.py.
 
 Gradient clipping is a genuine gap, not a preference — tracked in DEFERRED_WORK.md.
 
+## §94: Changing backend/training/ requires an image rebuild — now detected (2026-09-16)
+
+**The trap.** `Dockerfile.trainer-cpu/-gpu` do `COPY backend ./backend` and
+`COPY config ./config`. So the trainer container on Nebius runs its **own copy**
+of the app. Editing `backend/training/train_worker.py` and restarting the local
+controller changes nothing about how a remote run trains.
+
+**Why that is worse than it sounds.** It does not error. The controller POSTs
+the experiment config to the endpoint; an older container simply ignores keys
+its code predates. Gradient clipping (§ added 2026-09-16, `grad_clip`) would
+have been skipped exactly this way: the key travels, nothing reads it, the run
+trains, the loss falls, the UI is perfect, and the model is unclipped. Caught
+only because the user asked "did you rebuild the images?".
+
+**A second condition that is easy to miss.** An experiment's `config_json` is
+frozen when the experiment is created. Experiment 247 predates the `grad_clip`
+preset edit, so its config has no such key — a rebuilt image alone would still
+not clip that experiment. Clipping needs BOTH a current image AND an experiment
+created after the preset change.
+
+**The guard.** `backend/provenance.py::source_fingerprint()` content-hashes the
+Python sources the Dockerfiles ship. Both sides compute it from their own files
+— deliberately NOT a build argument, which could drift from what was actually
+baked in. `/api/health` returns it; `_start_remote_run` compares before
+mirroring the experiment and logs `STALE TRAINER IMAGE` with both fingerprints
+and the script to run.
+
+It warns, never blocks — a failed health probe must not stop someone training.
+It is also deliberately eager: it covers all of `backend/` and `config/`, so an
+unrelated comment change trips it. Better a false alarm than a missed one.
+
+**Rebuild with:** `scripts/build_push_trainer_gpu.sh` (or `..._cpu.sh`, or
+`build_push_all_trainers.sh`). Tags the short git SHA and `latest`.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.
