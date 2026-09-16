@@ -16,6 +16,7 @@ from backend.api.chatbot import router as chatbot_router
 from backend.api.nebius import router as nebius_router
 from backend.logging_config import setup_logging, request_log, error_log, session_log
 from backend.nebius import idle_monitor
+from backend.provenance import source_fingerprint
 from backend.training.runner import shutdown_all_workers
 from config.settings import settings
 
@@ -82,4 +83,7 @@ app.include_router(nebius_router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    # source_fingerprint lets the controller detect a trainer image built from
+    # older code — otherwise a stale image silently ignores new config keys.
+    # See backend/provenance.py.
+    return {"status": "ok", "source_fingerprint": source_fingerprint()}

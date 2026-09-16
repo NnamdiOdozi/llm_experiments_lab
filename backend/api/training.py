@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend import db
+from backend.provenance import source_fingerprint
 from backend.logging_config import training_log, prompt_log
 from backend.nebius import worker_manager
 from backend.training.runner import (
@@ -195,6 +196,47 @@ async def _touch_worker_for_run(db_run: dict) -> None:
     await db.touch_worker_session(session_id)
 
 
+async def _warn_if_image_is_stale(endpoint_url: str, run_id: int) -> None:
+    """Log loudly when the trainer image was built from different source.
+
+    A stale image does not error — it silently ignores config keys its code
+    predates, so the run looks completely normal while behaving differently
+    (this is exactly how gradient clipping would have been quietly skipped;
+    see backend/provenance.py). Best effort only: never blocks the run, and a
+    health call that fails is not itself a reason to refuse to train.
+    """
+    local = source_fingerprint()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{endpoint_url}/api/health")
+            resp.raise_for_status()
+            remote = resp.json().get("source_fingerprint")
+    except Exception as exc:
+        training_log.warning(
+            "Could not read remote source fingerprint — run_id=%d endpoint=%s: %s",
+            run_id, endpoint_url, exc,
+        )
+        return
+
+    if remote is None:
+        training_log.warning(
+            "STALE TRAINER IMAGE — run_id=%d: endpoint reports no source_fingerprint, "
+            "so it predates this check entirely. Rebuild and push: "
+            "scripts/build_push_trainer_gpu.sh", run_id,
+        )
+    elif remote != local:
+        training_log.warning(
+            "STALE TRAINER IMAGE — run_id=%d: controller source=%s but endpoint source=%s. "
+            "The container runs its own copy of backend/ and config/, so new config keys "
+            "(e.g. grad_clip) are SILENTLY IGNORED until the image is rebuilt and pushed: "
+            "scripts/build_push_trainer_gpu.sh", run_id, local, remote,
+        )
+    else:
+        training_log.info(
+            "Trainer image source matches controller — run_id=%d source=%s", run_id, local,
+        )
+
+
 async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str = "h100") -> None:
     """Mirror the experiment onto the CPU/GPU endpoint and start training there.
 
@@ -259,6 +301,7 @@ async def _start_remote_run(run_id: int, exp: dict, device: str, gpu_flavor: str
             return
 
         endpoint_url = worker["endpoint_url"]
+        await _warn_if_image_is_stale(endpoint_url, run_id)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 exp_resp = await client.request(
