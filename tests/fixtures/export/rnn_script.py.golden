@@ -1,0 +1,176 @@
+"""CharRNN Language Model — exported from LLM Experiments Lab.
+
+Config: Snapshot RNN
+Template: rnn (LSTM)
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(1337)
+
+# ── Hyperparameters (from your experiment config) ──
+N_HIDDEN = 256
+N_LAYERS = 2
+DROPOUT = 0.2
+BATCH_SIZE = 64
+LEARNING_RATE = 0.001
+EPOCHS = 20
+SEQ_LEN = 50
+CLIP = 5
+TRAIN_VAL_SPLIT = 0.8
+MAX_NEW_TOKENS = 200
+NUM_SAMPLES = 10
+
+
+# ── Data ──
+# Download dinos.txt from: https://drive.google.com/uc?id=1SzD-jBAyLuakrbR4nprQoU01LrjrkOZk
+DATA_PATH = "dinos.txt"
+
+
+def one_hot_encode(array, vocab_size):
+    if torch.is_tensor(array):
+        array = array.cpu().numpy()
+    return np.eye(vocab_size, dtype=np.float32)[array]
+
+
+class DinosDataset(torch.utils.data.Dataset):
+    def __init__(self, data_path, seq_len):
+        self.seq_len = seq_len
+        with open(data_path, "r", encoding="utf-8") as f:
+            names = [line.strip().lower() for line in f if line.strip()]
+        all_text = "".join(f"<{name}>" for name in names)
+        self.vocab = sorted(set(all_text))
+        self.vocab_size = len(self.vocab)
+        self.id_to_token = {i: ch for i, ch in enumerate(self.vocab)}
+        self.token_to_id = {ch: i for i, ch in enumerate(self.vocab)}
+        self.corpus = []
+        for name in names:
+            self.corpus.extend([self.token_to_id[ch] for ch in f"<{name}>"])
+
+    def __len__(self):
+        return (len(self.corpus) - 1) // self.seq_len
+
+    def __getitem__(self, index):
+        s = index * self.seq_len
+        return (
+            torch.tensor(self.corpus[s : s + self.seq_len], dtype=torch.long),
+            torch.tensor(self.corpus[s + 1 : s + self.seq_len + 1], dtype=torch.long),
+        )
+
+
+dataset = DinosDataset(DATA_PATH, SEQ_LEN)
+vocab_size = dataset.vocab_size
+n_total = len(dataset)
+n_train = int(TRAIN_VAL_SPLIT * n_total)
+train_loader = torch.utils.data.DataLoader(
+    torch.utils.data.Subset(dataset, range(n_train)),
+    batch_size=BATCH_SIZE, shuffle=True, drop_last=True,
+)
+val_loader = torch.utils.data.DataLoader(
+    torch.utils.data.Subset(dataset, range(n_train, n_total)),
+    batch_size=BATCH_SIZE, shuffle=False, drop_last=True,
+)
+
+
+# ── Model ──
+class CharRNN(nn.Module):
+    def __init__(self, vocab_size, n_hidden, n_layers, drop_prob):
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_hidden = n_hidden
+        self.vocab_size = vocab_size
+        self.lstm = nn.LSTM(vocab_size, n_hidden, n_layers,
+                            dropout=drop_prob, batch_size=True)
+        self.dropout = nn.Dropout(drop_prob)
+        self.fc = nn.Linear(n_hidden, vocab_size)
+
+    def forward(self, x, hc):
+        x, (h, c) = self.lstm(x, hc)
+        x = self.dropout(x)
+        x = x.contiguous().view(x.size(0) * x.size(1), self.n_hidden)
+        x = self.fc(x)
+        return x, (h, c)
+
+    def init_hidden(self, batch_size, device):
+        weight = next(self.parameters()).data
+        return (
+            weight.new(self.n_layers, batch_size, self.n_hidden).zero_().to(device),
+            weight.new(self.n_layers, batch_size, self.n_hidden).zero_().to(device),
+        )
+
+
+model = CharRNN(vocab_size, N_HIDDEN, N_LAYERS, DROPOUT).to(device)
+print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+criterion = nn.CrossEntropyLoss().to(device)
+
+
+# ── Training ──
+for epoch in range(EPOCHS):
+    h = model.init_hidden(BATCH_SIZE, device)
+    epoch_loss = 0
+    n_batches = 0
+
+    for x, targets in train_loader:
+        x_enc = one_hot_encode(x, vocab_size)
+        inputs = torch.from_numpy(x_enc).to(device)
+        targets = targets.to(device)
+        h = tuple(each.data for each in h)
+
+        model.zero_grad()
+        output, h = model(inputs, h)
+        loss = criterion(output, targets.view(BATCH_SIZE * SEQ_LEN))
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+        optimizer.step()
+        epoch_loss += loss.item()
+        n_batches += 1
+
+    # Validation
+    model.train(False)
+    val_h = model.init_hidden(BATCH_SIZE, device)
+    val_losses = []
+    for vx, vy in val_loader:
+        vx_enc = one_hot_encode(vx, vocab_size)
+        vx_t = torch.from_numpy(vx_enc).to(device)
+        vy = vy.to(device)
+        val_h = tuple(each.data for each in val_h)
+        vout, val_h = model(vx_t, val_h)
+        val_losses.append(criterion(vout, vy.view(BATCH_SIZE * SEQ_LEN)).item())
+    model.train(True)
+
+    print(f"Epoch {epoch+1}/{EPOCHS} | train {epoch_loss/n_batches:.4f} | val {np.mean(val_losses):.4f}")
+
+
+# ── Generate ──
+def sample(prefix="<", size=MAX_NEW_TOKENS):
+    model.train(False)
+    chars = list(prefix)
+    h = model.init_hidden(1, device)
+    for ch in prefix[:-1]:
+        x = np.array([[dataset.token_to_id[ch]]])
+        inp = torch.from_numpy(one_hot_encode(x, vocab_size)).float().to(device)
+        with torch.no_grad():
+            _, h = model(inp, h)
+    last = prefix[-1]
+    for _ in range(size):
+        x = np.array([[dataset.token_to_id[last]]])
+        inp = torch.from_numpy(one_hot_encode(x, vocab_size)).float().to(device)
+        h = tuple(each.data for each in h)
+        with torch.no_grad():
+            out, h = model(inp, h)
+            p = F.softmax(out, dim=1).cpu().numpy().squeeze()
+        nxt = dataset.id_to_token[np.random.choice(len(dataset.id_to_token), p=p / p.sum())]
+        chars.append(nxt)
+        last = nxt
+        if nxt == ">":
+            break
+    return "".join(chars)
+
+print("\n--- Generated names ---")
+for _ in range(NUM_SAMPLES):
+    print(sample())

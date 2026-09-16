@@ -1,0 +1,20 @@
+{
+  "name": "Snapshot RNN",
+  "template": "rnn",
+  "model": {
+    "hidden_size": 256,
+    "n_layers": 2,
+    "dropout": 0.2
+  },
+  "training": {
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "epochs": 20,
+    "seq_len": 50,
+    "clip": 5
+  },
+  "data": {
+    "dataset": "dinos",
+    "tokenizer": "char"
+  }
+}

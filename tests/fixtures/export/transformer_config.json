@@ -1,0 +1,23 @@
+{
+  "name": "Snapshot Transformer",
+  "template": "transformer",
+  "model": {
+    "block_size": 128,
+    "n_embd": 192,
+    "n_head": 6,
+    "n_layer": 4,
+    "dropout": 0.1,
+    "pos_encoding": "learned"
+  },
+  "training": {
+    "batch_size": 32,
+    "learning_rate": 0.003,
+    "max_iters": 2000,
+    "eval_interval": 100,
+    "eval_iters": 20
+  },
+  "data": {
+    "dataset": "tiny_shakespeare",
+    "tokenizer": "char"
+  }
+}
