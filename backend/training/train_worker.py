@@ -430,6 +430,11 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
     # micro-batches are forward/backward'd with gradients summed before a
     # single optimizer step, matching nanoGPT's gradient_accumulation_steps.
     accum_steps = max(1, train_cfg.get("grad_accum_steps", 1))
+    # Karpathy clips at 1.0 between backward and step; we did not, so nanoGPT
+    # trained unclipped (one bad batch could spike a 124M-param run into
+    # garbage). Config-driven: 0/absent means no clipping, so templates that
+    # do not set grad_clip are unchanged. See docs/NANOGPT_VS_KARPATHY.md §3.
+    grad_clip = train_cfg.get("grad_clip", 0.0)
     lr = train_cfg["learning_rate"]
 
     torch.manual_seed(settings.random_seed)
@@ -464,6 +469,8 @@ def _train_char_lm(ws: WorkerState, template_key: str, eval_fn, build_metric_row
             # Scale by accum_steps so summed gradients equal the mean loss
             # across micro-batches (nanoGPT does the same).
             (loss / accum_steps).backward()
+        if grad_clip:
+            nn.utils.clip_grad_norm_(ws.model.parameters(), grad_clip)
         ws.optimizer.step()
         ws.yield_gpu(step)
         ws.maybe_update_progress()

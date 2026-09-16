@@ -157,6 +157,8 @@ NANOGPT_CONFIG = {
         "lr_decay_iters": 3000,
         "min_lr": 3e-5,
         "grad_accum_steps": 5,
+        # Karpathy's train.py default; applied between backward and step.
+        "grad_clip": 1.0,
         "max_iters": 3000,
         "eval_interval": 10,
         "eval_iters": 2,
