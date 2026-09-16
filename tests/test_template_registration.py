@@ -38,3 +38,31 @@ def test_every_template_has_an_export_script_builder():
     """Closed 2026-09-16: nanogpt and moe now reuse _char_lm_script."""
     missing = set(TEMPLATE_REGISTRY) - set(SCRIPT_BUILDERS)
     assert not missing, f"templates missing from SCRIPT_BUILDERS: {sorted(missing)}"
+
+
+def test_templates_without_their_own_data_py_borrow_the_transformer_s():
+    """transformer / moe / nanogpt share one data pipeline; only the model differs.
+
+    moe used to fake its own data.py with a symlink to the transformer's. That
+    symlink used an ABSOLUTE host path, so it dangled inside the trainer
+    container, and it implied moe had a loader of its own. Removed 2026-09-16;
+    the code panel now borrows the transformer's copy and labels it '(shared)'
+    so nobody mistakes it for the template's own file.
+    """
+    from backend.api.codegen import SHARED_SOURCE_TEMPLATE, TEMPLATE_DIRS, TEMPLATE_FILES
+
+    shared_dir = TEMPLATE_DIRS[SHARED_SOURCE_TEMPLATE]
+    for filename in TEMPLATE_FILES:
+        assert (shared_dir / filename).exists(), (
+            f"{SHARED_SOURCE_TEMPLATE} must carry {filename} — it is the fallback "
+            "every other template borrows from"
+        )
+
+    # no template may reintroduce a symlink to dodge this
+    for key, path in TEMPLATE_DIRS.items():
+        for filename in TEMPLATE_FILES:
+            candidate = path / filename
+            assert not candidate.is_symlink(), (
+                f"{key}/{filename} is a symlink — these dangle inside the trainer "
+                "container (absolute host paths). Use the shared-source fallback."
+            )

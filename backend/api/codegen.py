@@ -25,6 +25,14 @@ TEMPLATE_DIRS = {
 
 TEMPLATE_FILES = ["model.py", "data.py"]
 
+# transformer / moe / nanogpt all train on the SAME data pipeline — only the
+# model differs. moe used to fake its own data.py with a symlink to the
+# transformer's, which dangled inside the trainer container (absolute host
+# path) and told users moe had its own loader when it does not. Symlink
+# removed 2026-09-16; templates without their own copy of a file now borrow
+# the transformer's, labelled so nobody mistakes it for theirs.
+SHARED_SOURCE_TEMPLATE = "transformer"
+
 BACKEND_ROOT = Path(__file__).parent.parent
 PROJECT_ROOT = BACKEND_ROOT.parent
 
@@ -63,10 +71,15 @@ async def get_template_code(experiment_id: int):
         raise HTTPException(404, f"Template '{template_key}' not found")
 
     files = {}
+    shared_dir = TEMPLATE_DIRS[SHARED_SOURCE_TEMPLATE]
     for filename in TEMPLATE_FILES:
         filepath = template_dir / filename
         if filepath.exists():
             files[filename] = filepath.read_text()
+            continue
+        shared = shared_dir / filename
+        if template_key != SHARED_SOURCE_TEMPLATE and shared.exists():
+            files[f"{filename} (shared)"] = shared.read_text()
 
     for label, filepath in SHARED_FILES.items():
         if filepath.exists():
