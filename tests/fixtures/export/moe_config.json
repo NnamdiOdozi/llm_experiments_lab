@@ -1,5 +1,5 @@
 {
-  "name": "Snapshot MoE",
+  "name": "Snapshot moe",
   "description": "4-layer MoE transformer with 8 half-sized experts, top-2 routing, RoPE.",
   "template": "moe",
   "model": {

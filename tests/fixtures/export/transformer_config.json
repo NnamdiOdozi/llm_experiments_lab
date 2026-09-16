@@ -19,5 +19,9 @@
   "data": {
     "dataset": "tiny_shakespeare",
     "tokenizer": "char"
+  },
+  "inference": {
+    "max_new_tokens": 100,
+    "temperature": 0.8
   }
 }

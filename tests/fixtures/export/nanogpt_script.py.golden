@@ -1,6 +1,6 @@
 """nanoGPT (GPT-2 mini) — exported from LLM Experiments Lab.
 
-Config: Snapshot nanoGPT
+Config: Snapshot nanogpt
 Template: nanogpt | Pos encoding: learned | Tokenizer: gpt2
 """
 
@@ -27,7 +27,8 @@ LEARNING_RATE = 0.0003
 MAX_ITERS = 3000
 EVAL_INTERVAL = 10
 EVAL_ITERS = 2
-GENERATE_TOKENS = 500
+GENERATE_TOKENS = 100
+TEMPERATURE = 0.8
 TRAIN_VAL_SPLIT = 0.9
 WEIGHT_DECAY = 0.1
 BETAS = (0.9, 0.95)
@@ -35,6 +36,7 @@ WARMUP_ITERS = 200
 LR_DECAY_ITERS = 3000
 MIN_LR = 3e-05
 GRAD_ACCUM_STEPS = 5
+GRAD_CLIP = 1.0
 
 
 # ── Data ──
@@ -136,9 +138,19 @@ class NanoGPT(nn.Module):
         self.lm_head = nn.Linear(N_EMBD, vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight  # weight tying
 
+        _scaled = 0
         for _n, _p in self.named_parameters():
             if _n.endswith("out_proj.weight") or _n.endswith("net.2.weight"):
                 nn.init.normal_(_p, mean=0.0, std=0.02 / math.sqrt(2 * N_LAYER))
+                _scaled += 1
+        # Two residual projections per layer: attention out_proj + FeedForward
+        # net.2. 'net.2' is positional inside nn.Sequential, so reordering that
+        # Sequential would silently skip the scaled init. Fail loudly instead.
+        if _scaled != 2 * N_LAYER:
+            raise RuntimeError(
+                f"scaled init matched {_scaled} projections, expected {2 * N_LAYER} — "
+                "did FeedForward's nn.Sequential order change?"
+            )
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -152,11 +164,12 @@ class NanoGPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, max_new_tokens, temperature=TEMPERATURE):
         self.train(False)
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.block_size:])
-            probs = F.softmax(logits[:, -1, :], dim=-1)
+            # temperature < 1 sharpens the distribution, > 1 flattens it.
+            probs = F.softmax(logits[:, -1, :] / temperature, dim=-1)
             idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
         return idx
 
@@ -213,6 +226,8 @@ for it in range(MAX_ITERS + 1):
         xb, yb = get_batch("train")
         _, loss = model(xb, yb)
         (loss / GRAD_ACCUM_STEPS).backward()
+    if GRAD_CLIP:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
     optimizer.step()
 
 

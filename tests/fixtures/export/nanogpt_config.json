@@ -1,5 +1,5 @@
 {
-  "name": "Snapshot nanoGPT",
+  "name": "Snapshot nanogpt",
   "description": "GPT-2 style nanoGPT, ~124M params (vs 1.8M baseline). Real GPT-2 BPE tokenizer instead of character-level. Token embeddings reused as the LM head (weight tying).",
   "template": "nanogpt",
   "model": {
@@ -26,6 +26,7 @@
     "lr_decay_iters": 3000,
     "min_lr": 3e-05,
     "grad_accum_steps": 5,
+    "grad_clip": 1.0,
     "max_iters": 3000,
     "eval_interval": 10,
     "eval_iters": 2,

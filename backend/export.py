@@ -179,15 +179,27 @@ _LOOP_NANOGPT = '''for it in range(MAX_ITERS + 1):
         xb, yb = get_batch("train")
         _, loss = model(xb, yb)
         (loss / GRAD_ACCUM_STEPS).backward()
+    if GRAD_CLIP:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
     optimizer.step()'''
 
 # GPT-2 scaled init on residual projections: out_proj is attention's residual
 # projection, net.2 is FeedForward's second Linear.
 _SCALED_INIT_NANOGPT = '''
 
+        _scaled = 0
         for _n, _p in self.named_parameters():
             if _n.endswith("out_proj.weight") or _n.endswith("net.2.weight"):
-                nn.init.normal_(_p, mean=0.0, std=0.02 / math.sqrt(2 * N_LAYER))'''
+                nn.init.normal_(_p, mean=0.0, std=0.02 / math.sqrt(2 * N_LAYER))
+                _scaled += 1
+        # Two residual projections per layer: attention out_proj + FeedForward
+        # net.2. 'net.2' is positional inside nn.Sequential, so reordering that
+        # Sequential would silently skip the scaled init. Fail loudly instead.
+        if _scaled != 2 * N_LAYER:
+            raise RuntimeError(
+                f"scaled init matched {_scaled} projections, expected {2 * N_LAYER} — "
+                "did FeedForward's nn.Sequential order change?"
+            )'''
 
 # transformer / nanogpt / moe are all char-level LMs built from the same
 # attention blocks, so ONE builder serves all three and each contributes only
@@ -237,6 +249,7 @@ def _char_lm_script(config: dict, template: str = "transformer") -> str:
         if tie_weights else ""
     )
 
+    inf = config.get("inference", {})
     tokenizer_type = _get_tokenizer_type(config)
     artifact_path = _get_tokenizer_artifact_path(config)
 
@@ -273,7 +286,8 @@ LEARNING_RATE = {t["learning_rate"]}
 MAX_ITERS = {t["max_iters"]}
 EVAL_INTERVAL = {t["eval_interval"]}
 EVAL_ITERS = {t.get("eval_iters", 200)}
-GENERATE_TOKENS = 500
+GENERATE_TOKENS = {inf.get("max_new_tokens", 500)}
+TEMPERATURE = {inf.get("temperature", 1.0)}
 TRAIN_VAL_SPLIT = 0.9
 '''
 
@@ -285,6 +299,7 @@ WARMUP_ITERS = {t.get("warmup_iters", 200)}
 LR_DECAY_ITERS = {t.get("lr_decay_iters", t["max_iters"])}
 MIN_LR = {t.get("min_lr", t["learning_rate"] / 10)}
 GRAD_ACCUM_STEPS = {t.get("grad_accum_steps", 1)}
+GRAD_CLIP = {t.get("grad_clip", 0.0)}
 '''
 
     if is_moe:
@@ -424,11 +439,12 @@ class {model_class}(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, max_new_tokens, temperature=TEMPERATURE):
         self.train(False)
         for _ in range(max_new_tokens):
             logits, _ = self(idx[:, -self.block_size:])
-            probs = F.softmax(logits[:, -1, :], dim=-1)
+            # temperature < 1 sharpens the distribution, > 1 flattens it.
+            probs = F.softmax(logits[:, -1, :] / temperature, dim=-1)
             idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
         return idx
 

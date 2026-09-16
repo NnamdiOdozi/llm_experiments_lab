@@ -35,7 +35,18 @@ SHARED_FILES = {
 }
 
 
-async def _get_config(experiment_id: int) -> dict:
+async def _get_config(experiment_id: int, run_id: int | None = None) -> dict:
+    """Config to export.
+
+    Prefer the RUN's config_snapshot when we have one: that is what actually
+    trained. The experiment's own config may have been edited since the run, so
+    exporting it would hand the user a script that does not reproduce their run.
+    Falls back to the experiment config for a never-run experiment.
+    """
+    if run_id is not None:
+        run = await db.get_training_run(run_id)
+        if run and run.get("config_snapshot"):
+            return json.loads(run["config_snapshot"])
     exp = await db.get_experiment(experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
@@ -65,9 +76,9 @@ async def get_template_code(experiment_id: int):
 
 
 @router.get("/{experiment_id}/export.py")
-async def export_script(experiment_id: int):
+async def export_script(experiment_id: int, run_id: int | None = None):
     """Download standalone .py training script with config baked in."""
-    config = await _get_config(experiment_id)
+    config = await _get_config(experiment_id, run_id)
     script = build_script(config)
     return PlainTextResponse(
         script,
@@ -77,9 +88,9 @@ async def export_script(experiment_id: int):
 
 
 @router.get("/{experiment_id}/export.ipynb")
-async def export_notebook(experiment_id: int):
+async def export_notebook(experiment_id: int, run_id: int | None = None):
     """Download .ipynb notebook with config baked in."""
-    config = await _get_config(experiment_id)
+    config = await _get_config(experiment_id, run_id)
     notebook_json = build_notebook(config)
     return PlainTextResponse(
         notebook_json,
@@ -97,7 +108,8 @@ async def export_bundle(experiment_id: int, run_id: int | None = None):
     exp = await db.get_experiment(experiment_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
-    config = json.loads(exp["config_json"])
+    # Same rule as the .py/.ipynb endpoints: the run's snapshot wins when given.
+    config = await _get_config(experiment_id, run_id)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
