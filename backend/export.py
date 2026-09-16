@@ -4,8 +4,10 @@ Assembles pre-written template code with user's config values baked in.
 """
 
 import json
-import nbformat
+from functools import partial
 from pathlib import Path
+
+import nbformat
 
 from backend.training.templates.transformer.model import (
     MultiHeadSelfAttention,
@@ -66,8 +68,18 @@ text = requests.get(url, timeout={settings.http_timeout}).text
 '''
 
 
-def _transformer_script(config: dict) -> str:
-    """Assemble standalone transformer training script with config baked in."""
+# transformer / nanogpt / moe are all char-level LMs built from the same
+# attention blocks, so ONE builder serves all three and each contributes only
+# its differences (see _char_lm_script). Only the RNN needs its own builder.
+_SCRIPT_TITLES = {
+    "transformer": "Tiny Transformer LM",
+    "nanogpt": "nanoGPT (GPT-2 mini)",
+    "moe": "Mixture-of-Experts LM",
+}
+
+
+def _char_lm_script(config: dict, template: str = "transformer") -> str:
+    """Assemble a standalone char-LM training script with config baked in."""
     m = config["model"]
     t = config["training"]
     pos = m.get("pos_encoding", "learned")
@@ -76,10 +88,10 @@ def _transformer_script(config: dict) -> str:
     tokenizer_type = _get_tokenizer_type(config)
     artifact_path = _get_tokenizer_artifact_path(config)
 
-    script = f'''"""Tiny Transformer LM — exported from LLM Experiments Lab.
+    script = f'''"""{_SCRIPT_TITLES[template]} — exported from LLM Experiments Lab.
 
 Config: {config.get("name", "custom experiment")}
-Template: transformer | Pos encoding: {pos} | Tokenizer: {tokenizer_type}
+Template: {template} | Pos encoding: {pos} | Tokenizer: {tokenizer_type}
 """
 
 import math
@@ -479,7 +491,7 @@ for _ in range(NUM_SAMPLES):
 # ── Script dispatcher ──
 
 SCRIPT_BUILDERS = {
-    "transformer": _transformer_script,
+    "transformer": partial(_char_lm_script, template="transformer"),
     "rnn": _rnn_script,
 }
 
