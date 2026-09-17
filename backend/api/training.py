@@ -161,7 +161,35 @@ async def _remote_endpoint_url(db_run: dict) -> str | None:
     return worker["endpoint_url"] if worker else None
 
 
-async def _proxy(db_run: dict, method: str, path: str, json_body: dict | None = None) -> dict:
+def _exc_text(exc: Exception) -> str:
+    """Human-readable text for an exception whose str() may be empty.
+
+    httpx timeout exceptions carry no message, so f"...failed: {exc}" rendered
+    as a bare "Remote resume failed:" in the UI banner — a red box telling the
+    user nothing. Fall back to the class name. See docs/DESIGN_DECISIONS.md.
+    """
+    return str(exc) or type(exc).__name__
+
+
+def _timeout_for(remote_path: str) -> int:
+    """Pick a call budget from what the call actually does.
+
+    A single flat 30s covered everything until 2026-09-17. That is too long
+    for a status poll — a dead worker should surface in seconds, not block the
+    UI for half a minute — and too short for control calls on a large model,
+    where resume loads a ~0.5GB checkpoint. See docs/DESIGN_DECISIONS.md.
+    """
+    if remote_path.endswith(("/status", "/metrics")):
+        return settings.remote_poll_timeout_seconds
+    if remote_path.endswith(("/pause", "/resume", "/stop", "/start")):
+        return settings.remote_control_timeout_seconds
+    return settings.remote_artifact_timeout_seconds
+
+
+async def _proxy(
+    db_run: dict, method: str, path: str, json_body: dict | None = None,
+    timeout: int | None = None,
+) -> dict:
     """Forward a training-control call to the remote endpoint, using its own
     remote_run_id — the frontend never sees that id, only the local run_id.
     """
@@ -169,7 +197,8 @@ async def _proxy(db_run: dict, method: str, path: str, json_body: dict | None = 
     if endpoint_url is None:
         raise HTTPException(502, "Remote worker endpoint not available")
     remote_path = path.format(run_id=db_run["remote_run_id"])
-    async with httpx.AsyncClient(timeout=30) as client:
+    budget = timeout if timeout is not None else _timeout_for(remote_path)
+    async with httpx.AsyncClient(timeout=budget) as client:
         resp = await client.request(method, f"{endpoint_url}{remote_path}", json=json_body)
     resp.raise_for_status()
     return resp.json()
@@ -481,7 +510,7 @@ async def pause_training(run_id: int):
         try:
             await _proxy(db_run, "POST", "/api/training/{run_id}/pause")
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote pause failed: {exc}")
+            raise HTTPException(502, f"Remote pause failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         training_log.info("PAUSE requested (remote) run_id=%d", run_id)
         return {"run_id": run_id, "status": "pausing"}
@@ -501,7 +530,7 @@ async def resume_training(run_id: int):
             # (see updated_config below), remote resume doesn't yet.
             await _proxy(db_run, "POST", "/api/training/{run_id}/resume")
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote resume failed: {exc}")
+            raise HTTPException(502, f"Remote resume failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         training_log.info("RESUME (remote) run_id=%d", run_id)
         return {"run_id": run_id, "status": RunStatus.RESUMING}
@@ -593,7 +622,7 @@ async def prompt_model(run_id: int, req: PromptRequest):
                 {"prompt": req.prompt, "max_new_tokens": req.max_new_tokens},
             )
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote prompt failed: {exc}")
+            raise HTTPException(502, f"Remote prompt failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         output = result.get("output")
         prompt_log.info(
@@ -638,7 +667,7 @@ async def run_status(run_id: int):
         try:
             result = await _proxy(db_run, "GET", "/api/training/{run_id}/status")
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote status fetch failed: {exc}")
+            raise HTTPException(502, f"Remote status fetch failed: {_exc_text(exc)}")
         result["run_id"] = run_id  # never leak the endpoint's own remote run_id
         # The endpoint's own status.json thinks it's "local" from its own
         # perspective (it's a local subprocess to that container) — from the
@@ -754,7 +783,7 @@ async def get_metrics(run_id: int):
                     "Remote metrics proxy failed, serving persisted fallback — run_id=%d: %s", run_id, exc,
                 )
                 return fallback
-            raise HTTPException(502, f"Remote metrics fetch failed: {exc}")
+            raise HTTPException(502, f"Remote metrics fetch failed: {_exc_text(exc)}")
         if metrics:
             # Mirrors what train_worker.py::write_metric() does for local
             # runs — without this, train_loss_history on the local row stays
@@ -1185,7 +1214,7 @@ async def get_embedding_table(run_id: int):
             result = await _proxy(db_run, "GET", "/api/training/{run_id}/architecture/embedding-table")
             return result
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote embedding table fetch failed: {exc}")
+            raise HTTPException(502, f"Remote embedding table fetch failed: {_exc_text(exc)}")
 
     rd = artifacts.run_dir(run_id)
     config_path = rd / "config.json"
@@ -1238,13 +1267,27 @@ async def get_embedding_table(run_id: int):
             block_size = pos_weight.shape[0]
             position_embedding = pos_weight.tolist()
 
+        # Cap rows before .tolist()/decode: both cost scale with vocab_size,
+        # and at nanoGPT's 50,304 the full payload is ~813MB of JSON, which
+        # starved the trainer on 2026-09-17. Slice first, serialise second.
+        # See docs/DESIGN_DECISIONS.md.
+        max_rows = settings.embedding_table_max_rows
+        shown = min(vocab_size, max_rows)
         return {
             "vocab_size": vocab_size,
             "n_embd": n_embd,
-            "tokens": [tokenizer.decode([i]) for i in range(vocab_size)],
-            "embedding": weight.tolist(),
+            "tokens": [tokenizer.decode([i]) for i in range(shown)],
+            "embedding": weight[:shown].tolist(),
             "block_size": block_size,
-            "position_embedding": position_embedding,
+            "position_embedding": (
+                position_embedding[:max_rows] if position_embedding is not None else None
+            ),
+            # The UI needs to say "256 of 50,304", not silently show a prefix.
+            "returned_rows": shown,
+            "truncated": shown < vocab_size,
+            "position_truncated": (
+                position_embedding is not None and len(position_embedding) > max_rows
+            ),
         }
 
     return await asyncio.to_thread(_load_table)
@@ -1267,7 +1310,7 @@ async def diagnostics_start(run_id: int, req: DiagnosticsStartRequest):
                 {"prompt": req.prompt, "top_k": req.top_k, "max_prompt_tokens": req.max_prompt_tokens},
             )
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote diagnostics start failed: {exc}")
+            raise HTTPException(502, f"Remote diagnostics start failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         remote_session_id = result.get("diagnostic_session_id")
         if remote_session_id:
@@ -1408,7 +1451,7 @@ async def diagnostics_step(run_id: int, session_id: str, req: DiagnosticsStepReq
             body["node_window_offset"] = node_window_offset
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/step", body)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote diagnostics step failed: {exc}")
+            raise HTTPException(502, f"Remote diagnostics step failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         return result
 
@@ -1480,7 +1523,7 @@ async def diagnostics_peek(run_id: int, session_id: str, req: DiagnosticsStepReq
                 body["attention_full"] = attention_full
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/peek", body)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote diagnostics peek failed: {exc}")
+            raise HTTPException(502, f"Remote diagnostics peek failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         return result
 
@@ -1519,7 +1562,7 @@ async def diagnostics_get(run_id: int, session_id: str):
         try:
             result = await _proxy(db_run, "GET", f"/api/training/{{run_id}}/diagnostics/{session_id}")
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote diagnostics get failed: {exc}")
+            raise HTTPException(502, f"Remote diagnostics get failed: {_exc_text(exc)}")
         return result
 
     # Check run status
@@ -1658,7 +1701,7 @@ async def diagnostics_finalize(run_id: int, session_id: str, req: DiagnosticsSte
             body = {"attention_layer": attention_layer, "attention_head": attention_head, "qkv_detail": qkv_detail}
             result = await _proxy(db_run, "POST", f"/api/training/{{run_id}}/diagnostics/{session_id}/finalize", body)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Remote diagnostics finalize failed: {exc}")
+            raise HTTPException(502, f"Remote diagnostics finalize failed: {_exc_text(exc)}")
         await _touch_worker_for_run(db_run)
         # The trainer container persisted into its own EPHEMERAL storage —
         # mirror the payload it returns into the controller's durable

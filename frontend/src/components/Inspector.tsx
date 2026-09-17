@@ -704,6 +704,16 @@ function EmbeddingTable({
       <div style={{ fontSize: 14, color: "var(--accent)", marginBottom: 8 }}>
         Token Embedding Table — {table.vocab_size} tokens × {table.n_embd} dims (hover for full vector, double-click to open in a tab)
       </div>
+      {/* Say so when the table is a prefix. Silently showing the first N rows
+          of a 50,304-token vocab would read as "this model has 256 tokens". */}
+      {table.truncated && (
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8 }}>
+          Showing the first {table.returned_rows?.toLocaleString()} of{" "}
+          {table.vocab_size.toLocaleString()} tokens. The full table is ~
+          {Math.round((table.vocab_size * table.n_embd * 21) / 1e6).toLocaleString()} MB
+          of JSON, too large to send while training.
+        </div>
+      )}
       <div style={{ maxHeight: 400, overflowY: "auto" }}>
         <table style={{ borderCollapse: "collapse", fontSize: 13, fontFamily: "var(--font-mono)", width: "100%" }}>
           <thead>

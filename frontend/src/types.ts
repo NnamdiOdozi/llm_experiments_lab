@@ -174,9 +174,15 @@ export interface EmbeddingTableData {
   n_embd: number;
   tokens: string[];
   // embedding[i] is the trained vector for tokens[i] — full n_embd width,
-  // not windowed (transformer/moe only, small char-level vocabs). See
+  // but capped to settings.embedding_table_max_rows ROWS: nanoGPT's 50,304
+  // vocab would otherwise serialise to ~813MB of JSON. See
   // docs/DESIGN_DECISIONS.md.
   embedding: number[][];
+  // How many rows came back, and whether that is fewer than vocab_size.
+  // Present since 2026-09-17; older responses omit them.
+  returned_rows?: number;
+  truncated?: boolean;
+  position_truncated?: boolean;
   // Only present under pos_encoding="learned" — RoPE has no learned
   // position table (computed on the fly), so both are null in that case.
   block_size: number | null;

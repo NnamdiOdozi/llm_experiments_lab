@@ -4374,6 +4374,56 @@ unrelated comment change trips it. Better a false alarm than a missed one.
 **Rebuild with:** `scripts/build_push_trainer_gpu.sh` (or `..._cpu.sh`, or
 `build_push_all_trainers.sh`). Tags the short git SHA and `latest`.
 
+## §95: Embedding table was sized for a 65-token vocabulary (2026-09-17)
+
+`GET /architecture/embedding-table` returned the whole token embedding matrix
+as JSON. Written when every template had a char-level vocab (65 tokens, ~1MB),
+it was never rescoped when nanoGPT adopted the GPT-2 BPE tokenizer.
+
+Measured payloads:
+
+| Model | Token embedding | JSON | tolist+dumps |
+|---|---|---|---|
+| tiny transformer | 65 x 128 | ~1 MB | instant |
+| nanoGPT | 50,304 x 768 | **~813 MB** | ~12 s CPU |
+
+813MB cannot cross the tunnel inside any sane budget (it needs a sustained
+217 Mbit/s), so for nanoGPT this request could never succeed — a structural
+impossibility, not a flake.
+
+**Incident.** During run 287's first pause the Inspector's embedding node was
+opened; the UI fired four such requests. The trainer, already training a 124M
+model, was asked to build four 813MB blobs. Cheap `/status` and `/metrics`
+polls — normally ~200ms — began timing out within ~5s and stayed dead for
+about 2.5 minutes. The reconciler logged "RUNNING endpoint with dead tunnel"
+four times. Training itself survived and the elapsed clock stayed correct.
+
+The second pause was clean because diagnostics (`start`/`generate`/`peek`)
+were used instead — all 200, no embedding-table call. That contrast is the
+evidence for the causal chain; trainer-side memory/CPU figures were not
+available to prove it outright.
+
+**Fixes.**
+1. Slice to `settings.embedding_table_max_rows` (256) BEFORE `.tolist()` and
+   before the per-token `decode()` loop — both costs scale with vocab_size.
+   The response carries `returned_rows`/`truncated`/`position_truncated`, and
+   the Inspector says "showing the first 256 of 50,304" rather than silently
+   showing a prefix, which would read as "this model has 256 tokens".
+2. `_timeout_for()` replaces the hardcoded `timeout=30` in `_proxy()`. One
+   flat budget was both too long for a poll (a dead worker should surface in
+   seconds) and too short for control calls on a large model, where resume
+   loads a ~0.5GB checkpoint. Now: polls 10s, control 120s, artifacts 120s.
+   Note diagnostics `peek` on nanoGPT measured 6-15s, uncomfortably close to
+   the old 30s ceiling — the artifact budget is not theoretical.
+3. `_exc_text()` — httpx timeout exceptions have an empty `str()`, so
+   `f"Remote resume failed: {exc}"` rendered as a bare "Remote resume failed:"
+   in the UI: a red box telling the user nothing. Falls back to the class name.
+
+**Not fixed yet.** The banner still does not clear when polling recovers, so a
+red failure box can sit over a healthy run. Tracked in DEFERRED_WORK.md.
+
+Guarded by `tests/test_remote_budgets.py`.
+
 ## File Layout
 
 See `README.md` for project structure and setup instructions.

@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # Network
     http_timeout: int = 30
 
+    # --- Remote trainer call budgets -------------------------------------
+    # One flat 30s budget used to cover every proxied call. That is both too
+    # long for a status poll (a dead worker should surface in seconds) and too
+    # short for control calls on a 124M-param model, where resume has to load
+    # a ~0.5GB checkpoint. Split by what the call actually does.
+    remote_poll_timeout_seconds: int = 10       # status/metrics — fail fast
+    remote_control_timeout_seconds: int = 120   # start/pause/resume/prompt
+    remote_artifact_timeout_seconds: int = 120  # architecture/diagnostics payloads
+
+    # Rows returned by /architecture/embedding-table. Unbounded, this scales
+    # with vocab_size: nanoGPT's 50,304 x 768 table serialises to ~813MB of
+    # JSON (measured), which no timeout makes sensible and which starved the
+    # trainer on 2026-09-17. The UI cannot display 50k rows anyway.
+    embedding_table_max_rows: int = 256
+
     # Reproducibility
     random_seed: int = 1337
 
@@ -53,10 +68,12 @@ class Settings(BaseSettings):
     # Grounded chatbot / Nebius Token Factory
     nebius_key: str | None = None
     token_factory_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
-    # "Thinking-2507" doesn't exist on Token Factory (verified via GET /v1/models
-    # on 2026-07-10) — Qwen3-Next-80B-A3B-Thinking is the closest match that still
-    # has extended-reasoning mode, which is the property this chatbot needs.
-    token_factory_model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
+    # Token Factory's catalogue rotates and silently drops models: the previous
+    # two picks (Thinking-2507, then Qwen3-Next-80B-A3B-Thinking) both 404'd in
+    # turn. Verify against GET /v1/models before changing. Tool calling is the
+    # hard requirement (the chatbot drives ~5 tools); reasoning is secondary.
+    # Chosen 2026-09-17: tool calling verified live, 127 tok/s, 256K context.
+    token_factory_model: str = "nvidia/nemotron-3-super-120b-a12b"
     chatbot_log_tail_lines: int = 50
     chatbot_error_tail_lines: int = 10
     # Lifecycle events (LAUNCHED/PAUSE/RESUME/STOP/CANCELLED) are naturally
