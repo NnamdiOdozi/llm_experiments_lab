@@ -4419,10 +4419,20 @@ available to prove it outright.
    `f"Remote resume failed: {exc}"` rendered as a bare "Remote resume failed:"
    in the UI: a red box telling the user nothing. Falls back to the class name.
 
-**Not fixed yet.** The banner still does not clear when polling recovers, so a
-red failure box can sit over a healthy run. Tracked in DEFERRED_WORK.md.
+**4. Stale banner cleared on recovery.** `controlError` was only ever reset by
+clicking another control, so a red "Remote resume failed:" box sat over a
+healthy advancing run. Clearing it on any successful poll would be wrong — a
+failed pause or stop also leaves the run running, so "running" does not
+disprove them and the message is still true. `isControlErrorDisproved(action,
+status)` (frontend/src/utils/controlBanner.ts) clears only when the observed
+status contradicts the action that failed: resume/running, pause/paused,
+stop/terminal. Kept as a pure function so the rule is testable without
+mounting App; the poll callback reads the action through a ref, because it is
+useCallback([runId]) and adding the state to its deps would recreate the
+polling interval on every change.
 
-Guarded by `tests/test_remote_budgets.py`.
+Guarded by `tests/test_remote_budgets.py` and
+`frontend/src/utils/controlBanner.test.ts`.
 
 ## File Layout
 

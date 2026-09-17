@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, CSSProperties } from "react";
 import { ExperimentConfig, MetricRow, RunStatus, ArchitectureNode, DiagnosticSnapshot, TERMINAL_RUN_STATUSES } from "./types";
+import { isControlErrorDisproved } from "./utils/controlBanner";
 import PresetPicker from "./components/PresetPicker";
 import ExperimentBrowser from "./components/ExperimentBrowser";
 import HardwareSpecs from "./components/HardwareSpecs";
@@ -130,6 +131,20 @@ export default function App() {
   const [pollError, setPollError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
+  // Which action produced controlError. A stale banner is cleared only when
+  // the run's OBSERVED state contradicts the failed action — a failed resume
+  // is disproved by the run running, but a failed pause is NOT (the run keeps
+  // running either way, so that message is still true). Clearing on any
+  // successful poll would hide real failures. See docs/DESIGN_DECISIONS.md.
+  const [controlErrorAction, setControlErrorAction] =
+    useState<"pause" | "resume" | "stop" | null>(null);
+  // Mirror of the above for the poll callback, which is useCallback([runId]):
+  // reading the state there would capture a stale value, and adding it to the
+  // deps would tear down and recreate the polling interval on every change.
+  const controlErrorActionRef = useRef<"pause" | "resume" | "stop" | null>(null);
+  useEffect(() => {
+    controlErrorActionRef.current = controlErrorAction;
+  }, [controlErrorAction]);
   // Backend rejects max_new_tokens > block_size (see
   // backend/api/experiments.py::update_config) — surfaced here since the
   // debounced PATCH in handleConfigChange previously failed silently
@@ -426,6 +441,17 @@ export default function App() {
       setDisconnected(false);
       setLastPollSuccess(Date.now());
       setPollError(null);
+      // Drop a control-failure banner the run has since disproved. Run 287,
+      // 2026-09-17: a resume timed out while the trainer was busy, the resume
+      // actually took effect, and the red "Remote resume failed:" box then sat
+      // over a healthy advancing run indefinitely — controlError was only ever
+      // reset by clicking another control. Only clear when the observed status
+      // contradicts the failed action; a failed pause/stop is NOT disproved by
+      // the run still running. See docs/DESIGN_DECISIONS.md.
+      if (isControlErrorDisproved(controlErrorActionRef.current, status.status)) {
+        setControlError(null);
+        setControlErrorAction(null);
+      }
       if (status.status === "completed" || status.status === "failed" || status.status === "cancelled") {
         if (pollRef.current) clearInterval(pollRef.current);
       }
@@ -526,10 +552,12 @@ export default function App() {
     if (runId == null) return;
     setLoading(true);
     setControlError(null);
+    setControlErrorAction(null);
     try {
       await pauseTraining(runId);
     } catch (err) {
       setControlError(err instanceof Error ? err.message : "Pause failed");
+      setControlErrorAction("pause");
     }
     setLoading(false);
   }
@@ -538,10 +566,12 @@ export default function App() {
     if (runId == null) return;
     setLoading(true);
     setControlError(null);
+    setControlErrorAction(null);
     try {
       await resumeTraining(runId);
     } catch (err) {
       setControlError(err instanceof Error ? err.message : "Resume failed");
+      setControlErrorAction("resume");
     }
     setLoading(false);
   }
@@ -565,6 +595,7 @@ export default function App() {
     if (runId == null) return;
     setLoading(true);
     setControlError(null);
+    setControlErrorAction(null);
     try {
       await stopTraining(runId);
       resetAfterStop();
@@ -582,6 +613,7 @@ export default function App() {
         resetAfterStop();
       } else {
         setControlError(err instanceof Error ? err.message : "Stop failed");
+      setControlErrorAction("stop");
       }
     }
     setLoading(false);

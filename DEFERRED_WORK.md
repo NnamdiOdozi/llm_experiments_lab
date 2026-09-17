@@ -66,19 +66,3 @@ decision on tokenizer stats. Not small.
 **Status:** OPEN. Needs a product decision first, not code.
 
 ---
-
-## 2026-09-17 — Error banner does not clear when a run recovers
-
-**Source:** run 287 incident (see docs/DESIGN_DECISIONS.md §95).
-
-**What was scoped:** `controlError` in `frontend/src/App.tsx` is only reset
-when the user clicks pause/resume/stop again (lines ~528/540/567). Nothing
-clears it when polling starts succeeding, so a red "Remote resume failed"
-box sits over a run that is training normally. Proposed: clear it on the
-first successful status poll after a failure.
-
-Also scoped and not done: a concurrency guard so only one heavy artifact
-request runs at a time (the UI fired four embedding-table requests at once).
-Less urgent now the payload is capped at 256 rows.
-
-**Status:** OPEN. Root cause fixed; this is the cosmetic/trust half.
