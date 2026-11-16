@@ -20,6 +20,22 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 - **Server metrics and logs, live** — CPU/GPU utilization, memory, and step-by-step training events, right alongside the model code.
 - **Cost-conscious and environmentally friendly by design** — runs locally or on Nebius serverless endpoints, with idle auto-stop so a GPU never sits running (and burning power) for nobody. Concurrent runs on the same device type share one already-warm endpoint instead of each spinning up its own machine, so idle compute isn't wasted and no one pays for — or powers — a second GPU that wasn't actually needed.
 
+## Chatbot model and source revision
+
+The active local development checkout, `nanogpt-export-and-panel-fixes`, uses
+Nebius Token Factory model **`nvidia/nemotron-3-super-120b-a12b`**. Its
+`config/settings.py` sets `token_factory_model`; both the tool-calling and
+streamed response requests in `backend/chatbot/client.py` read that setting.
+This hosted assistant is separate from the small models trained inside the lab.
+Private deployment settings can override the configured default.
+
+GitHub's older `main` source revision still contains the previous Qwen default;
+this documentation clarification does not change that executable configuration.
+Check the branch and settings of the deployment being run. The Qwen name in the
+client's July comment describes a historical streaming/tool-calling test, not
+an independent model selection inside the client. The local Nemotron default
+was introduced on 17 September 2026.
+
 ## Screenshots
 
 <img src="evidence/nebius-endpoint/React_landing_page.png" width="500" alt="Landing page — preset picker">
