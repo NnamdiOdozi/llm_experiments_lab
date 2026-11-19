@@ -526,6 +526,12 @@ export default function App() {
     awaitingStartRef.current = true;
     setLoading(true);
     setStartError(null);
+    // A failed control on the PREVIOUS run says nothing about the new one.
+    // 2026-11-19: Stop clicked while the backend restarted -> Vite proxy 500 ->
+    // "stop" banner survived into run 290, because isControlErrorDisproved
+    // only clears it on a terminal status, and the new run is running.
+    setControlError(null);
+    setControlErrorAction(null);
     try {
       // Flush any pending config debounce before starting
       if (configTimerRef.current) {

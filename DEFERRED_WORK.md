@@ -66,3 +66,29 @@ decision on tokenizer stats. Not small.
 **Status:** OPEN. Needs a product decision first, not code.
 
 ---
+
+## 2026-11-19 — Prompt Model on the remote GPU fails: "Failed to find C compiler"
+
+**Source:** user report, run 289 (nanoGPT, GPT-2 BPE, paused at step 191, H100 serverless).
+
+Triton needs a C compiler to build its launcher, and `Dockerfile.trainer-gpu`
+uses the `nvidia/cuda:13.1.1-runtime` base with no `gcc`. **Not caused by the
+nanogpt-export-and-panel-fixes branch**: generation/diagnostics code and the
+GPU image recipe are unchanged since 2026-10-15 and 2026-08-06 respectively, and
+nothing in the repo calls `torch.compile`. Not version drift either: the GPU
+lock has held torch 2.13.0+cu130 / triton 3.7.1 since it was created (2026-07-12).
+
+**Tokenizer-dependent.** Run 289 (GPT-2 BPE, vocab 50,304, 123.6M params)
+failed; run 290 (Character, vocab 65, 85.0M params), same template and image,
+generated fine after a pause. Not yet repeated on a second BPE run to confirm.
+
+**Unknown:** which call reaches Triton. Needs the remote traceback before
+choosing between (a) adding `gcc libc6-dev` to the image or (b) removing the
+trigger. **Blocker:** `GET /api/nebius/workers/cuda/logs` returns 500 —
+`nebius ai endpoint logs <id>` answers `NotFound` even for the live endpoint
+(the CLI syntax is correct per `--help`). Try the Nebius web console's endpoint
+logs view instead.
+
+**Status:** OPEN. Any fix needs an image rebuild.
+
+---
