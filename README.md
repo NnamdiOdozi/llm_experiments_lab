@@ -20,6 +20,22 @@ No code, no Python environment, no cloud account wrangling — pick a preset, ad
 - **Server metrics and logs, live** — CPU/GPU utilization, memory, and step-by-step training events, right alongside the model code.
 - **Cost-conscious and environmentally friendly by design** — runs locally or on Nebius serverless endpoints, with idle auto-stop so a GPU never sits running (and burning power) for nobody. Concurrent runs on the same device type share one already-warm endpoint instead of each spinning up its own machine, so idle compute isn't wasted and no one pays for — or powers — a second GPU that wasn't actually needed.
 
+## Chatbot model
+
+The grounded assistant uses Nebius Token Factory model
+`nvidia/nemotron-3-super-120b-a12b`, selected by `token_factory_model` in
+[config/settings.py](config/settings.py). Both the tool-calling and streamed
+response requests in [backend/chatbot/client.py](backend/chatbot/client.py)
+read that setting. This hosted assistant is separate from the small models
+trained inside the lab. Private deployment settings can override the default.
+
+The Qwen model named in the client's July tool-calling comment is historical:
+it explains why tool selection is performed without streaming before the final
+streamed response. It does not select the current model. The Nemotron default
+was added on 17 September 2026 on `nanogpt-export-and-panel-fixes`; GitHub's
+older `main` revision can still show the previous Qwen default until that branch
+is reconciled. Check the source revision being run rather than that comment.
+
 ## Screenshots
 
 <img src="evidence/nebius-endpoint/React_landing_page.png" width="500" alt="Landing page — preset picker">
@@ -38,12 +54,12 @@ You select from preset experiments (tiny transformers, MoE variant, RNNs), optio
 
 **Available presets:**
 
-| Preset | Architecture | Dataset | Purpose |
-|--------|-------------|---------|---------|
-| Baseline Tiny Transformer | 4-layer decoder-only | Tiny Shakespeare | Default starting point |
-| Mixture of Experts (DeepSeek-style) | MoE transformer | Tiny Shakespeare | Sparse expert routing vs dense baseline |
-| High Learning Rate | Same as baseline + 10x LR | Tiny Shakespeare | Observe training instability |
-| Baseline CharRNN (LSTM) | 2-layer LSTM | Dinosaur names | RNN vs Transformer comparison |
+| Preset                              | Architecture              | Dataset          | Purpose                                 |
+| ----------------------------------- | ------------------------- | ---------------- | --------------------------------------- |
+| Baseline Tiny Transformer           | 4-layer decoder-only      | Tiny Shakespeare | Default starting point                  |
+| Mixture of Experts (DeepSeek-style) | MoE transformer           | Tiny Shakespeare | Sparse expert routing vs dense baseline |
+| High Learning Rate                  | Same as baseline + 10x LR | Tiny Shakespeare | Observe training instability            |
+| Baseline CharRNN (LSTM)             | 2-layer LSTM              | Dinosaur names   | RNN vs Transformer comparison           |
 
 ## Architecture
 
@@ -51,11 +67,11 @@ You select from preset experiments (tiny transformers, MoE variant, RNNs), optio
 - **Frontend:** React + TypeScript + Vite. Recharts for loss visualization. Polls backend every 2s during training.
 - **Database:** SQLite file (`lab.db`, auto-created on first run). Stores experiments, training runs, and metrics.
 
-| Layer | What it is | Where it runs |
-|-------|-----------|----------------|
-| Frontend | React + TypeScript + Vite UI — config panel, live charts, Inspector, chatbot | Your browser (`npm run dev`, port 5173) |
-| Backend | FastAPI + SQLite — the API/orchestrator: experiments, runs, chatbot, diagnostics | Your machine (`uv run uvicorn`, port 8000) |
-| Trainer | The actual PyTorch training loop, one OS subprocess per run | Either **local** (in-process on your machine, same codebase as the backend) or **remote** (proxied to a Nebius serverless CPU/GPU endpoint — see [Hardware Configuration](#hardware-configuration)) |
+| Layer    | What it is                                                                        | Where it runs                                                                                                                                                                                                   |
+| -------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Frontend | React + TypeScript + Vite UI — config panel, live charts, Inspector, chatbot     | Your browser (`npm run dev`, port 5173)                                                                                                                                                                       |
+| Backend  | FastAPI + SQLite — the API/orchestrator: experiments, runs, chatbot, diagnostics | Your machine (`uv run uvicorn`, port 8000)                                                                                                                                                                    |
+| Trainer  | The actual PyTorch training loop, one OS subprocess per run                       | Either **local** (in-process on your machine, same codebase as the backend) or **remote** (proxied to a Nebius serverless CPU/GPU endpoint — see [Hardware Configuration](#hardware-configuration)) |
 
 ## Hardware Configuration
 
@@ -63,10 +79,10 @@ Training runs locally (in-process, on your own machine) by default. Selecting
 "Serverless (Nebius)" as the backend instead offloads the run to a Nebius AI
 Endpoint on this hardware (see `config/settings.py` for the source of truth):
 
-| Device | Platform | Preset | Notes |
-|--------|----------|--------|-------|
-| CPU | `cpu-d3` | `16vcpu-64gb` | Handles multiple concurrent CPU runs — see [Current Status](#current-status) |
-| GPU | `gpu-l40s-a` (NVIDIA L40S) | `1gpu-8vcpu-32gb` | 1x L40S, 8 vCPU, 32GB RAM |
+| Device | Platform                     | Preset              | Notes                                                                        |
+| ------ | ---------------------------- | ------------------- | ---------------------------------------------------------------------------- |
+| CPU    | `cpu-d3`                   | `16vcpu-64gb`     | Handles multiple concurrent CPU runs — see [Current Status](#current-status) |
+| GPU    | `gpu-l40s-a` (NVIDIA L40S) | `1gpu-8vcpu-32gb` | 1x L40S, 8 vCPU, 32GB RAM                                                    |
 
 Both device types use a **single shared endpoint** (not one per run) — see
 [Current Status](#current-status) below and `docs/DESIGN_DECISIONS.md` §63 for
@@ -75,14 +91,14 @@ why, and the concurrency caps.
 ## Docker Images
 
 Two images, both built from this repo — the backend/frontend run directly via
-`uv`/`npm` (see [Setup & Run](#setup--run)), not as a Docker image; only the
+`uv`/`npm` (see [Setup &amp; Run](#setup--run)), not as a Docker image; only the
 trainer, which is what actually gets deployed to a Nebius endpoint, is
 containerized:
 
-| Image | Dockerfile | Purpose |
-|-------|-----------|---------|
+| Image       | Dockerfile                 | Purpose                                                          |
+| ----------- | -------------------------- | ---------------------------------------------------------------- |
 | CPU trainer | `Dockerfile.trainer-cpu` | Deployed to the Nebius CPU endpoint — CPU-only PyTorch, no CUDA |
-| GPU trainer | `Dockerfile.trainer-gpu` | Deployed to the Nebius GPU endpoint — CUDA PyTorch |
+| GPU trainer | `Dockerfile.trainer-gpu` | Deployed to the Nebius GPU endpoint — CUDA PyTorch              |
 
 Build/push scripts: `scripts/build_push_trainer_cpu.sh`, `scripts/build_push_trainer_gpu.sh`.
 Both images are the same codebase as the backend (`backend/`, `config/`) —
@@ -142,7 +158,7 @@ GPU/CPU endpoints instead:
 4. In the app, pick "Serverless (Nebius)" as the backend before clicking
    Start. The app creates/reuses a Nebius AI Endpoint automatically — first
    use takes a few minutes to cold-start (see
-   [Approximate Runtime & Cost](#approximate-runtime--cost) below).
+   [Approximate Runtime &amp; Cost](#approximate-runtime--cost) below).
 
 ## How to Use
 
@@ -168,12 +184,12 @@ The dominant cost is Nebius **GPU** time, roughly **$5/hour** for the L40S
 preset above (CPU-only runs cost nothing beyond the CPU endpoint's own, much
 lower rate). Rough breakdown for a single GPU session:
 
-| Phase | Time |
-|-------|------|
-| Endpoint cold start (first use only — reused after) | ~5 min |
-| A single training run (the presets above are small/fast) | a few minutes |
-| Pausing to prompt/experiment with the model | up to ~30 min if you linger |
-| **Total for a full session (start, train, review, play with prompts)** | **~1 hour, ~$5** |
+| Phase                                                                        | Time                        |
+| ---------------------------------------------------------------------------- | --------------------------- |
+| Endpoint cold start (first use only — reused after)                         | ~5 min                      |
+| A single training run (the presets above are small/fast)                     | a few minutes               |
+| Pausing to prompt/experiment with the model                                  | up to ~30 min if you linger |
+| **Total for a full session (start, train, review, play with prompts)** | **~1 hour, ~$5**      |
 
 Once an endpoint is warm, starting additional runs against it is near-instant
 (no repeat cold start) — see [Hardware Configuration](#hardware-configuration)
@@ -181,18 +197,18 @@ and `docs/DESIGN_DECISIONS.md` §63 for the shared-endpoint model.
 
 ## API Endpoints
 
-| Method | Path | What |
-|--------|------|------|
-| GET | `/api/health` | Health check |
-| GET | `/api/experiments` | List all experiments |
-| POST | `/api/experiments/from-preset/{key}` | Create from preset |
-| GET | `/api/experiments/presets` | List available presets |
-| POST | `/api/training/start` | Start training run |
-| POST | `/api/training/{id}/pause` | Pause run |
-| POST | `/api/training/{id}/resume` | Resume run |
-| POST | `/api/training/{id}/prompt` | Prompt paused model |
-| GET | `/api/code/{id}/export.py` | Download .py script |
-| GET | `/api/code/{id}/export.ipynb` | Download notebook |
+| Method | Path                                   | What                   |
+| ------ | -------------------------------------- | ---------------------- |
+| GET    | `/api/health`                        | Health check           |
+| GET    | `/api/experiments`                   | List all experiments   |
+| POST   | `/api/experiments/from-preset/{key}` | Create from preset     |
+| GET    | `/api/experiments/presets`           | List available presets |
+| POST   | `/api/training/start`                | Start training run     |
+| POST   | `/api/training/{id}/pause`           | Pause run              |
+| POST   | `/api/training/{id}/resume`          | Resume run             |
+| POST   | `/api/training/{id}/prompt`          | Prompt paused model    |
+| GET    | `/api/code/{id}/export.py`           | Download .py script    |
+| GET    | `/api/code/{id}/export.ipynb`        | Download notebook      |
 
 ## Project Structure
 
@@ -226,6 +242,14 @@ Nebius serverless endpoint (device/backend selectable per run; see
 and the `gpu_yield_*` settings in `config/settings.py`). No auth/multi-user
 support yet.
 
+**Known bug: prompting nanoGPT with the GPT-2 BPE tokenizer on a Nebius GPU.**
+Training works, but pressing Prompt Model on a paused run fails with
+"Failed to find C compiler". This is a known, open bug in the remote GPU
+image, not a sign that the rest of the lab is broken. The same nanoGPT preset
+with the Character tokenizer trains and prompts correctly. Until it is fixed,
+use the Character tokenizer if you want to prompt nanoGPT on the remote GPU.
+Details and the investigation so far are in `DEFERRED_WORK.md`.
+
 **Nebius serverless capacity is fixed, not elastic.** There is one shared
 endpoint per device type (`worker-cpu`, `worker-gpu`) — every serverless run
 for that device gets proxied to the same container, up to
@@ -244,6 +268,5 @@ tiered-preset-selector idea if this needs to become elastic later.
 [What If You Could Pause a Language Model While It Is Learning?](https://nodozi.substack.com/p/what-if-you-could-pause-a-language) — the motivation and design thinking behind this project, in more depth.
 
 ## License
-
 
 [MIT](LICENSE)
